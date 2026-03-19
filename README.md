@@ -5,6 +5,7 @@ A collection of utility tools for CAD operations, optimized for use with Blender
 ## Features
 
 - **Extrude Along Path**: Extrude geometry along a custom path curve with full control and flexibility
+- **Place Profile**: Store a profile shape and place/orient it onto target edges, with live flip and anchor controls in the Redo Panel
 - **Mirror Along Plane**: Create mirrored copies of geometry across a plane with precise alignment
 - More tools coming soon...
 

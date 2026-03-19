@@ -52,6 +52,30 @@ class RCAD_PT_ExtrudeAlongPath(bpy.types.Panel):
         row_extrude.operator("mesh.eap_extrude")
 
 
+class RCAD_PT_PlaceProfile(bpy.types.Panel):
+    bl_label = "Place Profile"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "rCAD"
+    bl_parent_id = "RCAD_PT_Main"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator_context = 'EXEC_DEFAULT'
+        scene = context.scene
+        box = layout.box()
+
+        row = box.row(align=True)
+        row.label(text="Profile:")
+        row.operator("object.store_profile_info_edit", text="Store")
+
+        box.prop(scene, "profile_path_mode", text="Custom Normal")
+
+        row = box.row(align=True)
+        row.operator("object.place_profile_on_edges_edit", text="Place")
+
+
 class RCAD_PT_MirrorAlongPlane(bpy.types.Panel):
     bl_label = "Mirror Across Plane"
     bl_space_type = "VIEW_3D"
