@@ -70,6 +70,8 @@ class MESH_OT_CoolBool(bpy.types.Operator):
     intersect_with_cutter: bpy.props.BoolProperty(name="Intersect with Cutter", default=False)
     merge_intersections: bpy.props.BoolProperty(name="Merge Intersections", default=False)
     merge_subtract_results: bpy.props.BoolProperty(name="Merge Results", default=False)
+    limited_dissolve: bpy.props.BoolProperty(name="Limited Dissolve", default=True)
+    dissolve_per_iteration: bpy.props.BoolProperty(name="Per Iteration", default=True)
 
     def draw(self, context):
         layout = self.layout
@@ -81,6 +83,10 @@ class MESH_OT_CoolBool(bpy.types.Operator):
             row.prop(self, "intersect_with_cutter")
             if self.intersect_with_cutter:
                 row.prop(self, "merge_intersections")
+        row = layout.row()
+        row.prop(self, "limited_dissolve")
+        if self.limited_dissolve:
+            row.prop(self, "dissolve_per_iteration")
 
     def execute(self, context):
         wm = context.window_manager
@@ -152,12 +158,15 @@ class MESH_OT_CoolBool(bpy.types.Operator):
                 mod.operation = op
                 mod.object = operand
                 mod.solver = solver_mode
+                bpy.ops.object.select_all(action='DESELECT')
                 context.view_layer.objects.active = main
+                main.select_set(True)
                 bpy.ops.object.modifier_apply(modifier=mod.name)
-                bpy.ops.object.mode_set(mode='EDIT')
-                bpy.ops.mesh.select_all(action='SELECT')
-                bpy.ops.mesh.dissolve_limited(angle_limit=0.0872665)
-                bpy.ops.object.mode_set(mode='OBJECT')
+                if self.limited_dissolve and self.dissolve_per_iteration:
+                    bpy.ops.object.mode_set(mode='EDIT')
+                    bpy.ops.mesh.select_all(action='SELECT')
+                    bpy.ops.mesh.dissolve_limited(angle_limit=0.0872665)
+                    bpy.ops.object.mode_set(mode='OBJECT')
 
             if self.operation_mode == 'UNION':
                 main_obj = cutter_obj
@@ -211,6 +220,17 @@ class MESH_OT_CoolBool(bpy.types.Operator):
                     final_objects.append(result_obj)
 
             if context.mode != 'OBJECT': bpy.ops.object.mode_set(mode='OBJECT')
+
+            # End-of-all dissolve (when per_iteration is off)
+            if self.limited_dissolve and not self.dissolve_per_iteration:
+                valid_finals = [o for o in final_objects if o.name in bpy.data.objects]
+                for o in valid_finals:
+                    context.view_layer.objects.active = o
+                    bpy.ops.object.mode_set(mode='EDIT')
+                    bpy.ops.mesh.select_all(action='SELECT')
+                    bpy.ops.mesh.dissolve_limited(angle_limit=0.0872665)
+                    bpy.ops.object.mode_set(mode='OBJECT')
+
             bpy.ops.object.select_all(action='DESELECT')
             for obj in objects_to_delete:
                 try: bpy.data.objects.remove(obj, do_unlink=True)
