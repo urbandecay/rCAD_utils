@@ -250,6 +250,13 @@ class MESH_OT_super_fuse_square(bpy.types.Operator):
                     f.hide = True
             bmesh.update_edit_mesh(me)
 
+            # Apply limited dissolve if enabled
+            props = getattr(context.scene, "super_fuse", None)
+            if props and getattr(props, "limited_dissolve", False):
+                bpy.ops.mesh.select_all(action='SELECT')
+                bpy.ops.mesh.dissolve_limited(angle_limit=0.0872665)
+                bpy.ops.mesh.select_all(action='DESELECT')
+
             # Restore view
             if space and orig_rot:
                 space.region_3d.view_rotation = orig_rot

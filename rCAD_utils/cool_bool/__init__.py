@@ -67,15 +67,17 @@ class MESH_OT_CoolBool(bpy.types.Operator):
         default='UNION',
     )
     keep_cutter: bpy.props.BoolProperty(name="Keep Cutter", default=False)
-    multi_intersect: bpy.props.BoolProperty(name="Multi-Intersect", default=False)
+    intersect_with_cutter: bpy.props.BoolProperty(name="Intersect with Cutter", default=False)
     merge_intersections: bpy.props.BoolProperty(name="Merge Intersections", default=False)
 
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "keep_cutter")
         if self.operation_mode == 'INTERSECT':
-            layout.prop(self, "multi_intersect")
-            layout.prop(self, "merge_intersections")
+            row = layout.row()
+            row.prop(self, "intersect_with_cutter")
+            if self.intersect_with_cutter:
+                row.prop(self, "merge_intersections")
 
     def execute(self, context):
         wm = context.window_manager
@@ -169,15 +171,7 @@ class MESH_OT_CoolBool(bpy.types.Operator):
                 else: objects_to_delete.append(cutter_obj)
 
             elif self.operation_mode == 'INTERSECT':
-                if self.multi_intersect:
-                    all_objects = [cutter_obj] + target_objects
-                    result_obj = all_objects[0]
-                    for i in range(1, len(all_objects)):
-                        next_obj = all_objects[i]
-                        apply_bool_and_clean(result_obj, next_obj, 'INTERSECT')
-                        objects_to_delete.append(next_obj)
-                    final_objects.append(result_obj)
-                else:
+                if self.intersect_with_cutter:
                     intersection_results = []
                     for t_obj in target_objects:
                         apply_bool_and_clean(t_obj, cutter_obj, 'INTERSECT')
@@ -186,7 +180,6 @@ class MESH_OT_CoolBool(bpy.types.Operator):
                         final_objects.append(cutter_obj)
                     else:
                         objects_to_delete.append(cutter_obj)
-
                     if self.merge_intersections and len(intersection_results) > 1:
                         merged = intersection_results[0]
                         for r_obj in intersection_results[1:]:
@@ -195,6 +188,14 @@ class MESH_OT_CoolBool(bpy.types.Operator):
                         final_objects.append(merged)
                     else:
                         final_objects.extend(intersection_results)
+                else:
+                    all_objects = [cutter_obj] + target_objects
+                    result_obj = all_objects[0]
+                    for i in range(1, len(all_objects)):
+                        next_obj = all_objects[i]
+                        apply_bool_and_clean(result_obj, next_obj, 'INTERSECT')
+                        objects_to_delete.append(next_obj)
+                    final_objects.append(result_obj)
 
             if context.mode != 'OBJECT': bpy.ops.object.mode_set(mode='OBJECT')
             bpy.ops.object.select_all(action='DESELECT')

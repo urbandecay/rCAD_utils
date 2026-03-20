@@ -45,6 +45,11 @@ class FuseGeometryProps(PropertyGroup):
         description="Enable Face-on-Face weld: split nearby edges of selected target face(s) and weld the overlay polygon/face onto them",
         default=False,
     )
+    limited_dissolve: BoolProperty(
+        name="Limited Dissolve",
+        description="After face weld, remove unnecessary edges while preserving shape",
+        default=False,
+    )
 
 
 class OSC_PT_fuse_geometry(Panel):
@@ -79,6 +84,8 @@ class OSC_PT_fuse_geometry(Panel):
         col.prop(props, "x", text="X", toggle=True)
         col.prop(props, "square", text="■", toggle=True)
 
+        col.separator()
+        col.prop(props, "limited_dissolve", text="Limited Dissolve", toggle=True)
         col.separator()
         col.operator("osc.super_fuse_execute", text="Fuse", icon='AUTOMERGE_ON')
 
