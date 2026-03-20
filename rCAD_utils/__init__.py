@@ -17,6 +17,8 @@ from .place_profile import (
     OBJECT_OT_store_profile_info_edit,
     OBJECT_OT_place_profile_on_edges_edit,
 )
+from .cool_bool import MESH_OT_CoolBool
+from .mesh_tiler import MESH_OT_MeshTiler
 from .mirror_along_plane import (
     MESH_OT_store_plane_vertices,
     MESH_OT_point_reflection,
@@ -32,6 +34,10 @@ classes = [
     # Place Profile operators
     OBJECT_OT_store_profile_info_edit,
     OBJECT_OT_place_profile_on_edges_edit,
+    # Cool Bool operator
+    MESH_OT_CoolBool,
+    # Mesh Tiler operator
+    MESH_OT_MeshTiler,
     # Mirror Across Plane operators
     MESH_OT_store_plane_vertices,
     MESH_OT_point_reflection,
@@ -39,6 +45,8 @@ classes = [
     panel.RCAD_PT_Main,
     panel.RCAD_PT_ExtrudeAlongPath,
     panel.RCAD_PT_PlaceProfile,
+    panel.RCAD_PT_CoolBool,
+    panel.RCAD_PT_MeshTiler,
     panel.RCAD_PT_MirrorAlongPlane,
 ]
 
@@ -48,6 +56,12 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.profile_path_mode = BoolProperty(name="Path Mode", default=False)
+    bpy.types.Scene.cool_bool_keep_cutter = bpy.props.BoolProperty(name="Keep Cutter", default=False)
+    bpy.types.Scene.cool_bool_solver = bpy.props.EnumProperty(
+        name="Solver",
+        items=[('FLOAT', "Fast", ""), ('EXACT', "Exact", ""), ('MANIFOLD', "Manifold", "")],
+        default='EXACT'
+    )
 
 
 def unregister():
@@ -57,6 +71,10 @@ def unregister():
     VertexStorage._instance = None
     if hasattr(bpy.types.Scene, "profile_path_mode"):
         del bpy.types.Scene.profile_path_mode
+    if hasattr(bpy.types.Scene, "cool_bool_keep_cutter"):
+        del bpy.types.Scene.cool_bool_keep_cutter
+    if hasattr(bpy.types.Scene, "cool_bool_solver"):
+        del bpy.types.Scene.cool_bool_solver
 
 
 if __name__ == "__main__":

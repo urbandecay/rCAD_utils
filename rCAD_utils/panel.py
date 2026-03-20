@@ -76,6 +76,44 @@ class RCAD_PT_PlaceProfile(bpy.types.Panel):
         row.operator("object.place_profile_on_edges_edit", text="Place")
 
 
+class RCAD_PT_CoolBool(bpy.types.Panel):
+    bl_label = "Cool Bool"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "rCAD"
+    bl_parent_id = "RCAD_PT_Main"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        box = layout.box()
+
+        box.prop(scene, "cool_bool_solver", text="")
+
+        col = box.column(align=True)
+        row = col.row(align=True)
+        row.operator("mesh.cool_bool", text="Union").operation_mode = 'UNION'
+        row.operator("mesh.cool_bool", text="Subtract").operation_mode = 'SUBTRACT'
+        row.operator("mesh.cool_bool", text="Intersect").operation_mode = 'INTERSECT'
+        col.separator()
+        col.prop(scene, "cool_bool_keep_cutter", text="Keep Cutter")
+
+
+class RCAD_PT_MeshTiler(bpy.types.Panel):
+    bl_label = "Mesh Tiler"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "rCAD"
+    bl_parent_id = "RCAD_PT_Main"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        box = layout.box()
+        box.operator("mesh.mesh_tiler", text="Tile")
+
+
 class RCAD_PT_MirrorAlongPlane(bpy.types.Panel):
     bl_label = "Mirror Across Plane"
     bl_space_type = "VIEW_3D"
