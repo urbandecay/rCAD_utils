@@ -56,13 +56,11 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.profile_path_mode = BoolProperty(name="Path Mode", default=False)
-    bpy.types.Scene.cool_bool_keep_cutter = bpy.props.BoolProperty(name="Keep Cutter", default=False)
     bpy.types.Scene.cool_bool_solver = bpy.props.EnumProperty(
         name="Solver",
         items=[('FLOAT', "Fast", ""), ('EXACT', "Exact", ""), ('MANIFOLD', "Manifold", "")],
         default='EXACT'
     )
-    bpy.types.Scene.cool_bool_multi_intersect = bpy.props.BoolProperty(name="Multi-Intersect", default=False)
 
 
 def unregister():
@@ -72,12 +70,8 @@ def unregister():
     VertexStorage._instance = None
     if hasattr(bpy.types.Scene, "profile_path_mode"):
         del bpy.types.Scene.profile_path_mode
-    if hasattr(bpy.types.Scene, "cool_bool_keep_cutter"):
-        del bpy.types.Scene.cool_bool_keep_cutter
     if hasattr(bpy.types.Scene, "cool_bool_solver"):
         del bpy.types.Scene.cool_bool_solver
-    if hasattr(bpy.types.Scene, "cool_bool_multi_intersect"):
-        del bpy.types.Scene.cool_bool_multi_intersect
 
 
 if __name__ == "__main__":
