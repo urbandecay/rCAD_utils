@@ -19,6 +19,7 @@ from .place_profile import (
 )
 from .cool_bool import MESH_OT_CoolBool
 from .mesh_tiler import MESH_OT_MeshTiler
+from .mesh_tiler.preview import MESH_OT_MeshTilerPreview
 from . import weld_tools
 from .mirror_along_plane import (
     MESH_OT_store_plane_vertices,
@@ -37,8 +38,9 @@ classes = [
     OBJECT_OT_place_profile_on_edges_edit,
     # Cool Bool operator
     MESH_OT_CoolBool,
-    # Mesh Tiler operator
+    # Mesh Tiler operators
     MESH_OT_MeshTiler,
+    MESH_OT_MeshTilerPreview,
     # Mirror Across Plane operators
     MESH_OT_store_plane_vertices,
     MESH_OT_point_reflection,

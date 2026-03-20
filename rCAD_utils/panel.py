@@ -110,7 +110,9 @@ class RCAD_PT_MeshTiler(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         box = layout.box()
-        box.operator("mesh.mesh_tiler", text="Tile")
+        row = box.row(align=True)
+        row.operator("mesh.mesh_tiler_preview", text="Preview")
+        row.operator("mesh.mesh_tiler", text="Tile")
 
 
 class RCAD_PT_MirrorAlongPlane(bpy.types.Panel):
