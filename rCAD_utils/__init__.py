@@ -19,6 +19,7 @@ from .place_profile import (
 )
 from .cool_bool import MESH_OT_CoolBool
 from .mesh_tiler import MESH_OT_MeshTiler
+from . import weld_tools
 from .mirror_along_plane import (
     MESH_OT_store_plane_vertices,
     MESH_OT_point_reflection,
@@ -55,6 +56,7 @@ def register():
     eap_options.register_options()
     for cls in classes:
         bpy.utils.register_class(cls)
+    weld_tools.register()
     bpy.types.Scene.profile_path_mode = BoolProperty(name="Path Mode", default=False)
     bpy.types.Scene.cool_bool_solver = bpy.props.EnumProperty(
         name="Solver",
@@ -64,6 +66,7 @@ def register():
 
 
 def unregister():
+    weld_tools.unregister()
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     eap_options.unregister_options()
