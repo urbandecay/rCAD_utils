@@ -62,6 +62,7 @@ def register():
         items=[('FLOAT', "Fast", ""), ('EXACT', "Exact", ""), ('MANIFOLD', "Manifold", "")],
         default='EXACT'
     )
+    bpy.types.Scene.cool_bool_multi_intersect = bpy.props.BoolProperty(name="Multi-Intersect", default=False)
 
 
 def unregister():
@@ -75,6 +76,8 @@ def unregister():
         del bpy.types.Scene.cool_bool_keep_cutter
     if hasattr(bpy.types.Scene, "cool_bool_solver"):
         del bpy.types.Scene.cool_bool_solver
+    if hasattr(bpy.types.Scene, "cool_bool_multi_intersect"):
+        del bpy.types.Scene.cool_bool_multi_intersect
 
 
 if __name__ == "__main__":

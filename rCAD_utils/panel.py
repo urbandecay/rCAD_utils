@@ -98,6 +98,7 @@ class RCAD_PT_CoolBool(bpy.types.Panel):
         row.operator("mesh.cool_bool", text="Intersect").operation_mode = 'INTERSECT'
         col.separator()
         col.prop(scene, "cool_bool_keep_cutter", text="Keep Cutter")
+        col.prop(scene, "cool_bool_multi_intersect", text="Multi-Intersect")
 
 
 class RCAD_PT_MeshTiler(bpy.types.Panel):

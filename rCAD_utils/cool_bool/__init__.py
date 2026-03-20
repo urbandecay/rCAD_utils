@@ -159,13 +159,22 @@ class MESH_OT_CoolBool(bpy.types.Operator):
                 else: objects_to_delete.append(cutter_obj)
 
             elif self.operation_mode == 'INTERSECT':
-                for t_obj in target_objects:
-                    apply_bool_and_clean(t_obj, cutter_obj, 'INTERSECT')
-                    final_objects.append(t_obj)
-                if keep_cutter_setting:
-                    final_objects.append(cutter_obj)
+                if context.scene.cool_bool_multi_intersect:
+                    all_objects = [cutter_obj] + target_objects
+                    result_obj = all_objects[0]
+                    for i in range(1, len(all_objects)):
+                        next_obj = all_objects[i]
+                        apply_bool_and_clean(result_obj, next_obj, 'INTERSECT')
+                        objects_to_delete.append(next_obj)
+                    final_objects.append(result_obj)
                 else:
-                    objects_to_delete.append(cutter_obj)
+                    for t_obj in target_objects:
+                        apply_bool_and_clean(t_obj, cutter_obj, 'INTERSECT')
+                        final_objects.append(t_obj)
+                    if keep_cutter_setting:
+                        final_objects.append(cutter_obj)
+                    else:
+                        objects_to_delete.append(cutter_obj)
 
             if context.mode != 'OBJECT': bpy.ops.object.mode_set(mode='OBJECT')
             bpy.ops.object.select_all(action='DESELECT')
