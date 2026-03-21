@@ -27,6 +27,15 @@ def _same_row(b1, b2):
     return overlap > min(b1[1].z - b1[0].z, b2[1].z - b2[0].z) * 0.5
 
 
+def _z_overlap(b1, b2):
+    z_min = max(b1[0].z, b2[0].z)
+    z_max = min(b1[1].z, b2[1].z)
+    # Tolerance catches touching/near-touching bounding boxes (stacked meshes)
+    if z_max >= z_min - 0.001:
+        return (z_min + z_max) / 2
+    return None
+
+
 def _quad_verts(cx, mn, mx):
     """YZ-plane quad at x=cx, spanning the full bounds."""
     y0, y1 = mn.y - 0.05, mx.y + 0.05
@@ -36,6 +45,18 @@ def _quad_verts(cx, mn, mx):
         mathutils.Vector((cx, y1, z0)),
         mathutils.Vector((cx, y1, z1)),
         mathutils.Vector((cx, y0, z1)),
+    ]
+
+
+def _quad_verts_hz(cz, mn, mx):
+    """XY-plane quad at z=cz, spanning the full bounds."""
+    x0, x1 = mn.x - 0.05, mx.x + 0.05
+    y0, y1 = mn.y - 0.05, mx.y + 0.05
+    return [
+        mathutils.Vector((x0, y0, cz)),
+        mathutils.Vector((x1, y0, cz)),
+        mathutils.Vector((x1, y1, cz)),
+        mathutils.Vector((x0, y1, cz)),
     ]
 
 
@@ -107,6 +128,7 @@ class MESH_OT_MeshTilerPreview(bpy.types.Operator):
                 rows.append(row)
 
         planes = []
+        # Vertical cut planes (X-axis) within each row
         for row in rows:
             for i in range(1, len(row)):
                 b1 = all_bounds[row[i - 1]]
@@ -116,6 +138,22 @@ class MESH_OT_MeshTilerPreview(bpy.types.Operator):
                     merged_mn = mathutils.Vector((min(b1[0].x, b2[0].x), min(b1[0].y, b2[0].y), min(b1[0].z, b2[0].z)))
                     merged_mx = mathutils.Vector((max(b1[1].x, b2[1].x), max(b1[1].y, b2[1].y), max(b1[1].z, b2[1].z)))
                     planes.append(_quad_verts(cx, merged_mn, merged_mx))
+
+        # Horizontal cut planes (Z-axis) between adjacent rows
+        rows.sort(key=lambda r: (all_bounds[r[0]][0].z + all_bounds[r[0]][1].z) / 2)
+        for ri in range(1, len(rows)):
+            for bi in rows[ri - 1]:
+                for ti in rows[ri]:
+                    b_bot = all_bounds[bi]
+                    b_top = all_bounds[ti]
+                    # Skip pairs that don't overlap in X (not actually above/below each other)
+                    if min(b_bot[1].x, b_top[1].x) <= max(b_bot[0].x, b_top[0].x):
+                        continue
+                    cz = _z_overlap(b_bot, b_top)
+                    if cz is not None:
+                        merged_mn = mathutils.Vector((min(b_bot[0].x, b_top[0].x), min(b_bot[0].y, b_top[0].y), min(b_bot[0].z, b_top[0].z)))
+                        merged_mx = mathutils.Vector((max(b_bot[1].x, b_top[1].x), max(b_bot[1].y, b_top[1].y), max(b_bot[1].z, b_top[1].z)))
+                        planes.append(_quad_verts_hz(cz, merged_mn, merged_mx))
 
         _state["planes"] = planes
         _state["handle"] = bpy.types.SpaceView3D.draw_handler_add(

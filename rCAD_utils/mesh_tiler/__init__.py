@@ -168,7 +168,10 @@ class MESH_OT_MeshTiler(bpy.types.Operator):
 
             rows = cluster_into_rows(all_parts)
 
-            # Pass 1: Bisect horizontally (X axis) within each row
+            # Step 4: Pre-compute ALL cut planes before touching geometry
+            cut_list = []
+
+            # Vertical cuts (X-axis) within each row
             for row_objs in rows:
                 for i in range(1, len(row_objs)):
                     left = row_objs[i - 1]
@@ -176,24 +179,10 @@ class MESH_OT_MeshTiler(bpy.types.Operator):
                     p_co = get_overlap_center(left, right)
                     if p_co:
                         p_no = mathutils.Vector((1, 0, 0))
+                        cut_list.append((left, p_co, p_no, False, True))
+                        cut_list.append((right, p_co, p_no, True, False))
 
-                        bpy.ops.object.select_all(action='DESELECT')
-                        context.view_layer.objects.active = left
-                        left.select_set(True)
-                        bpy.ops.object.mode_set(mode='EDIT')
-                        bpy.ops.mesh.select_all(action='SELECT')
-                        bpy.ops.mesh.bisect(plane_co=p_co, plane_no=p_no, clear_outer=True, threshold=0.0001)
-                        bpy.ops.object.mode_set(mode='OBJECT')
-
-                        bpy.ops.object.select_all(action='DESELECT')
-                        context.view_layer.objects.active = right
-                        right.select_set(True)
-                        bpy.ops.object.mode_set(mode='EDIT')
-                        bpy.ops.mesh.select_all(action='SELECT')
-                        bpy.ops.mesh.bisect(plane_co=p_co, plane_no=p_no, clear_inner=True, threshold=0.0001)
-                        bpy.ops.object.mode_set(mode='OBJECT')
-
-            # Pass 2: Bisect vertically (Z axis) between rows
+            # Horizontal cuts (Z-axis) between adjacent rows
             rows.sort(key=lambda r: get_world_bounds(r[0])[0].z)
             for i in range(1, len(rows)):
                 for bot in rows[i - 1]:
@@ -201,36 +190,24 @@ class MESH_OT_MeshTiler(bpy.types.Operator):
                         p_co = get_overlap_center(bot, top)
                         if p_co:
                             p_no = mathutils.Vector((0, 0, 1))
+                            cut_list.append((bot, p_co, p_no, False, True))
+                            cut_list.append((top, p_co, p_no, True, False))
 
-                            bpy.ops.object.select_all(action='DESELECT')
-                            context.view_layer.objects.active = bot
-                            bot.select_set(True)
-                            bpy.ops.object.mode_set(mode='EDIT')
-                            bpy.ops.mesh.select_all(action='SELECT')
-                            bpy.ops.mesh.bisect(plane_co=p_co, plane_no=p_no, clear_outer=True, threshold=0.0001)
-                            bpy.ops.object.mode_set(mode='OBJECT')
+            # Step 5: Apply all bisects
+            for obj, plane_co, plane_no, clear_inner, clear_outer in cut_list:
+                bpy.ops.object.select_all(action='DESELECT')
+                context.view_layer.objects.active = obj
+                obj.select_set(True)
+                bpy.ops.object.mode_set(mode='EDIT')
+                bpy.ops.mesh.select_all(action='SELECT')
+                bpy.ops.mesh.bisect(plane_co=plane_co, plane_no=plane_no,
+                                    clear_inner=clear_inner, clear_outer=clear_outer,
+                                    threshold=0.0001)
+                bpy.ops.object.mode_set(mode='OBJECT')
 
-                            bpy.ops.object.select_all(action='DESELECT')
-                            context.view_layer.objects.active = top
-                            top.select_set(True)
-                            bpy.ops.object.mode_set(mode='EDIT')
-                            bpy.ops.mesh.select_all(action='SELECT')
-                            bpy.ops.mesh.bisect(plane_co=p_co, plane_no=p_no, clear_inner=True, threshold=0.0001)
-                            bpy.ops.object.mode_set(mode='OBJECT')
-
-            # Join all trimmed parts back as separate islands
+            # Step 6: Done — leave all parts as separate objects
             if context.mode != 'OBJECT': bpy.ops.object.mode_set(mode='OBJECT')
-            bpy.ops.object.select_all(action='DESELECT')
-            for part in all_parts:
-                if part.name in bpy.data.objects:
-                    part.select_set(True)
-            original_obj.select_set(True)
-            context.view_layer.objects.active = original_obj
-            bpy.ops.object.join()
-            original_obj.name = original_name
-            bpy.ops.object.mode_set(mode='EDIT')
-            bpy.ops.mesh.select_all(action='DESELECT')
-            self.report({'INFO'}, "Mesh Tiler Finished")
+            self.report({'INFO'}, f"Mesh Tiler: {len(all_parts)} pieces")
 
         except Exception as e:
             self.report({'ERROR'}, f"Script Failed: {e}")
