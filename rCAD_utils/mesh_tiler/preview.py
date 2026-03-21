@@ -16,24 +16,34 @@ def _get_island_bounds(bm, island_indices, mw):
     )
 
 
-def _x_overlap(b1, b2):
-    x_min = max(b1[0].x, b2[0].x)
-    x_max = min(b1[1].x, b2[1].x)
-    return (x_min + x_max) / 2 if x_max > x_min else None
+def _find_preview_planes(all_bounds):
+    """Check every pair. Intersection shape decides cut direction."""
+    planes = []
+    for i in range(len(all_bounds)):
+        for j in range(i + 1, len(all_bounds)):
+            b1, b2 = all_bounds[i], all_bounds[j]
 
+            ix0 = max(b1[0].x, b2[0].x); ix1 = min(b1[1].x, b2[1].x)
+            iz0 = max(b1[0].z, b2[0].z); iz1 = min(b1[1].z, b2[1].z)
 
-def _same_row(b1, b2):
-    overlap = min(b1[1].z, b2[1].z) - max(b1[0].z, b2[0].z)
-    return overlap > min(b1[1].z - b1[0].z, b2[1].z - b2[0].z) * 0.5
+            if ix0 > ix1 + 0.001 or iz0 > iz1 + 0.001:
+                continue
 
+            inter_x = max(0, ix1 - ix0)
+            inter_z = max(0, iz1 - iz0)
 
-def _z_overlap(b1, b2):
-    z_min = max(b1[0].z, b2[0].z)
-    z_max = min(b1[1].z, b2[1].z)
-    # Tolerance catches touching/near-touching bounding boxes (stacked meshes)
-    if z_max >= z_min - 0.001:
-        return (z_min + z_max) / 2
-    return None
+            merged_mn = mathutils.Vector((min(b1[0].x, b2[0].x), min(b1[0].y, b2[0].y), min(b1[0].z, b2[0].z)))
+            merged_mx = mathutils.Vector((max(b1[1].x, b2[1].x), max(b1[1].y, b2[1].y), max(b1[1].z, b2[1].z)))
+
+            if inter_z >= inter_x:
+                # Taller than wide → side by side → vertical plane
+                cx = (ix0 + ix1) / 2
+                planes.append(_quad_verts(cx, merged_mn, merged_mx))
+            else:
+                # Wider than tall → stacked → horizontal plane
+                cz = (iz0 + iz1) / 2
+                planes.append(_quad_verts_hz(cz, merged_mn, merged_mx))
+    return planes
 
 
 def _quad_verts(cx, mn, mx):
@@ -108,53 +118,7 @@ class MESH_OT_MeshTilerPreview(bpy.types.Operator):
         mw = obj.matrix_world
         all_bounds = [_get_island_bounds(bm, island, mw) for island in islands]
 
-        # cluster into rows
-        n = len(all_bounds)
-        adj = {i: [] for i in range(n)}
-        for i in range(n):
-            for j in range(i + 1, n):
-                if _same_row(all_bounds[i], all_bounds[j]):
-                    adj[i].append(j); adj[j].append(i)
-        visited = set()
-        rows = []
-        for i in range(n):
-            if i not in visited:
-                row = []; stack = [i]; visited.add(i)
-                while stack:
-                    c = stack.pop(); row.append(c)
-                    for nb in adj[c]:
-                        if nb not in visited: visited.add(nb); stack.append(nb)
-                row.sort(key=lambda k: (all_bounds[k][0].x + all_bounds[k][1].x) / 2)
-                rows.append(row)
-
-        planes = []
-        # Vertical cut planes (X-axis) within each row
-        for row in rows:
-            for i in range(1, len(row)):
-                b1 = all_bounds[row[i - 1]]
-                b2 = all_bounds[row[i]]
-                cx = _x_overlap(b1, b2)
-                if cx is not None:
-                    merged_mn = mathutils.Vector((min(b1[0].x, b2[0].x), min(b1[0].y, b2[0].y), min(b1[0].z, b2[0].z)))
-                    merged_mx = mathutils.Vector((max(b1[1].x, b2[1].x), max(b1[1].y, b2[1].y), max(b1[1].z, b2[1].z)))
-                    planes.append(_quad_verts(cx, merged_mn, merged_mx))
-
-        # Horizontal cut planes (Z-axis) between adjacent rows
-        rows.sort(key=lambda r: (all_bounds[r[0]][0].z + all_bounds[r[0]][1].z) / 2)
-        for ri in range(1, len(rows)):
-            for bi in rows[ri - 1]:
-                for ti in rows[ri]:
-                    b_bot = all_bounds[bi]
-                    b_top = all_bounds[ti]
-                    # Skip pairs that don't overlap in X (not actually above/below each other)
-                    if min(b_bot[1].x, b_top[1].x) <= max(b_bot[0].x, b_top[0].x):
-                        continue
-                    cz = _z_overlap(b_bot, b_top)
-                    if cz is not None:
-                        merged_mn = mathutils.Vector((min(b_bot[0].x, b_top[0].x), min(b_bot[0].y, b_top[0].y), min(b_bot[0].z, b_top[0].z)))
-                        merged_mx = mathutils.Vector((max(b_bot[1].x, b_top[1].x), max(b_bot[1].y, b_top[1].y), max(b_bot[1].z, b_top[1].z)))
-                        planes.append(_quad_verts_hz(cz, merged_mn, merged_mx))
-
+        planes = _find_preview_planes(all_bounds)
         _state["planes"] = planes
         _state["handle"] = bpy.types.SpaceView3D.draw_handler_add(
             _draw_callback, (), 'WINDOW', 'POST_VIEW'

@@ -67,56 +67,51 @@ def get_world_bounds(obj):
     return mathutils.Vector((min_x, min_y, min_z)), mathutils.Vector((max_x, max_y, max_z))
 
 
-def get_overlap_center(obj1, obj2):
-    min1, max1 = get_world_bounds(obj1)
-    min2, max2 = get_world_bounds(obj2)
-    overlap_min = mathutils.Vector((max(min1.x, min2.x), max(min1.y, min2.y), max(min1.z, min2.z)))
-    overlap_max = mathutils.Vector((min(max1.x, max2.x), min(max1.y, max2.y), min(max1.z, max2.z)))
-    if overlap_min.x >= overlap_max.x or overlap_min.z >= overlap_max.z:
-        return None
-    return (overlap_min + overlap_max) / 2
+def find_all_cuts(parts):
+    """Check every pair of meshes. The bounding box intersection shape tells us
+    which way to cut: taller than wide → vertical, wider than tall → horizontal."""
+    cut_list = []
+    for i in range(len(parts)):
+        for j in range(i + 1, len(parts)):
+            min_i, max_i = get_world_bounds(parts[i])
+            min_j, max_j = get_world_bounds(parts[j])
 
+            # Bounding box intersection
+            ix0 = max(min_i.x, min_j.x); ix1 = min(max_i.x, max_j.x)
+            iy0 = max(min_i.y, min_j.y); iy1 = min(max_i.y, max_j.y)
+            iz0 = max(min_i.z, min_j.z); iz1 = min(max_i.z, max_j.z)
 
-def share_horizontal_row(obj1, obj2):
-    min1, max1 = get_world_bounds(obj1)
-    min2, max2 = get_world_bounds(obj2)
-    overlap_start = max(min1.z, min2.z)
-    overlap_end = min(max1.z, max2.z)
-    overlap_amount = overlap_end - overlap_start
-    if overlap_amount <= 0: return False
-    height1 = max1.z - min1.z
-    height2 = max2.z - min2.z
-    min_height = min(height1, height2)
-    return overlap_amount > (min_height * 0.5)
+            # Must overlap or touch in both X and Z (tolerance for touching)
+            if ix0 > ix1 + 0.001 or iz0 > iz1 + 0.001:
+                continue
 
+            inter_x = max(0, ix1 - ix0)
+            inter_z = max(0, iz1 - iz0)
+            p_co = mathutils.Vector(((ix0 + ix1) / 2, (iy0 + iy1) / 2, (iz0 + iz1) / 2))
 
-def cluster_into_rows(objects):
-    if not objects: return []
-    adj = {obj: [] for obj in objects}
-    for i in range(len(objects)):
-        for j in range(i + 1, len(objects)):
-            if share_horizontal_row(objects[i], objects[j]):
-                adj[objects[i]].append(objects[j])
-                adj[objects[j]].append(objects[i])
-    visited = set()
-    rows = []
-    for obj in objects:
-        if obj not in visited:
-            current_row = []
-            stack = [obj]
-            visited.add(obj)
-            while stack:
-                curr = stack.pop()
-                current_row.append(curr)
-                for neighbor in adj[curr]:
-                    if neighbor not in visited:
-                        visited.add(neighbor)
-                        stack.append(neighbor)
-            rows.append(current_row)
-    for row in rows:
-        row.sort(key=lambda o: get_center(o).x)
-    rows.sort(key=lambda c: get_center(c[0]).z)
-    return rows
+            if inter_z >= inter_x:
+                # Taller than wide → side by side → vertical cut
+                p_no = mathutils.Vector((1, 0, 0))
+                ci = (min_i.x + max_i.x) / 2
+                cj = (min_j.x + max_j.x) / 2
+                if ci < cj:
+                    left, right = parts[i], parts[j]
+                else:
+                    left, right = parts[j], parts[i]
+                cut_list.append((left, p_co, p_no, False, True))
+                cut_list.append((right, p_co, p_no, True, False))
+            else:
+                # Wider than tall → stacked → horizontal cut
+                p_no = mathutils.Vector((0, 0, 1))
+                ci = (min_i.z + max_i.z) / 2
+                cj = (min_j.z + max_j.z) / 2
+                if ci < cj:
+                    bot, top = parts[i], parts[j]
+                else:
+                    bot, top = parts[j], parts[i]
+                cut_list.append((bot, p_co, p_no, False, True))
+                cut_list.append((top, p_co, p_no, True, False))
+    return cut_list
 
 
 # --- OPERATOR ---
@@ -166,43 +161,31 @@ class MESH_OT_MeshTiler(bpy.types.Operator):
 
             if context.mode != 'OBJECT': bpy.ops.object.mode_set(mode='OBJECT')
 
-            rows = cluster_into_rows(all_parts)
+            # Find ALL cut planes from pairwise bounding box intersections
+            cut_list = find_all_cuts(all_parts)
 
-            # Step 4: Pre-compute ALL cut planes before touching geometry
-            cut_list = []
-
-            # Vertical cuts (X-axis) within each row
-            for row_objs in rows:
-                for i in range(1, len(row_objs)):
-                    left = row_objs[i - 1]
-                    right = row_objs[i]
-                    p_co = get_overlap_center(left, right)
-                    if p_co:
-                        p_no = mathutils.Vector((1, 0, 0))
-                        cut_list.append((left, p_co, p_no, False, True))
-                        cut_list.append((right, p_co, p_no, True, False))
-
-            # Horizontal cuts (Z-axis) between adjacent rows
-            rows.sort(key=lambda r: get_world_bounds(r[0])[0].z)
-            for i in range(1, len(rows)):
-                for bot in rows[i - 1]:
-                    for top in rows[i]:
-                        p_co = get_overlap_center(bot, top)
-                        if p_co:
-                            p_no = mathutils.Vector((0, 0, 1))
-                            cut_list.append((bot, p_co, p_no, False, True))
-                            cut_list.append((top, p_co, p_no, True, False))
-
-            # Step 5: Apply all bisects
+            # Group cuts by object and apply all cuts to each object at once
+            cuts_by_obj = {}
             for obj, plane_co, plane_no, clear_inner, clear_outer in cut_list:
+                if obj not in cuts_by_obj:
+                    cuts_by_obj[obj] = []
+                cuts_by_obj[obj].append((plane_co, plane_no, clear_inner, clear_outer))
+
+            for obj, cuts in cuts_by_obj.items():
                 bpy.ops.object.select_all(action='DESELECT')
                 context.view_layer.objects.active = obj
                 obj.select_set(True)
                 bpy.ops.object.mode_set(mode='EDIT')
-                bpy.ops.mesh.select_all(action='SELECT')
-                bpy.ops.mesh.bisect(plane_co=plane_co, plane_no=plane_no,
-                                    clear_inner=clear_inner, clear_outer=clear_outer,
-                                    threshold=0.0001)
+                bm = bmesh.from_edit_mesh(obj.data)
+
+                # Apply all cuts to this object's bmesh
+                for plane_co, plane_no, clear_inner, clear_outer in cuts:
+                    bpy.ops.mesh.select_all(action='SELECT')
+                    bpy.ops.mesh.bisect(plane_co=plane_co, plane_no=plane_no,
+                                        clear_inner=clear_inner, clear_outer=clear_outer,
+                                        threshold=0.0001)
+
+                bmesh.update_edit_mesh(obj.data)
                 bpy.ops.object.mode_set(mode='OBJECT')
 
             # Step 6: Done — leave all parts as separate objects
