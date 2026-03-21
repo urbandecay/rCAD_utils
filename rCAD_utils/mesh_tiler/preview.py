@@ -24,23 +24,33 @@ def _find_preview_planes(all_bounds):
             b1, b2 = all_bounds[i], all_bounds[j]
 
             ix0 = max(b1[0].x, b2[0].x); ix1 = min(b1[1].x, b2[1].x)
+            iy0 = max(b1[0].y, b2[0].y); iy1 = min(b1[1].y, b2[1].y)
             iz0 = max(b1[0].z, b2[0].z); iz1 = min(b1[1].z, b2[1].z)
 
-            if ix0 > ix1 + 0.001 or iz0 > iz1 + 0.001:
+            if ix0 > ix1 + 0.001 or iy0 > iy1 + 0.001 or iz0 > iz1 + 0.001:
                 continue
 
-            inter_x = max(0, ix1 - ix0)
-            inter_z = max(0, iz1 - iz0)
+            dx = abs((b1[0].x + b1[1].x) / 2 - (b2[0].x + b2[1].x) / 2)
+            dz = abs((b1[0].z + b1[1].z) / 2 - (b2[0].z + b2[1].z) / 2)
 
             merged_mn = mathutils.Vector((min(b1[0].x, b2[0].x), min(b1[0].y, b2[0].y), min(b1[0].z, b2[0].z)))
             merged_mx = mathutils.Vector((max(b1[1].x, b2[1].x), max(b1[1].y, b2[1].y), max(b1[1].z, b2[1].z)))
 
-            if inter_z >= inter_x:
-                # Taller than wide → side by side → vertical plane
+            x_overlap = max(0, ix1 - ix0)
+            z_overlap = max(0, iz1 - iz0)
+            min_width = min(b1[1].x - b1[0].x, b2[1].x - b2[0].x)
+            min_height = min(b1[1].z - b1[0].z, b2[1].z - b2[0].z)
+
+            if dx >= dz:
+                # Side by side → vertical plane (skip diagonal)
+                if z_overlap < min_height * 0.5:
+                    continue
                 cx = (ix0 + ix1) / 2
                 planes.append(_quad_verts(cx, merged_mn, merged_mx))
             else:
-                # Wider than tall → stacked → horizontal plane
+                # Stacked → horizontal plane (skip diagonal)
+                if x_overlap < min_width * 0.5:
+                    continue
                 cz = (iz0 + iz1) / 2
                 planes.append(_quad_verts_hz(cz, merged_mn, merged_mx))
     return planes

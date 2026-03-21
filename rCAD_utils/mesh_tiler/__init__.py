@@ -12,6 +12,9 @@ def find_selected_islands(bm):
     selected_verts = [v for v in bm.verts if v.select]
     if not selected_verts: return islands_indices
     selected_verts_dict = {v.index: v for v in selected_verts}
+    
+    # 1. Gather all raw islands
+    raw_islands = []
     for start_vert in selected_verts:
         if start_vert.index not in visited:
             current_indices = set()
@@ -26,7 +29,47 @@ def find_selected_islands(bm):
                         visited.add(other.index)
                         current_indices.add(other.index)
                         q.append(other)
-            if current_indices: islands_indices.append(current_indices)
+            if current_indices: raw_islands.append(current_indices)
+
+    # 2. Filter out debris (tiny islands)
+    if not raw_islands:
+        return []
+
+    # Calculate bounding box diagonals to find the largest island
+    island_diagonals = []
+    
+    for indices in raw_islands:
+        # Vertex count check
+        if len(indices) < 4:
+            continue
+
+        # Face count check (must be a 3D volume, so >= 4 faces)
+        unique_faces = set()
+        for idx in indices:
+            v = bm.verts[idx]
+            for f in v.link_faces:
+                unique_faces.add(f.index)
+        
+        if len(unique_faces) < 4:
+            continue
+            
+        # Bounds check
+        coords = [bm.verts[i].co for i in indices]
+        min_c = mathutils.Vector((min(c.x for c in coords), min(c.y for c in coords), min(c.z for c in coords)))
+        max_c = mathutils.Vector((max(c.x for c in coords), max(c.y for c in coords), max(c.z for c in coords)))
+        diagonal = (max_c - min_c).length
+        island_diagonals.append((diagonal, indices))
+
+    if not island_diagonals:
+        return []
+
+    max_diag = max(d[0] for d in island_diagonals)
+    threshold = max_diag * 0.10  # Filter out anything smaller than 10% of the largest piece
+
+    for diag, indices in island_diagonals:
+        if diag > threshold:
+            islands_indices.append(indices)
+
     return islands_indices
 
 
@@ -81,16 +124,24 @@ def find_all_cuts(parts):
             iy0 = max(min_i.y, min_j.y); iy1 = min(max_i.y, max_j.y)
             iz0 = max(min_i.z, min_j.z); iz1 = min(max_i.z, max_j.z)
 
-            # Must overlap or touch in both X and Z (tolerance for touching)
-            if ix0 > ix1 + 0.001 or iz0 > iz1 + 0.001:
+            # Must overlap or touch in all 3 axes (tolerance for touching)
+            if ix0 > ix1 + 0.001 or iy0 > iy1 + 0.001 or iz0 > iz1 + 0.001:
                 continue
 
-            inter_x = max(0, ix1 - ix0)
-            inter_z = max(0, iz1 - iz0)
             p_co = mathutils.Vector(((ix0 + ix1) / 2, (iy0 + iy1) / 2, (iz0 + iz1) / 2))
 
-            if inter_z >= inter_x:
-                # Taller than wide → side by side → vertical cut
+            dx = abs((min_i.x + max_i.x) / 2 - (min_j.x + max_j.x) / 2)
+            dz = abs((min_i.z + max_i.z) / 2 - (min_j.z + max_j.z) / 2)
+
+            x_overlap = max(0, ix1 - ix0)
+            z_overlap = max(0, iz1 - iz0)
+            min_width = min(max_i.x - min_i.x, max_j.x - min_j.x)
+            min_height = min(max_i.z - min_i.z, max_j.z - min_j.z)
+
+            if dx >= dz:
+                # Side by side → vertical cut (skip diagonal pairs)
+                if z_overlap < min_height * 0.5:
+                    continue
                 p_no = mathutils.Vector((1, 0, 0))
                 ci = (min_i.x + max_i.x) / 2
                 cj = (min_j.x + max_j.x) / 2
@@ -101,7 +152,9 @@ def find_all_cuts(parts):
                 cut_list.append((left, p_co, p_no, False, True))
                 cut_list.append((right, p_co, p_no, True, False))
             else:
-                # Wider than tall → stacked → horizontal cut
+                # Stacked → horizontal cut (skip diagonal pairs)
+                if x_overlap < min_width * 0.5:
+                    continue
                 p_no = mathutils.Vector((0, 0, 1))
                 ci = (min_i.z + max_i.z) / 2
                 cj = (min_j.z + max_j.z) / 2
@@ -139,11 +192,17 @@ class MESH_OT_MeshTiler(bpy.types.Operator):
 
             islands_data = []
             for island in islands:
+                if len(island) < 4: continue  # Ignore tiny debris (points/lines/tris)
                 pos_set = set()
                 for idx in island:
                     v = bm.verts[idx]
                     pos_set.add((round(v.co.x, 6), round(v.co.y, 6), round(v.co.z, 6)))
                 islands_data.append(pos_set)
+
+            if len(islands_data) < 2:
+                self.report({'WARNING'}, "Need 2+ valid islands (>=4 verts).")
+                wm.progress_end()
+                return {'CANCELLED'}
 
             # Separate all islands into individual objects
             all_parts = []
@@ -175,17 +234,21 @@ class MESH_OT_MeshTiler(bpy.types.Operator):
                 bpy.ops.object.select_all(action='DESELECT')
                 context.view_layer.objects.active = obj
                 obj.select_set(True)
+                
+                mwi = obj.matrix_world.inverted()
                 bpy.ops.object.mode_set(mode='EDIT')
-                bm = bmesh.from_edit_mesh(obj.data)
 
-                # Apply all cuts to this object's bmesh
+                # Apply all cuts to this object
                 for plane_co, plane_no, clear_inner, clear_outer in cuts:
+                    # Convert world-space plane to local-space
+                    local_co = mwi @ plane_co
+                    local_no = (obj.matrix_world.to_3x3().transposed() @ plane_no).normalized()
+                    
                     bpy.ops.mesh.select_all(action='SELECT')
-                    bpy.ops.mesh.bisect(plane_co=plane_co, plane_no=plane_no,
+                    bpy.ops.mesh.bisect(plane_co=local_co, plane_no=local_no,
                                         clear_inner=clear_inner, clear_outer=clear_outer,
                                         threshold=0.0001)
 
-                bmesh.update_edit_mesh(obj.data)
                 bpy.ops.object.mode_set(mode='OBJECT')
 
             # Step 6: Done — leave all parts as separate objects
