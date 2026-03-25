@@ -4,6 +4,21 @@ from math import isfinite
 from mathutils import Vector
 from bpy_extras import view3d_utils
 
+# --- Deferred mesh update mechanism ---
+# When True, operators skip bmesh.update_edit_mesh() calls.
+# The orchestrator (execute_weld) sets this and does ONE update at the end.
+_defer_mesh_update = False
+
+def set_defer_mesh_update(state: bool):
+    global _defer_mesh_update
+    _defer_mesh_update = state
+
+def deferred_update_edit_mesh(mesh, **kwargs):
+    """Call instead of bmesh.update_edit_mesh(). Skips if deferred."""
+    if _defer_mesh_update:
+        return
+    bmesh.update_edit_mesh(mesh, **kwargs)
+
 # Geometry tolerances
 EPS = 1e-12
 LJUNC_T_EPS = 1e-6

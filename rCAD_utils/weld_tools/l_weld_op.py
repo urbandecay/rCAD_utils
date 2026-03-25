@@ -3,7 +3,7 @@ import bmesh
 from mathutils import Vector
 from mathutils.kdtree import KDTree
 
-from .utils import EPS
+from .utils import EPS, deferred_update_edit_mesh
 from .deselect_manager import get_or_create_session, commit_if_owned
 
 
@@ -155,7 +155,7 @@ class MESH_OT_super_fuse_l(bpy.types.Operator):
             self._scrub_select_history(bm)
             # Apply deselection if we own it; otherwise global executor will do it later.
             commit_if_owned(context, session, owned_local)
-            bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=True)
+            deferred_update_edit_mesh(obj.data, loop_triangles=False, destructive=True)
             self.report({'INFO'}, "No endpoint merges performed.")
             return {'CANCELLED'}
 

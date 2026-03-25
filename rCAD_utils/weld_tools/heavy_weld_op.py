@@ -10,6 +10,7 @@ from .utils import (
     safe_edge_split_vert_only,
     edge_between,
     EPS,
+    deferred_update_edit_mesh,
 )
 from .deselect_manager import get_or_create_session, commit_if_owned
 
@@ -424,7 +425,7 @@ class MESH_OT_super_fuse_heavy(bpy.types.Operator):
             self._scrub_select_history(bm)
             # Apply deselection if we own it; otherwise global executor will apply later.
             commit_if_owned(context, session, owned_local)
-            bmesh.update_edit_mesh(me, loop_triangles=False, destructive=True)
+            deferred_update_edit_mesh(me, loop_triangles=False, destructive=True)
             self.report({'INFO'}, f"Heavy Weld: splits={split_count}, nothing to weld.")
             return {'CANCELLED'}
 

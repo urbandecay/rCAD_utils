@@ -3,6 +3,7 @@
 import bpy
 import bmesh
 from .deselect_manager import start_global_session, end_global_session
+from .utils import set_defer_mesh_update
 
 class OSC_OT_super_fuse_execute(bpy.types.Operator):
     bl_idname = "osc.super_fuse_execute"
@@ -34,7 +35,8 @@ class OSC_OT_super_fuse_execute(bpy.types.Operator):
                     bm.select_history.remove(elem)
                     dirty = True
             if dirty:
-                bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+                from .utils import deferred_update_edit_mesh
+                deferred_update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
         except Exception:
             pass
 
@@ -85,18 +87,42 @@ class OSC_OT_super_fuse_execute(bpy.types.Operator):
         # Start a global deselection session so ops can add their points; we apply once at the end.
         start_global_session()
 
+        # Defer bmesh.update_edit_mesh() inside sub-operators so we pay the
+        # full-mesh rebuild cost only once at the very end, not per-operator.
+        # Face weld (square) is excluded — it needs intermediate updates for knife_project.
+        NON_DEFERRABLE = {'super_fuse_square'}
+
         ran = []
-        for name, op_id in plan:
-            # Pre-step cleanup: scrub invalid select history
-            self._scrub_select_history(context)
+        try:
+            for name, op_id in plan:
+                # Pre-step cleanup: scrub invalid select history
+                self._scrub_select_history(context)
 
-            res = self._call_mesh_op(op_id)
-            if res == {'FINISHED'}:
-                ran.append(name)
+                # Enable deferral for operators that don't need intermediate syncs
+                defer = op_id not in NON_DEFERRABLE
+                if defer:
+                    set_defer_mesh_update(True)
 
-            # Post-step cleanup: scrub again, then hard-rebuild EditMesh
-            self._scrub_select_history(context)
-            self._stabilize_editmesh(context)
+                res = self._call_mesh_op(op_id)
+
+                if defer:
+                    set_defer_mesh_update(False)
+
+                if res == {'FINISHED'}:
+                    ran.append(name)
+
+                # Post-step cleanup: scrub select history (no stabilize needed mid-run)
+                self._scrub_select_history(context)
+
+        finally:
+            # Always restore the flag even if something blows up
+            set_defer_mesh_update(False)
+
+        # ONE full mesh rebuild at the end instead of per-operator
+        obj = context.edit_object
+        if obj and obj.type == 'MESH':
+            bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=True)
+        self._stabilize_editmesh(context)
 
         # Apply deselection for all recorded welds (all enabled ops) and clear session
         end_global_session(context)
