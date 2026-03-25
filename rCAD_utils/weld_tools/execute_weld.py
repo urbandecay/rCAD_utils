@@ -94,9 +94,18 @@ class OSC_OT_super_fuse_execute(bpy.types.Operator):
             if res == {'FINISHED'}:
                 ran.append(name)
 
-            # Post-step cleanup: scrub again, then hard-rebuild EditMesh
+            # Post-step cleanup: scrub select history only (no per-step mode switch)
             self._scrub_select_history(context)
-            self._stabilize_editmesh(context)
+
+        # One final mesh rebuild at the end instead of per-step mode switches
+        obj = context.edit_object
+        if obj and obj.type == 'MESH':
+            bm = bmesh.from_edit_mesh(obj.data)
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=True)
+            context.view_layer.update()
 
         # Apply deselection for all recorded welds (all enabled ops) and clear session
         end_global_session(context)
