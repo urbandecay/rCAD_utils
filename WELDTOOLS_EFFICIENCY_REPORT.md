@@ -253,10 +253,10 @@ Full stress test passed successfully. The deferred-update optimization **resolve
 
 While Strategy 1 resolved the core performance issue, these additional strategies were identified for potential further optimization:
 
-2. **Optimize face_weld_op face scan** (For future consideration)
+2. **Optimize face_weld_op face scan** ❌ **NOT NEEDED**
    - Current: O(all_faces) brute-force scan in `_find_nearby_faces()`
-   - Solution: Use KDTree on face centers instead
-   - Estimated gain: 500ms–1s on meshes with many faces and sparse face selections
+   - Why skipping: Will never have instances where welding so many faces at once
+   - Performance: Already fast enough for typical face weld operations
 
 3. **Batch geometry modifications** (For future consideration)
    - Current: Operators call `deferred_update_edit_mesh()` multiple times
