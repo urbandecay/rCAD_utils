@@ -3,6 +3,7 @@
 import bpy
 import bmesh
 from .deselect_manager import start_global_session, end_global_session
+from .utils import set_batch_mode
 
 class OSC_OT_super_fuse_execute(bpy.types.Operator):
     bl_idname = "osc.super_fuse_execute"
@@ -85,6 +86,10 @@ class OSC_OT_super_fuse_execute(bpy.types.Operator):
         # Start a global deselection session so ops can add their points; we apply once at the end.
         start_global_session()
 
+        # Strategy 3: batch mode — operators skip their final update_edit_mesh(),
+        # we do one combined update after all ops finish.
+        set_batch_mode(True)
+
         ran = []
         for name, op_id in plan:
             # Pre-step cleanup: scrub invalid select history
@@ -96,6 +101,9 @@ class OSC_OT_super_fuse_execute(bpy.types.Operator):
 
             # Post-step cleanup: scrub select history only (no per-step mode switch)
             self._scrub_select_history(context)
+
+        # End batch mode before the final mesh rebuild
+        set_batch_mode(False)
 
         # One final mesh rebuild at the end instead of per-step mode switches
         obj = context.edit_object

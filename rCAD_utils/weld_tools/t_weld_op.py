@@ -3,7 +3,7 @@ import bmesh
 from mathutils import Vector
 from collections import defaultdict
 
-from .utils import closest_point_on_segment, safe_edge_split_vert_only, edge_between, EPS
+from .utils import closest_point_on_segment, safe_edge_split_vert_only, edge_between, EPS, in_batch_mode
 
 from .deselect_manager import get_or_create_session, commit_if_owned
 
@@ -259,7 +259,8 @@ class MESH_OT_super_fuse_t(bpy.types.Operator):
 
         if not valid_map:
             self._scrub_select_history(bm)
-            bmesh.update_edit_mesh(me, loop_triangles=False, destructive=True)
+            if not in_batch_mode():
+                bmesh.update_edit_mesh(me, loop_triangles=False, destructive=True)
             self.report({'INFO'}, "T: Nothing to weld after validation.")
             return {'CANCELLED'}
 
@@ -282,7 +283,8 @@ class MESH_OT_super_fuse_t(bpy.types.Operator):
         # Apply deselection if local session; global executor will apply at end otherwise.
         commit_if_owned(context, session, owned_local)
 
-        bmesh.update_edit_mesh(me, loop_triangles=False, destructive=True)
+        if not in_batch_mode():
+            bmesh.update_edit_mesh(me, loop_triangles=False, destructive=True)
 
         self.report({'INFO'}, f"T: merged {len(valid_map)} vertices.")
         _dbg(f"==== Super Fuse T END | merged={len(valid_map)} ====")

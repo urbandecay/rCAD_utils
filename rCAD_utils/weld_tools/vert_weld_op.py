@@ -4,7 +4,7 @@ from mathutils import Vector
 from collections import defaultdict
 from bpy.props import EnumProperty
 
-from .utils import closest_point_on_segment, safe_edge_split_vert_only, edge_between, EPS
+from .utils import closest_point_on_segment, safe_edge_split_vert_only, edge_between, EPS, in_batch_mode
 from .deselect_manager import get_or_create_session, commit_if_owned
 
 T_TOL = 1e-8
@@ -224,7 +224,8 @@ class MESH_OT_super_fuse_vert(bpy.types.Operator):
                      if s and t and getattr(s, "is_valid", False) and getattr(t, "is_valid", False) and (s is not t)}
         if not valid_map:
             self._scrub_select_history(bm)
-            bmesh.update_edit_mesh(me, loop_triangles=False, destructive=True)
+            if not in_batch_mode():
+                bmesh.update_edit_mesh(me, loop_triangles=False, destructive=True)
             self.report({'INFO'}, "Nothing to weld after validation.")
             return {'CANCELLED'}
 
@@ -246,7 +247,8 @@ class MESH_OT_super_fuse_vert(bpy.types.Operator):
         # Apply deselection if local; otherwise the executor will apply at the end.
         commit_if_owned(context, session, owned_local)
 
-        bmesh.update_edit_mesh(me, loop_triangles=False, destructive=True)
+        if not in_batch_mode():
+            bmesh.update_edit_mesh(me, loop_triangles=False, destructive=True)
         label = "T (Verts->Edges)" if typ == 'T' else "Verts->Edges (.)"
         self.report({'INFO'}, f"{label}: merged {len(valid_map)} vertices.")
         _dbg(f"==== Super Fuse Verts->Edges END | merged={len(valid_map)} ====")

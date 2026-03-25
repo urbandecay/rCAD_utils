@@ -8,6 +8,7 @@ from mathutils import Vector
 from collections import defaultdict
 
 from .deselect_manager import get_or_create_session, commit_if_owned
+from .utils import in_batch_mode
 
 
 def _world_normal(obj, face):
@@ -136,13 +137,16 @@ class MESH_OT_super_fuse_square(bpy.types.Operator):
         cutter_mesh = None
 
         try:
+            # Strategy 3: Batch-collect all job data, then batch-delete
+            # all source faces in ONE pass instead of N separate deletes.
+            job_data = []
+            all_source_faces = []
             for (target_face, source_faces) in jobs:
-                # Collect all source data before touching anything
-                all_arc_coords = []
-                all_edge_pairs_world = []
+                arc_coords = []
+                edge_pairs_world = []
                 for sf in source_faces:
-                    all_arc_coords.extend(v.co.copy() for v in sf.verts)
-                    all_edge_pairs_world.extend(
+                    arc_coords.extend(v.co.copy() for v in sf.verts)
+                    edge_pairs_world.extend(
                         (mw @ e.verts[0].co, mw @ e.verts[1].co) for e in sf.edges
                     )
 
@@ -151,10 +155,20 @@ class MESH_OT_super_fuse_square(bpy.types.Operator):
                 face_radius = max((mw @ v.co - face_center_world).length for v in target_face.verts)
                 face_radius = max(face_radius, 0.1)
 
-                # Delete all source faces for this job (keep edges/verts)
+                job_data.append((target_face, source_faces, arc_coords,
+                                 edge_pairs_world, face_center_world,
+                                 face_normal_world, face_radius))
+                all_source_faces.extend(source_faces)
+
+            # Batch delete all source faces at once (single update)
+            if all_source_faces:
                 bm = bmesh.from_edit_mesh(me)
-                bmesh.ops.delete(bm, geom=source_faces, context='FACES_ONLY')
+                bmesh.ops.delete(bm, geom=all_source_faces, context='FACES_ONLY')
                 bmesh.update_edit_mesh(me, loop_triangles=False, destructive=True)
+
+            for (target_face, source_faces, all_arc_coords,
+                 all_edge_pairs_world, face_center_world,
+                 face_normal_world, face_radius) in job_data:
 
                 # Build combined cutter from all source edges
                 cutter_mesh = bpy.data.meshes.new("__face_weld_cutter__")
@@ -248,7 +262,8 @@ class MESH_OT_super_fuse_square(bpy.types.Operator):
             for f in bm.faces:
                 if _face_centroid_key(f, mw) in originally_hidden_keys:
                     f.hide = True
-            bmesh.update_edit_mesh(me)
+            if not in_batch_mode():
+                bmesh.update_edit_mesh(me)
 
 
             # Restore view

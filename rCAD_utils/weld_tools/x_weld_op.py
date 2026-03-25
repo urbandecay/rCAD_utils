@@ -3,7 +3,7 @@ import bmesh
 from mathutils import Vector
 
 from .utils import (
-    safe_edge_split_vert_only, edge_between, EPS
+    safe_edge_split_vert_only, edge_between, EPS, in_batch_mode
 )
 from .x_weld_brute_force import find_brute_force_x_intersections
 from .deselect_manager import get_or_create_session, commit_if_owned
@@ -113,7 +113,8 @@ class MESH_OT_super_fuse_x(bpy.types.Operator):
 
         if not cv_by_key:
             self._scrub_select_history(bm)
-            bmesh.update_edit_mesh(me, loop_triangles=False, destructive=True)
+            if not in_batch_mode():
+                bmesh.update_edit_mesh(me, loop_triangles=False, destructive=True)
             self.report({'INFO'}, "X: No valid crossings with >=2 contributing edges.")
             return {'CANCELLED'}
 
@@ -140,7 +141,8 @@ class MESH_OT_super_fuse_x(bpy.types.Operator):
             self._scrub_select_history(bm)
             # Commit deselection if we own the session locally (global will commit later)
             commit_if_owned(context, session, owned_local)
-            bmesh.update_edit_mesh(me, loop_triangles=False, destructive=True)
+            if not in_batch_mode():
+                bmesh.update_edit_mesh(me, loop_triangles=False, destructive=True)
             self.report({'INFO'}, f"X: crossings={len(cv_by_key)}, splits=0, welded=0.")
             return {'CANCELLED'}
 
@@ -243,7 +245,8 @@ class MESH_OT_super_fuse_x(bpy.types.Operator):
         # Apply deselection if we own the session; otherwise, global executor will handle it.
         commit_if_owned(context, session, owned_local)
 
-        bmesh.update_edit_mesh(me, loop_triangles=False, destructive=True)
+        if not in_batch_mode():
+            bmesh.update_edit_mesh(me, loop_triangles=False, destructive=True)
 
         plane_info = ""
         try:
