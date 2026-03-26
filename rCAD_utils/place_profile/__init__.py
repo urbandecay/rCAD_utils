@@ -3,7 +3,7 @@ import bmesh
 import math
 import numpy as np
 from mathutils import Vector, Matrix
-from bpy.props import BoolProperty
+from bpy.props import BoolProperty, FloatProperty
 import traceback
 
 # Scene properties keys/names
@@ -14,6 +14,9 @@ SCENE_PROFILE_FACES = "profile_faces"
 SCENE_PROFILE_SOURCE_EDGES = "profile_source_edge_indices"
 SCENE_PROFILE_SOURCE_VERTS = "profile_source_vert_indices"
 SCENE_PROFILE_ANCHOR_EDGE_VERTS = "profile_anchor_edge_verts"
+
+SCENE_PROFILE_ROT_WIDTH = "profile_rot_width"
+SCENE_PROFILE_ROT_HEIGHT = "profile_rot_height"
 
 SCENE_PROPERTY_KEYS_TO_DELETE = [
     SCENE_PROFILE_RAW_LOCALS,
@@ -206,19 +209,54 @@ class OBJECT_OT_store_profile_info_edit(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class OBJECT_OT_profile_rotate_axis(bpy.types.Operator):
+    bl_idname = "object.profile_rotate_axis"
+    bl_label = "Rotate Profile Axis"
+    bl_options = {'INTERNAL'}
+
+    axis: BoolProperty(name="Height Axis", default=False)  # False=width, True=height
+    delta: FloatProperty(name="Delta", default=15.0)
+
+    def execute(self, context):
+        scene = context.scene
+        key = SCENE_PROFILE_ROT_HEIGHT if self.axis else SCENE_PROFILE_ROT_WIDTH
+        scene[key] = (scene.get(key, 0.0) + self.delta) % 360.0
+        bpy.ops.object.place_profile_on_edges_edit('EXEC_DEFAULT')
+        return {'FINISHED'}
+
+
 class OBJECT_OT_place_profile_on_edges_edit(bpy.types.Operator):
     bl_idname = "object.place_profile_on_edges_edit"
     bl_label = "Orient, Place & Delete"
     bl_options = {'REGISTER', 'UNDO'}
 
-    flip_width: BoolProperty(name="Flip Width", default=False)
-    flip_height: BoolProperty(name="Flip Height", default=False)
+    flip_width: FloatProperty(name="Width Rotation", default=0.0)
+    flip_height: FloatProperty(name="Height Rotation", default=0.0)
     use_alt_anchor: BoolProperty(name="Use Anchor B", default=False)
 
     def draw(self, context):
         layout = self.layout
-        layout.prop(self, "flip_width", toggle=True)
-        layout.prop(self, "flip_height", toggle=True)
+        rot_w = context.scene.get(SCENE_PROFILE_ROT_WIDTH, 0.0)
+        rot_h = context.scene.get(SCENE_PROFILE_ROT_HEIGHT, 0.0)
+
+        row = layout.row(align=True)
+        row.label(text=f"Width: {rot_w:.0f}°")
+        op = row.operator("object.profile_rotate_axis", text="◄")
+        op.axis = False
+        op.delta = -15.0
+        op = row.operator("object.profile_rotate_axis", text="►")
+        op.axis = False
+        op.delta = 15.0
+
+        row = layout.row(align=True)
+        row.label(text=f"Height: {rot_h:.0f}°")
+        op = row.operator("object.profile_rotate_axis", text="◄")
+        op.axis = True
+        op.delta = -15.0
+        op = row.operator("object.profile_rotate_axis", text="►")
+        op.axis = True
+        op.delta = 15.0
+
         if SCENE_PROFILE_ANCHOR_EDGE_VERTS in context.scene:
             button_text = "Anchor: Point B" if self.use_alt_anchor else "Anchor: Point A"
             layout.prop(self, "use_alt_anchor", text=button_text, toggle=True)
@@ -297,7 +335,7 @@ class OBJECT_OT_place_profile_on_edges_edit(bpy.types.Operator):
 
         placements = []
         if calc_start_vert and calc_middle_vert and calc_end_vert:
-            P = (calc_start_vert.co + calc_middle_vert.co) * 0.5
+            P = calc_start_vert.co.copy()
             d = (calc_middle_vert.co - calc_start_vert.co).normalized()
             helper_vec = (calc_end_vert.co - calc_middle_vert.co).normalized()
             world_up = Vector((0, 0, 1))
@@ -321,11 +359,18 @@ class OBJECT_OT_place_profile_on_edges_edit(bpy.types.Operator):
                 return {'CANCELLED'}
             for edge in targets:
                 v1, v2 = edge.verts
-                P = (v1.co + v2.co) * 0.5
+                P = v1.co.copy()
                 d = (v2.co - v1.co).normalized()
-                world_up = Vector((0, 0, 1))
-                temp_up = world_up if abs(d.dot(world_up)) < 0.999 else Vector((0, 1, 0))
-                up = (temp_up - d * d.dot(temp_up)).normalized()
+                if edge.link_faces:
+                    face_normal = edge.link_faces[0].normal.normalized()
+                else:
+                    world_up = Vector((0, 0, 1))
+                    face_normal = world_up if abs(d.dot(world_up)) < 0.999 else Vector((0, 1, 0))
+                up = d.cross(face_normal).normalized()
+                if up.length < 1e-6:
+                    world_up = Vector((0, 0, 1))
+                    face_normal = world_up if abs(d.dot(world_up)) < 0.999 else Vector((0, 1, 0))
+                    up = d.cross(face_normal).normalized()
                 right = up.cross(d).normalized()
                 R = Matrix((right, d, up)).transposed()
                 T = P - (R @ oriented_anchor)
@@ -335,14 +380,9 @@ class OBJECT_OT_place_profile_on_edges_edit(bpy.types.Operator):
             self.report({'ERROR'}, "Could not calculate any valid placements.")
             return {'CANCELLED'}
 
-        coords = [
-            Vector((
-                -v.z if self.flip_width else v.z,
-                v.y,
-                -v.x if self.flip_height else v.x
-            ))
-            for v in oriented_coords
-        ]
+        rot_w = Matrix.Rotation(math.radians(scene.get(SCENE_PROFILE_ROT_WIDTH, 0.0)), 3, 'Y')
+        rot_h = Matrix.Rotation(math.radians(scene.get(SCENE_PROFILE_ROT_HEIGHT, 0.0)), 3, 'X')
+        coords = [rot_h @ rot_w @ v for v in oriented_coords]
 
         for placement in placements:
             R, T = placement['R'], placement['T']
@@ -371,6 +411,6 @@ class OBJECT_OT_place_profile_on_edges_edit(bpy.types.Operator):
         return {'FINISHED'}
 
     def invoke(self, context, event):
-        self.flip_width = False
-        self.flip_height = False
+        context.scene[SCENE_PROFILE_ROT_WIDTH] = 0.0
+        context.scene[SCENE_PROFILE_ROT_HEIGHT] = 0.0
         return self.execute(context)

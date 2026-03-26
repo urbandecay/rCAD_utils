@@ -16,6 +16,7 @@ from .extrude_along_path import options_manager as eap_options
 from .place_profile import (
     OBJECT_OT_store_profile_info_edit,
     OBJECT_OT_place_profile_on_edges_edit,
+    OBJECT_OT_profile_rotate_axis,
 )
 from .cool_bool import MESH_OT_CoolBool
 from .mesh_tiler import MESH_OT_MeshTiler
@@ -35,6 +36,7 @@ classes = [
     eap_ui.OT_ExtrudeAlongPath_Extrude,
     # Place Profile operators
     OBJECT_OT_store_profile_info_edit,
+    OBJECT_OT_profile_rotate_axis,
     OBJECT_OT_place_profile_on_edges_edit,
     # Cool Bool operator
     MESH_OT_CoolBool,
