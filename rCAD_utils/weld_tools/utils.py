@@ -6,18 +6,6 @@ from bpy_extras import view3d_utils
 
 # Geometry tolerances
 EPS = 1e-12
-
-# Batch mode flag — when True, individual operators skip their final
-# bmesh.update_edit_mesh() call, deferring the single update to the
-# executor (execute_weld.py).  Strategy 3 of 4: batch geometry mods.
-_BATCH_MODE = False
-
-def set_batch_mode(enabled):
-    global _BATCH_MODE
-    _BATCH_MODE = bool(enabled)
-
-def in_batch_mode():
-    return _BATCH_MODE
 LJUNC_T_EPS = 1e-6
 COLINEAR_COS_2D = 0.9995  # ~1.8 deg
 

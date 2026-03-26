@@ -8,7 +8,6 @@ from mathutils import Vector
 from collections import defaultdict
 
 from .deselect_manager import get_or_create_session, commit_if_owned
-from .utils import in_batch_mode
 
 
 def _world_normal(obj, face):
@@ -262,8 +261,7 @@ class MESH_OT_super_fuse_square(bpy.types.Operator):
             for f in bm.faces:
                 if _face_centroid_key(f, mw) in originally_hidden_keys:
                     f.hide = True
-            if not in_batch_mode():
-                bmesh.update_edit_mesh(me)
+            bmesh.update_edit_mesh(me)
 
 
             # Restore view
