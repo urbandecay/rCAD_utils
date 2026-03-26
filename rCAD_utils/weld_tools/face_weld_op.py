@@ -1,10 +1,12 @@
 # face_weld_op.py
 # Uses knife_project to fuse smaller faces into larger coplanar faces.
 # Handles multiple source faces on multiple targets in one operation.
+# Also supports edge-on-face welding (edges cut into a target face).
 
 import bpy
 import bmesh
 from mathutils import Vector
+import mathutils
 from collections import defaultdict
 
 from .deselect_manager import get_or_create_session, commit_if_owned
@@ -108,8 +110,21 @@ class MESH_OT_super_fuse_square(bpy.types.Operator):
         bm.faces.ensure_lookup_table()
 
         selected_faces = [f for f in bm.faces if f.select and not f.hide]
+        selected_edges = [e for e in bm.edges if e.select and not e.hide]
+
+        # --- EDGE-ON-FACE PATH ---
+        # If we have exactly 1 face and some edges not on that face, do edge-on-face weld
+        if len(selected_faces) == 1 and selected_edges:
+            target_face = selected_faces[0]
+            face_edge_set = set(target_face.edges)
+            source_edges = [e for e in selected_edges if e not in face_edge_set]
+            if source_edges:
+                return self._edge_on_face_weld(context, obj, bm, me,
+                                               target_face, source_edges, weld_rad)
+
         if len(selected_faces) < 2:
-            self.report({'ERROR'}, "Square: select at least two coplanar faces.")
+            self.report({'ERROR'}, "Square: select at least two coplanar faces, "
+                        "or one face + edges to weld onto it.")
             return {'CANCELLED'}
 
         mw = obj.matrix_world.copy()
@@ -283,6 +298,238 @@ class MESH_OT_super_fuse_square(bpy.types.Operator):
                 bpy.data.meshes.remove(cutter_mesh)
 
         self.report({'INFO'}, f"Square: fused {total_fused} face(s).")
+        return {'FINISHED'}
+
+    # ------------------------------------------------------------------
+    # EDGE-ON-FACE WELD  (ported from radCAD arc_weld_manager)
+    # ------------------------------------------------------------------
+    def _edge_on_face_weld(self, context, obj, bm, me, target_face, source_edges, weld_rad):
+        """Weld selected edges onto a selected target face.
+
+        Two-phase approach from the drawing tools:
+          Phase 1 – Direct face_split for edges whose verts both sit on
+                    the face boundary but the edge itself isn't part of it.
+          Phase 2 – Knife-project for edges that cross the face interior
+                    (verts not yet on the boundary).
+        """
+        mw = obj.matrix_world.copy()
+
+        # Snapshot hidden faces by centroid so we can restore later
+        originally_hidden_keys = {_face_centroid_key(f, mw) for f in bm.faces if f.hide}
+
+        # Collect ideal coords BEFORE any topology changes
+        arc_coords = [v.co.copy() for v in
+                      {v for e in source_edges for v in e.verts}]
+
+        # ------ PHASE 1: DIRECT FACE SPLIT ------
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+
+        face_splits = 0
+        changed = True
+        while changed:
+            changed = False
+            for e in list(source_edges):
+                if not e.is_valid:
+                    continue
+                v1, v2 = e.verts
+                # Faces that contain BOTH verts but NOT this edge
+                common_faces = set(v1.link_faces) & set(v2.link_faces)
+                for f in common_faces:
+                    if e in f.edges:
+                        continue          # already on boundary
+                    if f.hide:
+                        continue
+                    try:
+                        bmesh.utils.face_split(f, v1, v2, use_exist=True)
+                        face_splits += 1
+                        changed = True
+                    except Exception:
+                        pass
+                if changed:
+                    bm.faces.ensure_lookup_table()
+                    break                 # restart after topology change
+
+        if face_splits:
+            bmesh.update_edit_mesh(me, loop_triangles=False, destructive=True)
+
+        # ------ PHASE 2: KNIFE PROJECT for remaining edges ------
+        # Re-fetch bmesh after topology changes
+        bm = bmesh.from_edit_mesh(me)
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+
+        # Find edges still selected that aren't yet part of any face boundary
+        # around the target.  We identify them by checking if both verts share
+        # a common face with each other (if face_split already handled them,
+        # the edge is now on the boundary and we skip it).
+        knife_edges = []
+        for e in bm.edges:
+            if not e.is_valid or not e.select or e.hide:
+                continue
+            # Skip edges that are already part of a face boundary
+            if any(True for f in e.link_faces if not f.hide):
+                # Edge is on a face boundary already — might have been split in phase 1
+                continue
+            knife_edges.append(e)
+
+        if not knife_edges:
+            # Phase 1 handled everything, clean up and return
+            bpy.ops.mesh.remove_doubles(threshold=weld_rad)
+            self.report({'INFO'}, f"Square: edge-on-face weld — "
+                        f"{face_splits} direct split(s).")
+            return {'FINISHED'}
+
+        # Build edge pairs in world space for the cutter
+        edge_pairs_world = [(mw @ e.verts[0].co, mw @ e.verts[1].co)
+                            for e in knife_edges]
+
+        # Target face info
+        face_center_world = mw @ target_face.calc_center_median() if target_face.is_valid else mw @ bm.faces[0].calc_center_median()
+        face_normal_world = _world_normal(obj, target_face) if target_face.is_valid else Vector((0, 0, 1))
+
+        # Find the target face(s) — could have been split in phase 1
+        # so look for all faces on the same plane
+        target_faces = []
+        if target_face.is_valid:
+            target_faces.append(target_face)
+        # Also grab any new faces from phase 1 splits on the same plane
+        sample_n = face_normal_world
+        sample_d = face_center_world.dot(sample_n)
+        for f in bm.faces:
+            if f.hide or f in target_faces:
+                continue
+            fn = _world_normal(obj, f)
+            if abs(fn.dot(sample_n)) < 0.99:
+                continue
+            fc = mw @ f.calc_center_median()
+            if abs(fc.dot(sample_n) - sample_d) < 0.001:
+                target_faces.append(f)
+
+        face_radius = 1.0
+        if target_faces:
+            face_radius = max(
+                max((mw @ v.co - face_center_world).length
+                    for v in f.verts)
+                for f in target_faces
+            )
+            face_radius = max(face_radius, 0.1)
+
+        # Build cutter mesh
+        cutter_mesh = bpy.data.meshes.new("__edge_weld_cutter__")
+        bm_cut = bmesh.new()
+        added = {}
+        for (a_w, b_w) in edge_pairs_world:
+            key_a = (round(a_w.x, 8), round(a_w.y, 8), round(a_w.z, 8))
+            key_b = (round(b_w.x, 8), round(b_w.y, 8), round(b_w.z, 8))
+            if key_a not in added:
+                added[key_a] = bm_cut.verts.new(a_w)
+            if key_b not in added:
+                added[key_b] = bm_cut.verts.new(b_w)
+            try:
+                bm_cut.edges.new([added[key_a], added[key_b]])
+            except Exception:
+                pass
+        bm_cut.to_mesh(cutter_mesh)
+        bm_cut.free()
+        cutter_mesh.update()
+
+        cutter_obj = bpy.data.objects.new("__edge_weld_cutter__", cutter_mesh)
+        context.collection.objects.link(cutter_obj)
+
+        # Capture view state
+        area, space = _find_view3d()
+        orig_rot = orig_loc = orig_persp = None
+        if space:
+            r3d = space.region_3d
+            orig_rot = r3d.view_rotation.copy()
+            orig_loc = r3d.view_location.copy()
+            orig_persp = r3d.view_perspective
+
+        try:
+            # Show only target faces
+            bm = bmesh.from_edit_mesh(me)
+            bm.faces.ensure_lookup_table()
+            bpy.ops.mesh.select_all(action='DESELECT')
+
+            target_set = set(f for f in target_faces if f.is_valid)
+            for f in bm.faces:
+                if f in target_set:
+                    f.hide = False
+                    f.select = True
+                else:
+                    f.hide = True
+            bmesh.update_edit_mesh(me)
+
+            # Align view and knife project
+            if space:
+                _align_view_to_face(space, face_center_world,
+                                    face_normal_world, face_radius)
+                try:
+                    bpy.ops.wm.redraw_timer(type='DRAW_WIN', iterations=1)
+                except Exception:
+                    pass
+                context.view_layer.update()
+
+            cutter_obj.select_set(True)
+            obj.select_set(True)
+            context.view_layer.objects.active = obj
+            bpy.ops.mesh.knife_project(cut_through=True)
+
+            # Teleport cut verts to ideal positions
+            bm_final = bmesh.from_edit_mesh(me)
+            bm_final.verts.ensure_lookup_table()
+            search_rad_sq = (weld_rad * 2.5) ** 2
+            for v in bm_final.verts:
+                if v.hide:
+                    continue
+                if v.select:
+                    for co in arc_coords:
+                        if (v.co - co).length_squared < search_rad_sq:
+                            v.co = co.copy()
+                            break
+                else:
+                    for co in arc_coords:
+                        if (v.co - co).length_squared < 1e-8:
+                            v.select = True
+                            break
+            bmesh.update_edit_mesh(me)
+            bpy.ops.mesh.remove_doubles(threshold=weld_rad)
+
+            # Unhide everything
+            bm = bmesh.from_edit_mesh(me)
+            for f in bm.faces:
+                f.hide = False
+                f.select = False
+                for v in f.verts:
+                    v.hide = False
+                for e in f.edges:
+                    e.hide = False
+            bmesh.update_edit_mesh(me)
+
+            # Restore originally hidden faces
+            bm = bmesh.from_edit_mesh(me)
+            for f in bm.faces:
+                if _face_centroid_key(f, mw) in originally_hidden_keys:
+                    f.hide = True
+            bmesh.update_edit_mesh(me)
+
+        finally:
+            # Restore view
+            if space and orig_rot:
+                space.region_3d.view_rotation = orig_rot
+                space.region_3d.view_location = orig_loc
+                space.region_3d.view_perspective = orig_persp
+            # Clean up cutter
+            if cutter_obj.name in bpy.data.objects:
+                bpy.data.objects.remove(cutter_obj, do_unlink=True)
+            if cutter_mesh.name in bpy.data.meshes:
+                bpy.data.meshes.remove(cutter_mesh)
+
+        self.report({'INFO'}, f"Square: edge-on-face weld — "
+                    f"{face_splits} split(s) + knife project.")
         return {'FINISHED'}
 
 
