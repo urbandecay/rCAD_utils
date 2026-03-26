@@ -306,12 +306,19 @@ class MESH_OT_super_fuse_square(bpy.types.Operator):
     def _edge_on_face_weld(self, context, obj, bm, me, target_face, source_edges, weld_rad):
         """Weld selected edges onto a selected target face.
 
-        Two-phase approach from the drawing tools:
+        Three-phase approach matching the drawing tools:
+          Phase 0 – Integrate source edge verts into the target face boundary
+                    by splitting boundary edges at the nearest point.  This is
+                    what the drawing tool's perform_heavy_weld does — without
+                    it, verts float near the face but aren't topologically part
+                    of it, so face_split can't find them.
           Phase 1 – Direct face_split for edges whose verts both sit on
                     the face boundary but the edge itself isn't part of it.
           Phase 2 – Knife-project for edges that cross the face interior
                     (verts not yet on the boundary).
         """
+        DEBUG = True  # flip to False once diagonal welding is solid
+
         mw = obj.matrix_world.copy()
 
         # Snapshot hidden faces by centroid so we can restore later
@@ -321,11 +328,165 @@ class MESH_OT_super_fuse_square(bpy.types.Operator):
         arc_coords = [v.co.copy() for v in
                       {v for e in source_edges for v in e.verts}]
 
-        # ------ PHASE 1: DIRECT FACE SPLIT ------
+        # ------ PHASE 0: INTEGRATE VERTS INTO FACE BOUNDARY ------
+        # The drawing tool's pre-weld splits boundary edges so that source
+        # edge endpoints become actual verts OF the target face.  Without
+        # this step, face_split fails because the verts aren't in the face's
+        # vertex loop — even if they're geometrically sitting right on top
+        # of a boundary edge.
         bm.verts.ensure_lookup_table()
         bm.edges.ensure_lookup_table()
         bm.faces.ensure_lookup_table()
 
+        source_verts = list({v for e in source_edges for v in e.verts})
+
+        if DEBUG:
+            print(f"\n{'='*60}")
+            print(f"[FACE_WELD] _edge_on_face_weld START")
+            print(f"  target_face index={target_face.index}, "
+                  f"verts={[v.index for v in target_face.verts]}")
+            print(f"  source_edges: {len(source_edges)}")
+            for e in source_edges:
+                if e.is_valid:
+                    print(f"    edge {e.index}: v{e.verts[0].index}"
+                          f"({e.verts[0].co!s}) -> v{e.verts[1].index}"
+                          f"({e.verts[1].co!s})")
+            print(f"  source_verts: {[v.index for v in source_verts]}")
+            for sv in source_verts:
+                in_face = sv in target_face.verts
+                print(f"    v{sv.index} co={sv.co!s}  in_target_face={in_face}  "
+                      f"link_faces={[f.index for f in sv.link_faces]}")
+
+        integrate_count = 0
+        for sv in source_verts:
+            if not sv.is_valid:
+                continue
+            if sv in target_face.verts:
+                if DEBUG:
+                    print(f"  [P0] v{sv.index} already in target face — skip")
+                continue  # already part of the face
+
+            # Find the closest boundary edge of the target face to this vert
+            best_edge = None
+            best_dist = float('inf')
+            best_proj = None
+            for be in target_face.edges:
+                a, b = be.verts[0].co, be.verts[1].co
+                ab = b - a
+                ab_len_sq = ab.length_squared
+                if ab_len_sq < 1e-12:
+                    continue
+                t = max(0.0, min(1.0, (sv.co - a).dot(ab) / ab_len_sq))
+                proj = a + ab * t
+                d = (sv.co - proj).length
+                if d < best_dist:
+                    best_dist = d
+                    best_edge = be
+                    best_proj = proj
+
+            if DEBUG:
+                if best_edge:
+                    print(f"  [P0] v{sv.index}: closest boundary edge={best_edge.index} "
+                          f"(v{best_edge.verts[0].index}-v{best_edge.verts[1].index}), "
+                          f"dist={best_dist:.6f}, proj={best_proj!s}")
+                else:
+                    print(f"  [P0] v{sv.index}: NO boundary edge found!")
+
+            # If vert is close to a boundary edge, split that edge and merge
+            if best_edge and best_dist < weld_rad * 5.0:
+                # Check if vert is near one of the edge endpoints — just merge
+                for ev in best_edge.verts:
+                    if (sv.co - ev.co).length < weld_rad * 2.0:
+                        if DEBUG:
+                            print(f"  [P0] v{sv.index} near endpoint v{ev.index} "
+                                  f"(dist={( sv.co - ev.co).length:.6f}) — "
+                                  f"merging via remove_doubles")
+                        # Merge sv into the existing boundary vert
+                        bmesh.ops.pointmerge(bm, verts=[sv, ev], merge_co=ev.co)
+                        integrate_count += 1
+                        best_edge = None  # skip the split
+                        break
+
+                if best_edge and best_edge.is_valid:
+                    # Split the boundary edge at the projection point to
+                    # insert our vert into the face's vertex loop
+                    a, b = best_edge.verts[0].co, best_edge.verts[1].co
+                    ab = b - a
+                    ab_len_sq = ab.length_squared
+                    t = (sv.co - a).dot(ab) / ab_len_sq if ab_len_sq > 1e-12 else 0.5
+                    t = max(0.01, min(0.99, t))
+
+                    if DEBUG:
+                        print(f"  [P0] Splitting edge {best_edge.index} at t={t:.4f} "
+                              f"for v{sv.index}")
+
+                    try:
+                        new_edge, new_vert = bmesh.utils.edge_split(best_edge, best_edge.verts[0], t)
+                        # Now merge the new split vert with our source vert
+                        if DEBUG:
+                            print(f"  [P0] Split created new_vert={new_vert.index} "
+                                  f"at {new_vert.co!s}, merging with v{sv.index}")
+                        bmesh.ops.pointmerge(bm, verts=[sv, new_vert], merge_co=sv.co)
+                        integrate_count += 1
+                    except Exception as ex:
+                        if DEBUG:
+                            print(f"  [P0] edge_split FAILED: {ex}")
+            elif DEBUG:
+                print(f"  [P0] v{sv.index} too far from boundary "
+                      f"(dist={best_dist:.6f} > threshold={weld_rad * 5.0:.6f})")
+
+            # Refresh lookup tables after topology changes
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+
+        if integrate_count:
+            bmesh.update_edit_mesh(me, loop_triangles=False, destructive=True)
+            bm = bmesh.from_edit_mesh(me)
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+
+        if DEBUG:
+            print(f"  [P0] Integrated {integrate_count} verts into face boundary")
+
+        # Re-collect source edges after topology changes — find edges
+        # connecting our arc_coords that are selected
+        source_edges_new = []
+        for e in bm.edges:
+            if not e.is_valid or not e.select or e.hide:
+                continue
+            v1_match = any((e.verts[0].co - ac).length < weld_rad * 3 for ac in arc_coords)
+            v2_match = any((e.verts[1].co - ac).length < weld_rad * 3 for ac in arc_coords)
+            if v1_match and v2_match:
+                source_edges_new.append(e)
+        source_edges = source_edges_new
+
+        # Also re-find the target face (it may have been split by Phase 0)
+        target_face_candidates = []
+        for f in bm.faces:
+            if f.hide:
+                continue
+            fn = _world_normal(obj, f)
+            fc = mw @ f.calc_center_median()
+            orig_n = _world_normal(obj, target_face) if target_face.is_valid else Vector((0, 0, 1))
+            orig_c = mw @ target_face.calc_center_median() if target_face.is_valid else Vector()
+            if abs(fn.dot(orig_n)) > 0.99:
+                if abs(fc.dot(orig_n) - orig_c.dot(orig_n)) < 0.001:
+                    target_face_candidates.append(f)
+
+        if DEBUG:
+            print(f"  [P0] Re-found {len(source_edges)} source edges, "
+                  f"{len(target_face_candidates)} target face candidates")
+            for e in source_edges:
+                v1, v2 = e.verts
+                v1_faces = [f.index for f in v1.link_faces]
+                v2_faces = [f.index for f in v2.link_faces]
+                common = set(v1.link_faces) & set(v2.link_faces)
+                print(f"    edge {e.index}: v{v1.index} faces={v1_faces}, "
+                      f"v{v2.index} faces={v2_faces}, common={[f.index for f in common]}")
+
+        # ------ PHASE 1: DIRECT FACE SPLIT ------
         face_splits = 0
         changed = True
         while changed:
@@ -334,19 +495,51 @@ class MESH_OT_super_fuse_square(bpy.types.Operator):
                 if not e.is_valid:
                     continue
                 v1, v2 = e.verts
+                if not v1.is_valid or not v2.is_valid:
+                    continue
                 # Faces that contain BOTH verts but NOT this edge
                 common_faces = set(v1.link_faces) & set(v2.link_faces)
+                if DEBUG:
+                    print(f"  [P1] edge {e.index}: v{v1.index}-v{v2.index}, "
+                          f"common_faces={[f.index for f in common_faces]}")
                 for f in common_faces:
                     if e in f.edges:
+                        if DEBUG:
+                            print(f"    [P1] face {f.index} — edge already on boundary, skip")
                         continue          # already on boundary
                     if f.hide:
                         continue
+                    if DEBUG:
+                        print(f"    [P1] Attempting face_split on face {f.index} "
+                              f"(verts={[v.index for v in f.verts]})")
+                    split_ok = False
+                    # Use use_exist=True — matching the drawing tool approach.
+                    # Phase 0 now ensures verts are properly in the face, so
+                    # the ghost-edge problem from before shouldn't happen.
                     try:
                         bmesh.utils.face_split(f, v1, v2, use_exist=True)
+                        split_ok = True
+                        if DEBUG:
+                            print(f"    [P1] face_split SUCCESS")
+                    except Exception as ex:
+                        if DEBUG:
+                            print(f"    [P1] face_split FAILED: {ex}")
+                    if not split_ok:
+                        try:
+                            res = bmesh.ops.connect_vert_pair(
+                                bm, verts=[v1, v2])
+                            if res and res.get('edges'):
+                                split_ok = True
+                                if DEBUG:
+                                    print(f"    [P1] connect_vert_pair SUCCESS")
+                            elif DEBUG:
+                                print(f"    [P1] connect_vert_pair — no edges returned")
+                        except Exception as ex:
+                            if DEBUG:
+                                print(f"    [P1] connect_vert_pair FAILED: {ex}")
+                    if split_ok:
                         face_splits += 1
                         changed = True
-                    except Exception:
-                        pass
                 if changed:
                     bm.faces.ensure_lookup_table()
                     break                 # restart after topology change
@@ -375,10 +568,23 @@ class MESH_OT_super_fuse_square(bpy.types.Operator):
                 continue
             knife_edges.append(e)
 
+        if DEBUG:
+            print(f"\n  [P2] Phase 1 did {face_splits} split(s)")
+            print(f"  [P2] Remaining knife_edges: {len(knife_edges)}")
+            for e in knife_edges:
+                print(f"    edge {e.index}: v{e.verts[0].index}-v{e.verts[1].index}, "
+                      f"link_faces={[f.index for f in e.link_faces]}")
+
         if not knife_edges:
-            # Phase 1 handled everything, clean up and return
+            # Phase 0+1 handled everything, clean up and return
             bpy.ops.mesh.remove_doubles(threshold=weld_rad)
+            if DEBUG:
+                print(f"\n  [DONE] All handled by Phase 0+1: "
+                      f"{integrate_count} integrated, {face_splits} split(s), "
+                      f"no knife_project needed")
+                print(f"{'='*60}\n")
             self.report({'INFO'}, f"Square: edge-on-face weld — "
+                        f"{integrate_count} integrated, "
                         f"{face_splits} direct split(s).")
             return {'FINISHED'}
 
@@ -417,17 +623,21 @@ class MESH_OT_super_fuse_square(bpy.types.Operator):
             )
             face_radius = max(face_radius, 0.1)
 
-        # Build cutter mesh
+        # Build cutter mesh — offset slightly along face normal so
+        # knife_project doesn't fail on exactly-coplanar geometry
         cutter_mesh = bpy.data.meshes.new("__edge_weld_cutter__")
         bm_cut = bmesh.new()
         added = {}
+        normal_offset = face_normal_world * 0.001
         for (a_w, b_w) in edge_pairs_world:
+            a_off = a_w + normal_offset
+            b_off = b_w + normal_offset
             key_a = (round(a_w.x, 8), round(a_w.y, 8), round(a_w.z, 8))
             key_b = (round(b_w.x, 8), round(b_w.y, 8), round(b_w.z, 8))
             if key_a not in added:
-                added[key_a] = bm_cut.verts.new(a_w)
+                added[key_a] = bm_cut.verts.new(a_off)
             if key_b not in added:
-                added[key_b] = bm_cut.verts.new(b_w)
+                added[key_b] = bm_cut.verts.new(b_off)
             try:
                 bm_cut.edges.new([added[key_a], added[key_b]])
             except Exception:
@@ -476,6 +686,12 @@ class MESH_OT_super_fuse_square(bpy.types.Operator):
             cutter_obj.select_set(True)
             obj.select_set(True)
             context.view_layer.objects.active = obj
+
+            if DEBUG:
+                print(f"  [P2] Running knife_project with {len(edge_pairs_world)} "
+                      f"cutter edge(s), {len(target_set)} target face(s)")
+                print(f"  [P2] normal_offset={normal_offset!s}")
+
             bpy.ops.mesh.knife_project(cut_through=True)
 
             # Teleport cut verts to ideal positions
@@ -528,7 +744,15 @@ class MESH_OT_super_fuse_square(bpy.types.Operator):
             if cutter_mesh.name in bpy.data.meshes:
                 bpy.data.meshes.remove(cutter_mesh)
 
+        if DEBUG:
+            print(f"\n  [DONE] edge-on-face weld complete: "
+                  f"P0 integrated {integrate_count} vert(s), "
+                  f"P1 split {face_splits} face(s), "
+                  f"P2 knife_project on {len(knife_edges)} edge(s)")
+            print(f"{'='*60}\n")
+
         self.report({'INFO'}, f"Square: edge-on-face weld — "
+                    f"{integrate_count} integrated, "
                     f"{face_splits} split(s) + knife project.")
         return {'FINISHED'}
 
