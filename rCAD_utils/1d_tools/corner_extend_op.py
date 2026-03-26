@@ -21,7 +21,7 @@ def corner_extend(self, active, to_active):
         bm.free()
         return False
 
-    sel_edges = [e for e in bm.edges if e.select and e.verts[0].index not in loop1]
+    sel_edges = [e for e in bm.edges if e.select and e.verts[0].index not in loop1 and e.verts[1].index not in loop1]
     loops = [[e.verts[0].index, e.verts[1].index] for e in sel_edges]
 
     if len(loops) == 0:
@@ -29,41 +29,38 @@ def corner_extend(self, active, to_active):
         bm.free()
         return False
 
+    bm.verts.ensure_lookup_table()
+
     for loop2 in loops:
-        verts = me.vertices
-        v1 = verts[loop1[0]].co
-        v2 = verts[loop1[1]].co
-        v3 = verts[loop2[0]].co
-        v4 = verts[loop2[1]].co
+        v1 = bm.verts[loop1[0]].co
+        v2 = bm.verts[loop1[1]].co
+        v3 = bm.verts[loop2[0]].co
+        v4 = bm.verts[loop2[1]].co
         p_cross = intersect_line_line(v1, v2, v3, v4)
 
-        l1 = (p_cross[0] - v1).length
-        l2 = (p_cross[0] - v2).length
-        i1 = 0
-        if l2 < l1:
-            i1 = 1
+        if p_cross is None:
+            self.report({'WARNING'}, 'Edges are parallel, no intersection')
+            continue
 
-        l1 = (p_cross[1] - v3).length
-        l2 = (p_cross[1] - v4).length
-        i2 = 0
-        if l2 < l1:
-            i2 = 1
+        corner = (p_cross[0] + p_cross[1]) / 2
 
-        if (active or to_active) and loop1:
-            if me.vertices[loop1[i1]].index in loop1:
-                if active:
-                    me.vertices[loop1[i1]].co = p_cross[0]
-                else:
-                    me.vertices[loop2[i2]].co = p_cross[1]
-            else:
-                if active:
-                    me.vertices[loop2[i2]].co = p_cross[1]
-                else:
-                    me.vertices[loop1[i1]].co = p_cross[0]
+        i1 = 0 if (corner - v1).length <= (corner - v2).length else 1
+        i2 = 0 if (corner - v3).length <= (corner - v4).length else 1
+
+        va = bm.verts[loop1[i1]]
+        vb = bm.verts[loop2[i2]]
+
+        if active:
+            va.co = corner.copy()
+        elif to_active:
+            vb.co = corner.copy()
         else:
-            me.vertices[loop1[i1]].co = p_cross[0]
-            me.vertices[loop2[i2]].co = p_cross[1]
+            va.co = corner.copy()
+            vb.co = corner.copy()
+            bmesh.ops.pointmerge(bm, verts=[va, vb], merge_co=corner)
+            bm.verts.ensure_lookup_table()
 
+    bm.to_mesh(me)
     bm.free()
     return True
 

@@ -112,21 +112,12 @@ def getNormalPlane(vecs, mat):
 
 
 def get_active_edge(bm):
-    result = None
-    elem, el = bm_vert_active_get(bm)
-    if elem is not None:
-        mode_ = str(el)[3:4]
-        bpy.ops.object.mode_set(mode='EDIT')
-        bpy.ops.mesh.select_mode(type='EDGE')
-        bm.edges[elem].verts[1]
-        elem, el = bm_vert_active_get(bm)
-        if elem is not None:
-            result = [bm.edges[elem].verts[0].index, bm.edges[elem].verts[1].index]
-        if mode_ == 'V':
-            bpy.ops.mesh.select_mode(type='VERT')
-        elif mode_ == 'E':
-            bpy.ops.mesh.select_mode(type='EDGE')
-        elif mode_ == 'F':
-            bpy.ops.mesh.select_mode(type='FACE')
-        bpy.ops.object.mode_set(mode='OBJECT')
-    return result
+    for elem in reversed(bm.select_history):
+        if isinstance(elem, bmesh.types.BMEdge):
+            return [elem.verts[0].index, elem.verts[1].index]
+        elif isinstance(elem, bmesh.types.BMVert):
+            # In vert mode: find a selected edge connected to the active vert
+            for e in elem.link_edges:
+                if e.select:
+                    return [e.verts[0].index, e.verts[1].index]
+    return None
