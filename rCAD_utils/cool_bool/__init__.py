@@ -69,6 +69,7 @@ class MESH_OT_CoolBool(bpy.types.Operator):
     keep_cutter: bpy.props.BoolProperty(name="Keep Cutter", default=False)
     intersect_with_cutter: bpy.props.BoolProperty(name="Intersect with Cutter", default=False)
     merge_intersections: bpy.props.BoolProperty(name="Merge Intersections", default=False)
+    swap_subtract: bpy.props.BoolProperty(name="Swap", default=False, description="Targets cut into the cutter instead of cutter cutting into targets")
     merge_subtract_results: bpy.props.BoolProperty(name="Merge Results", default=False)
     limited_dissolve: bpy.props.BoolProperty(name="Limited Dissolve", default=True)
     dissolve_per_iteration: bpy.props.BoolProperty(name="Per Iteration", default=True)
@@ -77,6 +78,7 @@ class MESH_OT_CoolBool(bpy.types.Operator):
         layout = self.layout
         layout.prop(self, "keep_cutter")
         if self.operation_mode == 'SUBTRACT':
+            layout.prop(self, "swap_subtract")
             layout.prop(self, "merge_subtract_results")
         elif self.operation_mode == 'INTERSECT':
             row = layout.row()
@@ -176,21 +178,30 @@ class MESH_OT_CoolBool(bpy.types.Operator):
                 final_objects.append(main_obj)
 
             elif self.operation_mode == 'SUBTRACT':
-                subtract_results = []
-                for t_obj in target_objects:
-                    apply_bool_and_clean(t_obj, cutter_obj, 'DIFFERENCE')
-                    subtract_results.append(t_obj)
-                if keep_cutter_setting: final_objects.append(cutter_obj)
-                else: objects_to_delete.append(cutter_obj)
-
-                if self.merge_subtract_results and len(subtract_results) > 1:
-                    merged = subtract_results[0]
-                    for r_obj in subtract_results[1:]:
-                        apply_bool_and_clean(merged, r_obj, 'UNION')
-                        objects_to_delete.append(r_obj)
-                    final_objects.append(merged)
+                if self.swap_subtract:
+                    # Swapped: each target cuts into the cutter
+                    main_obj = cutter_obj
+                    for t_obj in target_objects:
+                        apply_bool_and_clean(main_obj, t_obj, 'DIFFERENCE')
+                        objects_to_delete.append(t_obj)
+                    final_objects.append(main_obj)
                 else:
-                    final_objects.extend(subtract_results)
+                    # Normal: cutter cuts into each target
+                    subtract_results = []
+                    for t_obj in target_objects:
+                        apply_bool_and_clean(t_obj, cutter_obj, 'DIFFERENCE')
+                        subtract_results.append(t_obj)
+                    if keep_cutter_setting: final_objects.append(cutter_obj)
+                    else: objects_to_delete.append(cutter_obj)
+
+                    if self.merge_subtract_results and len(subtract_results) > 1:
+                        merged = subtract_results[0]
+                        for r_obj in subtract_results[1:]:
+                            apply_bool_and_clean(merged, r_obj, 'UNION')
+                            objects_to_delete.append(r_obj)
+                        final_objects.append(merged)
+                    else:
+                        final_objects.extend(subtract_results)
 
             elif self.operation_mode == 'INTERSECT':
                 if self.intersect_with_cutter:
