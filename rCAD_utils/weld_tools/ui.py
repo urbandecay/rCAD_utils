@@ -69,15 +69,19 @@ class OSC_PT_fuse_geometry(Panel):
         colp.prop(props, "search_radius", text="Search Radius")
 
         # Toggles in execution order: L, T, ., .., X, ■
+        # Enable Operations label removed from UI — execution order: L → T → . → .. → X → ■
         box = layout.box()
         col = box.column(align=True)
-        col.label(text="Enable Operations (execution order: L → T → . → .. → X → ■)", icon='MODIFIER')
-        col.prop(props, "l", text="L", toggle=True)
-        col.prop(props, "t", text="T", toggle=True)
-        col.prop(props, "dot", text=".", toggle=True)
-        col.prop(props, "dotdot", text="..", toggle=True)
-        col.prop(props, "x", text="X", toggle=True)
-        col.prop(props, "square", text="■", toggle=True)
+
+        row1 = col.row(align=True)
+        row1.prop(props, "l", text="L")
+        row1.prop(props, "t", text="T")
+        row1.prop(props, "dot", text=".")
+
+        row2 = col.row(align=True)
+        row2.prop(props, "dotdot", text="..")
+        row2.prop(props, "x", text="X")
+        row2.prop(props, "square", text="■")
 
         col.separator()
         col.operator("osc.super_fuse_execute", text="Fuse", icon='AUTOMERGE_ON')
