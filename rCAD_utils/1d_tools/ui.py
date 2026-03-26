@@ -25,12 +25,12 @@ class RCAD_1DToolsProps(PropertyGroup):
     barc_rad: FloatProperty(name="barc_rad")
     radius: FloatProperty(name='radius', default=0.0)
     arc_size: FloatProperty(
-        name='Arc Size',
+        name='Arc Angle',
         default=0.0,
-        min=0.01,
-        soft_max=10.0,
-        step=0.0001,
-        precision=2,
+        min=-180.0,
+        max=180.0,
+        step=100,
+        precision=1,
         update=_update_arc_size,
     )
 
@@ -108,8 +108,10 @@ class RCAD_PT_CreateBArc(Panel):
         layout = self.layout
         props = context.window_manager.rcad_1d_props
 
-        layout.operator("rcad.create_b_arc", text="Create B-Arc")
-        layout.prop(props, "arc_size", slider=True)
+        box = layout.box()
+        col = box.column(align=True)
+        col.operator("rcad.create_b_arc", text="Create B-Arc")
+        col.prop(props, "arc_size", slider=True)
 
 
 # -- Corner Extend sub-panel --
@@ -126,9 +128,11 @@ class RCAD_PT_CornerEdges(Panel):
         layout = self.layout
         props = context.scene.rcad_1d_props
 
-        layout.operator("rcad.corner_extend")
-        layout.prop(props, "only_active_edge")
-        layout.prop(props, "to_active_edge")
+        box = layout.box()
+        col = box.column(align=True)
+        col.operator("rcad.corner_extend")
+        col.prop(props, "only_active_edge")
+        col.prop(props, "to_active_edge")
 
 
 # -- Select Loose sub-panel --
