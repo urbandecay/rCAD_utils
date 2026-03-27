@@ -816,14 +816,37 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
                 if len(loops[0]) <= min_limit:
                     break
                 v_kills = []
+                neighbor_pairs = []
                 for loop in loops:
                     v_kills.append(loop[1])
+                    neighbor_pairs.append((loop[0], loop[2]))
 
                 print(f"[RCAD] dissolving {len(v_kills)} verts")
                 for v in v_kills:
                     print(f"[RCAD] dissolving vert {v.index}, valid={v.is_valid}, edges={len(v.link_edges)}")
                     if v.is_valid:
                         bmesh.ops.dissolve_verts(bm, verts=[v])
+
+                # Repair pass after ALL dissolves.
+                # For hole-in-mesh rings, dissolve_verts merges shaft quads + mesh
+                # faces into one big n-gon — ring edge A-B ends up buried inside it.
+                # Splitting the n-gon at A, B gives exactly one quad (shaft) and one
+                # n-gon (mesh), with correct winding inherited from the existing face.
+                # Treat each ring independently — no special-casing needed.
+                bm.edges.ensure_lookup_table()
+
+                for a, b in neighbor_pairs:
+                    if not (a.is_valid and b.is_valid):
+                        continue
+                    if bm.edges.get([a, b]) is not None:
+                        continue  # dissolve already handled this ring
+                    merged_face = next(
+                        (f for f in a.link_faces if b in f.verts), None
+                    )
+                    if merged_face is not None:
+                        bmesh.utils.face_split(merged_face, a, b)
+                    else:
+                        bm.edges.new([a, b])
 
                 for loop in loops:
                     loop.pop(1)
