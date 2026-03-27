@@ -844,9 +844,13 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
                         (f for f in a.link_faces if b in f.verts), None
                     )
                     if merged_face is not None:
-                        bmesh.utils.face_split(merged_face, a, b)
+                        result = bmesh.utils.face_split(merged_face, a, b)
+                        if result and result[0].is_valid:
+                            result[0].select = True
                     else:
                         bm.edges.new([a, b])
+
+                bm.normal_update()
 
                 for loop in loops:
                     loop.pop(1)
