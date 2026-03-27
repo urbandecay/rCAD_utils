@@ -22,6 +22,7 @@ from .cool_bool import MESH_OT_CoolBool
 from .mesh_tiler import MESH_OT_MeshTiler
 from .mesh_tiler.preview import MESH_OT_MeshTilerPreview
 from . import weld_tools
+from . import vertex_resampler
 import importlib
 _1d_tools = importlib.import_module(".1d_tools", package=__name__)
 from .mirror_along_plane import (
@@ -64,6 +65,7 @@ def register():
         bpy.utils.register_class(cls)
     weld_tools.register()
     _1d_tools.register()
+    vertex_resampler.register()
     bpy.types.Scene.profile_path_mode = BoolProperty(name="Path Mode", default=False)
     bpy.types.Scene.cool_bool_solver = bpy.props.EnumProperty(
         name="Solver",
@@ -73,6 +75,7 @@ def register():
 
 
 def unregister():
+    vertex_resampler.unregister()
     _1d_tools.unregister()
     weld_tools.unregister()
     for cls in reversed(classes):
