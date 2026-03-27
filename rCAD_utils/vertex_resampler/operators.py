@@ -493,7 +493,142 @@ def align_islands_to_boss(islands):
             verts[:] = [verts[0]] + list(reversed(verts[1:]))
 
 
+# --- RING DETECTION FROM FULL SELECTION ---
+
+def get_rings_from_selected(bm):
+    """
+    Detect two rings from a fully selected cylinder (shaft edges included).
+    Uses face count to distinguish ring edges (1 face) from shaft edges (2 faces).
+    Does not rely on edge.select at all.
+    """
+    sel_verts = [v for v in bm.verts if v.select]
+    if len(sel_verts) < 4:
+        return None
+    sel_set = set(sel_verts)
+
+    # Ring edges = edges between selected verts with exactly 1 adjacent face
+    ring_adj = {v: [] for v in sel_verts}
+    for v in sel_verts:
+        for e in v.link_edges:
+            other = e.other_vert(v)
+            if other in sel_set and len(e.link_faces) == 1:
+                ring_adj[v].append(other)
+
+    # Find connected components using ring edges only
+    visited = set()
+    rings = []
+    for v in sel_verts:
+        if v in visited or not ring_adj[v]:
+            continue
+        comp = []
+        stack = [v]
+        visited.add(v)
+        while stack:
+            curr = stack.pop()
+            comp.append(curr)
+            for nb in ring_adj[curr]:
+                if nb not in visited:
+                    visited.add(nb)
+                    stack.append(nb)
+        if len(comp) >= 3:
+            rings.append(comp)
+
+    if len(rings) != 2 or len(rings[0]) != len(rings[1]):
+        return None
+
+    # Order first ring as a closed loop
+    ring0_set = set(rings[0])
+    ring0_ordered = [rings[0][0]]
+    vis = {rings[0][0]}
+    curr = rings[0][0]
+    for _ in range(len(rings[0]) - 1):
+        for nb in ring_adj[curr]:
+            if nb in ring0_set and nb not in vis:
+                ring0_ordered.append(nb)
+                vis.add(nb)
+                curr = nb
+                break
+
+    # Align second ring to first ring via shaft edges (edges with 2 faces)
+    ring1_set = set(rings[1])
+    ring1_aligned = []
+    for v0 in ring0_ordered:
+        # Find shaft edge from v0 to a vert in ring1
+        for e in v0.link_edges:
+            if len(e.link_faces) == 2:
+                other = e.other_vert(v0)
+                if other in ring1_set:
+                    ring1_aligned.append(other)
+                    break
+
+    if len(ring1_aligned) != len(ring0_ordered):
+        return None
+
+    return ([ring0_ordered, ring1_aligned], True)
+
+
 # --- MULTI-STACK BRIDGED LOGIC ---
+
+def get_auto_bridged_chain(bm):
+    """
+    When only ONE closed island is selected but its verts have unselected
+    shaft edges going to an unselected parallel ring, auto-detect that
+    partner ring and return it as a bridged pair so the shaft gets updated.
+    """
+    raw_islands = get_selected_islands(bm)
+    if len(raw_islands) != 1:
+        return None
+
+    island = raw_islands[0]
+    if not island['closed']:
+        return None
+
+    verts = island['verts']
+    sel_verts_set = set(v for v in bm.verts if v.select)
+
+    # For each vert, find one unselected edge going to an unselected vert
+    shaft_map = {}  # island vert -> partner vert
+    for v in verts:
+        for e in v.link_edges:
+            if not e.select:
+                other = e.other_vert(v)
+                if other not in sel_verts_set:
+                    shaft_map[v] = other
+                    break
+
+    # Every ring vert must have a shaft partner
+    if len(shaft_map) != len(verts):
+        return None
+
+    partner_set = set(shaft_map.values())
+
+    # Partner verts must form a closed ring of the same size
+    # Traverse partner verts using ANY edges between them
+    start = shaft_map[verts[0]]
+    partner_ordered = [start]
+    visited = {start}
+    curr = start
+    for _ in range(len(verts) - 1):
+        found = False
+        for e in curr.link_edges:
+            other = e.other_vert(curr)
+            if other in partner_set and other not in visited:
+                partner_ordered.append(other)
+                visited.add(other)
+                curr = other
+                found = True
+                break
+        if not found:
+            break
+
+    if len(partner_ordered) != len(verts):
+        return None
+
+    # Align partner order to match the selected ring via shaft edges
+    aligned_partner = [shaft_map[v] for v in verts]
+
+    return ([verts, aligned_partner], True)
+
 
 def get_bridged_chain(bm):
     raw_islands = get_selected_islands(bm)
@@ -597,10 +732,23 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
         bm = bmesh.from_edit_mesh(obj.data)
         bm.verts.ensure_lookup_table()
 
-        # Priority 0: Solid/Bridged Loops (N-Stack Logic)
+        # Priority 0: Full cylinder selection (ring edges = 1 face, shaft = 2 faces)
+        rings_data = get_rings_from_selected(bm)
+        print(f"[RCAD] rings_data: {rings_data}")
+        if rings_data and len(rings_data[0]) == 2:
+            return self.execute_bridged_logic(bm, obj, rings_data)
+
+        # Priority 1: Solid/Bridged Loops (N-Stack Logic)
         bridged_data = get_bridged_chain(bm)
+        print(f"[RCAD] bridged_data: {bridged_data}")
         if bridged_data and len(bridged_data[0]) >= 2:
             return self.execute_bridged_logic(bm, obj, bridged_data)
+
+        # Priority 1b: Single ring with shaft edges (cylinder single-ring select)
+        auto_bridged = get_auto_bridged_chain(bm)
+        print(f"[RCAD] auto_bridged: {auto_bridged}")
+        if auto_bridged and len(auto_bridged[0]) >= 2:
+            return self.execute_bridged_logic(bm, obj, auto_bridged)
 
         # Priority 1: Junctions
         if check_selected_junction(bm):
@@ -651,60 +799,11 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
             new_coords_stack.append(coords)
 
         # Topology mutation
-        if self.direction > 0:
-            while len(loops[0]) < target_count:
-                search_range = (
-                    len(loops[0]) if is_closed else len(loops[0]) - 1
-                )
-                max_len = -1.0
-                best_idx = -1
+        # if self.direction > 0:
+        #     while len(loops[0]) < target_count:
+        #         ...add logic...
 
-                for k in range(search_range):
-                    next_k = (k + 1) % len(loops[0])
-                    total_dist = 0.0
-                    for loop in loops:
-                        d = (loop[k].co - loop[next_k].co).length
-                        total_dist += d
-                    avg_dist = total_dist / len(loops)
-                    if avg_dist > max_len:
-                        max_len = avg_dist
-                        best_idx = k
-
-                if best_idx != -1:
-                    new_verts_col = []
-                    for i in range(len(loops)):
-                        loop = loops[i]
-                        v1 = loop[best_idx]
-                        v2 = loop[(best_idx + 1) % len(loop)]
-
-                        e = bm.edges.get((v1, v2)) or bm.edges.get((v2, v1))
-                        if not e:
-                            for test_e in v1.link_edges:
-                                if test_e.other_vert(v1) == v2:
-                                    e = test_e
-                                    break
-                        if not e:
-                            new_verts_col = None
-                            break
-
-                        res = bmesh.utils.edge_split(e, v1, 0.5)
-                        new_v = (
-                            res[0]
-                            if isinstance(res[0], bmesh.types.BMVert)
-                            else res[1]
-                        )
-                        loop.insert(best_idx + 1, new_v)
-                        new_verts_col.append(new_v)
-
-                    if new_verts_col:
-                        for i in range(len(new_verts_col) - 1):
-                            v_top = new_verts_col[i]
-                            v_bot = new_verts_col[i + 1]
-                            bmesh.ops.connect_verts(bm, verts=[v_top, v_bot])
-                    else:
-                        break
-
-        elif self.direction < 0:
+        if self.direction < 0:
             while len(loops[0]) > target_count:
                 if len(loops[0]) <= min_limit:
                     break
@@ -712,27 +811,16 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
                 for loop in loops:
                     v_kills.append(loop[1])
 
-                for i in range(len(v_kills) - 1):
-                    v_top = v_kills[i]
-                    v_bot = v_kills[i + 1]
-                    common_edge = (
-                        bm.edges.get((v_top, v_bot))
-                        or bm.edges.get((v_bot, v_top))
-                    )
-                    if common_edge:
-                        bmesh.ops.dissolve_edges(bm, edges=[common_edge])
+                print(f"[RCAD] dissolving {len(v_kills)} verts")
+                for v in v_kills:
+                    print(f"[RCAD] dissolving vert {v.index}, valid={v.is_valid}, edges={len(v.link_edges)}")
+                    if v.is_valid:
+                        bmesh.ops.dissolve_verts(bm, verts=[v])
 
-                for i, loop in enumerate(loops):
-                    v_victim = v_kills[i]
-                    v_target = loop[0]
-                    if v_victim.is_valid and v_target.is_valid:
-                        bmesh.ops.pointmerge(
-                            bm, verts=[v_victim, v_target],
-                            merge_co=v_target.co,
-                        )
+                for loop in loops:
                     loop.pop(1)
 
-        # Apply coordinates
+        # Apply coordinates — respace remaining verts on the curve
         bm.verts.ensure_lookup_table()
         for i, loop in enumerate(loops):
             target_coords = new_coords_stack[i]
