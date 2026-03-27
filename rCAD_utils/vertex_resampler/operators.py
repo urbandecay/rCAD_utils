@@ -498,20 +498,28 @@ def align_islands_to_boss(islands):
 def get_rings_from_selected(bm):
     """
     Detect two rings from a fully selected cylinder (shaft edges included).
-    Uses face count to distinguish ring edges (1 face) from shaft edges (2 faces).
-    Does not rely on edge.select at all.
+    Works for both free-standing cylinders AND holes punched in a mesh.
+
+    Key: instead of counting total link_faces, we count faces where ALL verts
+    are selected. Ring edges touch exactly 1 such face (the shaft quad).
+    Shaft edges touch exactly 2 such face (both shaft quads). This holds
+    whether the ring is a boundary edge (free cylinder) or an interior edge
+    (hole-in-mesh cylinder where the ring also touches surrounding mesh faces).
     """
     sel_verts = [v for v in bm.verts if v.select]
     if len(sel_verts) < 4:
         return None
     sel_set = set(sel_verts)
 
-    # Ring edges = edges between selected verts with exactly 1 adjacent face
+    def fully_selected_faces(e):
+        return sum(1 for f in e.link_faces if all(v in sel_set for v in f.verts))
+
+    # Ring edges = edges between selected verts with exactly 1 fully-selected adjacent face
     ring_adj = {v: [] for v in sel_verts}
     for v in sel_verts:
         for e in v.link_edges:
             other = e.other_vert(v)
-            if other in sel_set and len(e.link_faces) == 1:
+            if other in sel_set and fully_selected_faces(e) == 1:
                 ring_adj[v].append(other)
 
     # Find connected components using ring edges only
@@ -549,13 +557,13 @@ def get_rings_from_selected(bm):
                 curr = nb
                 break
 
-    # Align second ring to first ring via shaft edges (edges with 2 faces)
+    # Align second ring to first ring via shaft edges (2 fully-selected adjacent faces)
     ring1_set = set(rings[1])
     ring1_aligned = []
     for v0 in ring0_ordered:
         # Find shaft edge from v0 to a vert in ring1
         for e in v0.link_edges:
-            if len(e.link_faces) == 2:
+            if fully_selected_faces(e) == 2:
                 other = e.other_vert(v0)
                 if other in ring1_set:
                     ring1_aligned.append(other)
