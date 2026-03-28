@@ -6,6 +6,12 @@ import bmesh
 import math
 from mathutils import Vector, kdtree
 
+from .ring_analyzer import analyze_rings
+from .vert_deletion import find_safe_deletion_index, delete_at_index
+from .topology_repair import repair_after_dissolve
+from .seam_manager import (load_seam_homes, save_seam_homes,
+                           match_seam_homes, migrate_drifted_seams)
+
 
 # =========================================================================
 # --- MATH ENGINE ---
@@ -749,30 +755,6 @@ def get_bridged_chain(bm):
 
 
 # =========================================================================
-# --- SEAM MIGRATION ---
-# =========================================================================
-
-def _migrate_seam_vert(bm, old_sv, new_sv, all_ring_verts):
-    """Migrate seam edges from old_sv to new_sv.
-    Draws a new edge (new_sv → non-ring vert) then dissolves the old one.
-    """
-    seam_edges = [e for e in old_sv.link_edges
-                  if e.other_vert(old_sv) not in all_ring_verts]
-    if not seam_edges:
-        return
-
-    for old_edge in seam_edges:
-        non_ring_vert = old_edge.other_vert(old_sv)
-        # Draw new seam edge by splitting the shared face
-        if not bm.edges.get([new_sv, non_ring_vert]):
-            bmesh.ops.connect_verts(bm, verts=[new_sv, non_ring_vert])
-        # Dissolve old seam edge — faces merge cleanly, no manual face work
-        if old_edge.is_valid:
-            bmesh.ops.dissolve_edges(bm, edges=[old_edge],
-                                     use_verts=False, use_face_split=False)
-
-
-# =========================================================================
 # --- OPERATORS ---
 # =========================================================================
 
@@ -837,19 +819,8 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
             pts = [v.co.copy() for v in loop]
             splines.append(CatmullRomSpline(pts, is_closed=is_closed))
 
-        # Anchor verts: ring verts that have edges going to non-ring geometry (seam verts)
-        all_ring_verts = set()
-        for loop in loops:
-            all_ring_verts.update(loop)
-        anchor_vert_sets = []
-        for loop in loops:
-            anchors = set()
-            for v in loop:
-                for e in v.link_edges:
-                    if e.other_vert(v) not in all_ring_verts:
-                        anchors.add(v)
-                        break
-            anchor_vert_sets.append(anchors)
+        # Analyze ring topology — identifies seam verts per ring
+        ring_group = analyze_rings(loops, is_closed)
 
         current_count = len(loops[0])
         target_count = current_count + self.direction
@@ -870,158 +841,58 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
                 coords.append(sp.eval_global(t_sample))
             new_coords_stack.append(coords)
 
-        # Topology mutation
-        # if self.direction > 0:
-        #     while len(loops[0]) < target_count:
-        #         ...add logic...
-
+        # Vert deletion — picks safe (non-seam) verts, repairs topology after each
         if self.direction < 0:
-            while len(loops[0]) > target_count:
-                if len(loops[0]) <= min_limit:
+            while ring_group.vert_count > target_count:
+                if ring_group.vert_count <= min_limit:
                     break
-                v_kills = []
-                neighbor_pairs = []
-                for loop in loops:
-                    v_kills.append(loop[1])
-                    neighbor_pairs.append((loop[0], loop[2]))
+                idx = find_safe_deletion_index(ring_group)
+                if idx < 0:
+                    break
+                neighbor_pairs = delete_at_index(bm, ring_group, idx)
+                repair_after_dissolve(bm, neighbor_pairs)
 
-                # Dissolve all v_kills at once to avoid intermediate topology
-                valid_kills = [v for v in v_kills if v.is_valid]
-                if valid_kills:
-                    bmesh.ops.dissolve_verts(bm, verts=valid_kills)
+        # Seam home management
+        stored_homes = load_seam_homes(obj)
 
-                bm.verts.ensure_lookup_table()
-                bm.edges.ensure_lookup_table()
-                bm.faces.ensure_lookup_table()
-
-                # Repair pass after dissolve.
-                # For hole-in-mesh rings, dissolve_verts merges shaft quads + mesh
-                # faces into one big n-gon — ring edge A-B ends up buried inside it.
-                # Splitting the n-gon at A, B restores the shaft quad and mesh face.
-                for a, b in neighbor_pairs:
-                    if not (a.is_valid and b.is_valid):
-                        continue
-                    if bm.edges.get([a, b]) is not None:
-                        continue  # edge already exists, no repair needed
-
-                    # Find the LARGEST face containing both a and b — that's the
-                    # merged n-gon, not a shaft quad we'd accidentally split.
-                    merged_face = None
-                    max_verts = 0
-                    for f in a.link_faces:
-                        if b in f.verts and len(f.verts) > max_verts:
-                            max_verts = len(f.verts)
-                            merged_face = f
-
-                    if merged_face is not None and len(merged_face.verts) > 4:
-                        bmesh.utils.face_split(merged_face, a, b)
-                    elif merged_face is None:
-                        bm.edges.new([a, b])
-
-                bm.verts.ensure_lookup_table()
-                bm.edges.ensure_lookup_table()
-                bm.faces.ensure_lookup_table()
-                bm.normal_update()
-
-                for loop in loops:
-                    loop.pop(1)
-
-        # Load persistent seam home positions from object custom property.
-        # First press stores them; all later presses load the same originals
-        # so drift is measured against the true original, not last-press position.
-        stored_flat = list(obj.get("rcad_seam_origins", []))
-        stored_homes = []
-        if stored_flat and len(stored_flat) % 3 == 0:
-            for _i in range(0, len(stored_flat), 3):
-                stored_homes.append(Vector((stored_flat[_i], stored_flat[_i + 1], stored_flat[_i + 2])))
-
-        loop0_verts = [v for v in loops[0] if v.is_valid]
+        loop0_verts = [v for v in ring_group.rings[0].verts if v.is_valid]
         _n = len(loop0_verts)
         avg_edge_len = (
-            sum((loop0_verts[k].co - loop0_verts[(k + 1) % _n].co).length for k in range(_n)) / _n
+            sum((loop0_verts[k].co - loop0_verts[(k + 1) % _n].co).length
+                for k in range(_n)) / _n
             if _n >= 2 else 0.1
         )
 
-        seam_homes = {}
-        if stored_homes:
-            kd_homes = kdtree.KDTree(len(stored_homes))
-            for _idx, _hp in enumerate(stored_homes):
-                kd_homes.insert(_hp, _idx)
-            kd_homes.balance()
-            for _i, loop in enumerate(loops):
-                for v in anchor_vert_sets[_i]:
-                    if not v.is_valid:
-                        continue
-                    _co, _idx, _dist = kd_homes.find(v.co)
-                    if _dist < avg_edge_len * 3.0:
-                        seam_homes[v] = stored_homes[_idx]
-                    else:
-                        home = v.co.copy()
-                        seam_homes[v] = home
-                        stored_homes.append(home)
-        else:
-            for _i, loop in enumerate(loops):
-                for v in anchor_vert_sets[_i]:
-                    if v.is_valid:
-                        home = v.co.copy()
-                        seam_homes[v] = home
-                        stored_homes.append(home)
-
-        _flat = []
-        for _hp in stored_homes:
-            _flat.extend([_hp.x, _hp.y, _hp.z])
-        obj["rcad_seam_origins"] = _flat
+        seam_homes = match_seam_homes(ring_group, stored_homes, avg_edge_len)
+        save_seam_homes(obj, stored_homes)
 
         # Apply coordinates — respace remaining verts on the curve
         bm.verts.ensure_lookup_table()
-        for i, loop in enumerate(loops):
+        for i, ring_info in enumerate(ring_group.rings):
             target_coords = new_coords_stack[i]
+            loop = ring_info.verts
             min_len = min(len(loop), len(target_coords))
             for k in range(min_len):
                 if loop[k].is_valid:
                     loop[k].co = target_coords[k]
                     loop[k].select = True
 
-        # Seam migration — if a seam vert drifted too far from its original home,
-        # draw a new seam edge at the nearest ring vert and dissolve the old one.
+        # Seam migration — drift check + migrate
         if seam_homes:
             edge_lengths = []
-            for loop in loops:
+            for ring_info in ring_group.rings:
+                loop = ring_info.verts
                 for k in range(len(loop) - 1):
                     if loop[k].is_valid and loop[k + 1].is_valid:
                         edge_lengths.append((loop[k].co - loop[k + 1].co).length)
             threshold = (sum(edge_lengths) / len(edge_lengths) * 0.5) if edge_lengths else 0.1
+            migrate_drifted_seams(bm, ring_group, seam_homes, threshold)
 
-            for i, loop in enumerate(loops):
-                for seam_vert in list(anchor_vert_sets[i]):
-                    if not seam_vert.is_valid or seam_vert not in seam_homes:
-                        continue
-                    drift = (seam_vert.co - seam_homes[seam_vert]).length
-                    if drift > threshold:
-                        best = None
-                        best_dist = float('inf')
-                        for v in loop:
-                            if v.is_valid and v != seam_vert:
-                                d = (v.co - seam_homes[seam_vert]).length
-                                if d < best_dist:
-                                    best_dist = d
-                                    best = v
-                        if best:
-                            _migrate_seam_vert(bm, seam_vert, best, all_ring_verts)
-                            anchor_vert_sets[i].discard(seam_vert)
-                            anchor_vert_sets[i].add(best)
-
-            bm.verts.ensure_lookup_table()
-            bm.edges.ensure_lookup_table()
-            bm.faces.ensure_lookup_table()
-            bm.normal_update()
-
-        # face_split creates new faces with select=False. Re-select all shaft
-        # faces (faces whose verts are entirely ring verts) so hole-in-mesh
-        # cylinders don't end up with one dark unselected face.
+        # Re-select shaft faces so hole-in-mesh cylinders don't end up
+        # with unselected faces after face_split
         ring_vert_set = set()
-        for loop in loops:
-            for v in loop:
+        for ring_info in ring_group.rings:
+            for v in ring_info.verts:
                 if v.is_valid:
                     ring_vert_set.add(v)
         for f in bm.faces:
