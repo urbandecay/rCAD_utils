@@ -83,6 +83,18 @@ def _split_boundary_chains(boundary_edges, cut_edges):
     if not remaining:
         return None
 
+    edge_neighbors = {}
+    vert_edges = {}
+    for edge in remaining:
+        edge_neighbors[edge] = set()
+        for vert in edge.verts:
+            vert_edges.setdefault(vert, set()).add(edge)
+
+    for edge in remaining:
+        for vert in edge.verts:
+            edge_neighbors[edge].update(vert_edges[vert])
+        edge_neighbors[edge].discard(edge)
+
     visited = set()
     chains = []
     for edge in remaining:
@@ -95,13 +107,11 @@ def _split_boundary_chains(boundary_edges, cut_edges):
         while stack:
             current = stack.pop()
             component_edges.append(current)
-            current_verts = set(current.verts)
-            for other in remaining:
+            for other in edge_neighbors[current]:
                 if other in visited:
                     continue
-                if current_verts.intersection(other.verts):
-                    visited.add(other)
-                    stack.append(other)
+                visited.add(other)
+                stack.append(other)
 
         ordered = _order_path_from_edges(component_edges)
         if ordered is None:
@@ -158,38 +168,47 @@ def _detect_bridged_strip_component(component):
     best_pair = None
     best_length = -1.0
 
-    for index, edge_a in enumerate(candidate_cut_edges):
-        verts_a = set(edge_a.verts)
-        for edge_b in candidate_cut_edges[index + 1:]:
-            if verts_a.intersection(edge_b.verts):
-                continue
+    candidate_pairs = []
+    if (
+        len(candidate_cut_edges) == 2
+        and not set(candidate_cut_edges[0].verts).intersection(candidate_cut_edges[1].verts)
+    ):
+        candidate_pairs.append((candidate_cut_edges[0], candidate_cut_edges[1]))
+    else:
+        for index, edge_a in enumerate(candidate_cut_edges):
+            verts_a = set(edge_a.verts)
+            for edge_b in candidate_cut_edges[index + 1:]:
+                if verts_a.intersection(edge_b.verts):
+                    continue
+                candidate_pairs.append((edge_a, edge_b))
 
-            chains = _split_boundary_chains(boundary_edges, (edge_a, edge_b))
-            if chains is None:
-                continue
+    for edge_a, edge_b in candidate_pairs:
+        chains = _split_boundary_chains(boundary_edges, (edge_a, edge_b))
+        if chains is None:
+            continue
 
-            chain_a, chain_b = chains
-            if len(chain_a) != len(chain_b) or len(chain_a) < 2:
-                continue
+        chain_a, chain_b = chains
+        if len(chain_a) != len(chain_b) or len(chain_a) < 2:
+            continue
 
-            aligned_b = _align_chain_pair(chain_a, chain_b, edge_map)
-            if aligned_b is None:
-                continue
+        aligned_b = _align_chain_pair(chain_a, chain_b, edge_map)
+        if aligned_b is None:
+            continue
 
-            expected_edge_count = (2 * (len(chain_a) - 1)) + len(chain_a)
-            if len(component_edges) != expected_edge_count:
-                continue
-            if len(boundary_edges) != 2 * len(chain_a):
-                continue
+        expected_edge_count = (2 * (len(chain_a) - 1)) + len(chain_a)
+        if len(component_edges) != expected_edge_count:
+            continue
+        if len(boundary_edges) != 2 * len(chain_a):
+            continue
 
-            total_length = 0.0
-            for idx in range(len(chain_a) - 1):
-                total_length += (chain_a[idx].co - chain_a[idx + 1].co).length
-                total_length += (aligned_b[idx].co - aligned_b[idx + 1].co).length
+        total_length = 0.0
+        for idx in range(len(chain_a) - 1):
+            total_length += (chain_a[idx].co - chain_a[idx + 1].co).length
+            total_length += (aligned_b[idx].co - aligned_b[idx + 1].co).length
 
-            if total_length > best_length:
-                best_length = total_length
-                best_pair = ([chain_a, aligned_b], False)
+        if total_length > best_length:
+            best_length = total_length
+            best_pair = ([chain_a, aligned_b], False)
 
     return best_pair
 
