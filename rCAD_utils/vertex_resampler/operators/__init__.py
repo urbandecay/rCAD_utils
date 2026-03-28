@@ -26,8 +26,14 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
         bm.verts.ensure_lookup_table()
 
         hole_data = hole_in_mesh.detect(bm)
-        if hole_data:
-            return hole_in_mesh.execute(bm, obj, self.direction, report=self.report)
+        if hole_data is not None:
+            return hole_in_mesh.execute(
+                bm,
+                obj,
+                self.direction,
+                report=self.report,
+                data=hole_data,
+            )
 
         closed_data = closed_loop.detect(bm)
         if closed_data:
