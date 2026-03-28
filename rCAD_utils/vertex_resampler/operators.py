@@ -497,14 +497,9 @@ def align_islands_to_boss(islands):
 
 def get_rings_from_selected(bm):
     """
-    Detect two rings from a fully selected cylinder (shaft edges included).
-    Works for both free-standing cylinders AND holes punched in a mesh.
-
-    Key: instead of counting total link_faces, we count faces where ALL verts
-    are selected. Ring edges touch exactly 1 such face (the shaft quad).
-    Shaft edges touch exactly 2 such face (both shaft quads). This holds
-    whether the ring is a boundary edge (free cylinder) or an interior edge
-    (hole-in-mesh cylinder where the ring also touches surrounding mesh faces).
+    Detect cylinder ring pairs from a fully selected cylinder selection.
+    Works for any number of cylinders selected at once — returns a list of
+    ([ring0, ring1], True) tuples, one per cylinder pair.
     """
     sel_verts = [v for v in bm.verts if v.select]
     if len(sel_verts) < 4:
@@ -541,38 +536,67 @@ def get_rings_from_selected(bm):
         if len(comp) >= 3:
             rings.append(comp)
 
-    if len(rings) != 2 or len(rings[0]) != len(rings[1]):
+    if len(rings) < 2 or len(rings) % 2 != 0:
         return None
 
-    # Order first ring as a closed loop
-    ring0_set = set(rings[0])
-    ring0_ordered = [rings[0][0]]
-    vis = {rings[0][0]}
-    curr = rings[0][0]
-    for _ in range(len(rings[0]) - 1):
-        for nb in ring_adj[curr]:
-            if nb in ring0_set and nb not in vis:
-                ring0_ordered.append(nb)
-                vis.add(nb)
-                curr = nb
+    # Group rings into cylinder pairs by shaft edge connectivity
+    ring_sets = [set(r) for r in rings]
+    paired = [False] * len(rings)
+    cylinder_pairs = []
+
+    for i in range(len(rings)):
+        if paired[i]:
+            continue
+        partner = None
+        for j in range(i + 1, len(rings)):
+            if paired[j]:
+                continue
+            for v in rings[i]:
+                for e in v.link_edges:
+                    if fully_selected_faces(e) == 2:
+                        if e.other_vert(v) in ring_sets[j]:
+                            partner = j
+                            break
+                if partner is not None:
+                    break
+            if partner is not None:
                 break
 
-    # Align second ring to first ring via shaft edges (2 fully-selected adjacent faces)
-    ring1_set = set(rings[1])
-    ring1_aligned = []
-    for v0 in ring0_ordered:
-        # Find shaft edge from v0 to a vert in ring1
-        for e in v0.link_edges:
-            if fully_selected_faces(e) == 2:
-                other = e.other_vert(v0)
-                if other in ring1_set:
-                    ring1_aligned.append(other)
+        if partner is None:
+            return None  # Unpaired ring — bail out
+
+        # Order ring i as a closed loop
+        ring0_set = ring_sets[i]
+        ring0_ordered = [rings[i][0]]
+        vis = {rings[i][0]}
+        curr = rings[i][0]
+        for _ in range(len(rings[i]) - 1):
+            for nb in ring_adj[curr]:
+                if nb in ring0_set and nb not in vis:
+                    ring0_ordered.append(nb)
+                    vis.add(nb)
+                    curr = nb
                     break
 
-    if len(ring1_aligned) != len(ring0_ordered):
-        return None
+        # Align partner ring via shaft edges
+        ring1_set = ring_sets[partner]
+        ring1_aligned = []
+        for v0 in ring0_ordered:
+            for e in v0.link_edges:
+                if fully_selected_faces(e) == 2:
+                    other = e.other_vert(v0)
+                    if other in ring1_set:
+                        ring1_aligned.append(other)
+                        break
 
-    return ([ring0_ordered, ring1_aligned], True)
+        if len(ring1_aligned) != len(ring0_ordered):
+            return None
+
+        cylinder_pairs.append(([ring0_ordered, ring1_aligned], True))
+        paired[i] = True
+        paired[partner] = True
+
+    return cylinder_pairs if cylinder_pairs else None
 
 
 # --- MULTI-STACK BRIDGED LOGIC ---
@@ -764,11 +788,13 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
         bm = bmesh.from_edit_mesh(obj.data)
         bm.verts.ensure_lookup_table()
 
-        # Priority 0: Full cylinder selection (ring edges = 1 face, shaft = 2 faces)
-        rings_data = get_rings_from_selected(bm)
-        print(f"[RCAD] rings_data: {rings_data}")
-        if rings_data and len(rings_data[0]) == 2:
-            return self.execute_bridged_logic(bm, obj, rings_data)
+        # Priority 0: Full cylinder selection — handles any number of holes at once
+        rings_list = get_rings_from_selected(bm)
+        print(f"[RCAD] rings_list: {rings_list}")
+        if rings_list:
+            for rings_data in rings_list:
+                self.execute_bridged_logic(bm, obj, rings_data)
+            return {'FINISHED'}
 
         # Priority 1: Solid/Bridged Loops (N-Stack Logic)
         bridged_data = get_bridged_chain(bm)
