@@ -825,9 +825,17 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
 
         current_count = len(loops[0])
         target_count = current_count + self.direction
-        min_limit = 3 if is_closed else 2
+        has_seams = any(ring_info.seam_verts for ring_info in ring_group.rings)
+        min_limit = 4 if is_closed and has_seams else (3 if is_closed else 2)
         if target_count < min_limit:
             target_count = min_limit
+
+        if self.direction < 0 and ring_group.vert_count <= min_limit:
+            self.report(
+                {'WARNING'},
+                f"Can't remove any more verts. Minimum is {min_limit}.",
+            )
+            return {'CANCELLED'}
 
         new_coords_stack = []
         for sp in splines:
@@ -846,9 +854,17 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
         if self.direction < 0:
             while ring_group.vert_count > target_count:
                 if ring_group.vert_count <= min_limit:
+                    self.report(
+                        {'WARNING'},
+                        f"Can't remove any more verts. Minimum is {min_limit}.",
+                    )
                     break
                 idx = find_safe_deletion_index(ring_group)
                 if idx < 0:
+                    self.report(
+                        {'WARNING'},
+                        "Can't remove any more verts safely right now.",
+                    )
                     break
                 neighbor_pairs = delete_at_index(bm, ring_group, idx)
                 repair_after_dissolve(bm, neighbor_pairs)
