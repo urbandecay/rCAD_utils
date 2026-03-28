@@ -725,6 +725,30 @@ def get_bridged_chain(bm):
 
 
 # =========================================================================
+# --- SEAM MIGRATION ---
+# =========================================================================
+
+def _migrate_seam_vert(bm, old_sv, new_sv, all_ring_verts):
+    """Migrate seam edges from old_sv to new_sv.
+    Draws a new edge (new_sv → non-ring vert) then dissolves the old one.
+    """
+    seam_edges = [e for e in old_sv.link_edges
+                  if e.other_vert(old_sv) not in all_ring_verts]
+    if not seam_edges:
+        return
+
+    for old_edge in seam_edges:
+        non_ring_vert = old_edge.other_vert(old_sv)
+        # Draw new seam edge by splitting the shared face
+        if not bm.edges.get([new_sv, non_ring_vert]):
+            bmesh.ops.connect_verts(bm, verts=[new_sv, non_ring_vert])
+        # Dissolve old seam edge — faces merge cleanly, no manual face work
+        if old_edge.is_valid:
+            bmesh.ops.dissolve_edges(bm, edges=[old_edge],
+                                     use_verts=False, use_face_split=False)
+
+
+# =========================================================================
 # --- OPERATORS ---
 # =========================================================================
 
@@ -786,6 +810,20 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
         for loop in loops:
             pts = [v.co.copy() for v in loop]
             splines.append(CatmullRomSpline(pts, is_closed=is_closed))
+
+        # Anchor verts: ring verts that have edges going to non-ring geometry (seam verts)
+        all_ring_verts = set()
+        for loop in loops:
+            all_ring_verts.update(loop)
+        anchor_vert_sets = []
+        for loop in loops:
+            anchors = set()
+            for v in loop:
+                for e in v.link_edges:
+                    if e.other_vert(v) not in all_ring_verts:
+                        anchors.add(v)
+                        break
+            anchor_vert_sets.append(anchors)
 
         current_count = len(loops[0])
         target_count = current_count + self.direction
@@ -862,6 +900,52 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
                 for loop in loops:
                     loop.pop(1)
 
+        # Load persistent seam home positions from object custom property.
+        # First press stores them; all later presses load the same originals
+        # so drift is measured against the true original, not last-press position.
+        stored_flat = list(obj.get("rcad_seam_origins", []))
+        stored_homes = []
+        if stored_flat and len(stored_flat) % 3 == 0:
+            for _i in range(0, len(stored_flat), 3):
+                stored_homes.append(Vector((stored_flat[_i], stored_flat[_i + 1], stored_flat[_i + 2])))
+
+        loop0_verts = [v for v in loops[0] if v.is_valid]
+        _n = len(loop0_verts)
+        avg_edge_len = (
+            sum((loop0_verts[k].co - loop0_verts[(k + 1) % _n].co).length for k in range(_n)) / _n
+            if _n >= 2 else 0.1
+        )
+
+        seam_homes = {}
+        if stored_homes:
+            kd_homes = kdtree.KDTree(len(stored_homes))
+            for _idx, _hp in enumerate(stored_homes):
+                kd_homes.insert(_hp, _idx)
+            kd_homes.balance()
+            for _i, loop in enumerate(loops):
+                for v in anchor_vert_sets[_i]:
+                    if not v.is_valid:
+                        continue
+                    _co, _idx, _dist = kd_homes.find(v.co)
+                    if _dist < avg_edge_len * 3.0:
+                        seam_homes[v] = stored_homes[_idx]
+                    else:
+                        home = v.co.copy()
+                        seam_homes[v] = home
+                        stored_homes.append(home)
+        else:
+            for _i, loop in enumerate(loops):
+                for v in anchor_vert_sets[_i]:
+                    if v.is_valid:
+                        home = v.co.copy()
+                        seam_homes[v] = home
+                        stored_homes.append(home)
+
+        _flat = []
+        for _hp in stored_homes:
+            _flat.extend([_hp.x, _hp.y, _hp.z])
+        obj["rcad_seam_origins"] = _flat
+
         # Apply coordinates — respace remaining verts on the curve
         bm.verts.ensure_lookup_table()
         for i, loop in enumerate(loops):
@@ -871,6 +955,40 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
                 if loop[k].is_valid:
                     loop[k].co = target_coords[k]
                     loop[k].select = True
+
+        # Seam migration — if a seam vert drifted too far from its original home,
+        # draw a new seam edge at the nearest ring vert and dissolve the old one.
+        if seam_homes:
+            edge_lengths = []
+            for loop in loops:
+                for k in range(len(loop) - 1):
+                    if loop[k].is_valid and loop[k + 1].is_valid:
+                        edge_lengths.append((loop[k].co - loop[k + 1].co).length)
+            threshold = (sum(edge_lengths) / len(edge_lengths) * 0.5) if edge_lengths else 0.1
+
+            for i, loop in enumerate(loops):
+                for seam_vert in list(anchor_vert_sets[i]):
+                    if not seam_vert.is_valid or seam_vert not in seam_homes:
+                        continue
+                    drift = (seam_vert.co - seam_homes[seam_vert]).length
+                    if drift > threshold:
+                        best = None
+                        best_dist = float('inf')
+                        for v in loop:
+                            if v.is_valid and v != seam_vert:
+                                d = (v.co - seam_homes[seam_vert]).length
+                                if d < best_dist:
+                                    best_dist = d
+                                    best = v
+                        if best:
+                            _migrate_seam_vert(bm, seam_vert, best, all_ring_verts)
+                            anchor_vert_sets[i].discard(seam_vert)
+                            anchor_vert_sets[i].add(best)
+
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            bm.normal_update()
 
         # face_split creates new faces with select=False. Re-select all shaft
         # faces (faces whose verts are entirely ring verts) so hole-in-mesh
