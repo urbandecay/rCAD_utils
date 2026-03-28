@@ -1,6 +1,6 @@
 # hole_in_mesh.py — Resample cylinders punched through flat mesh.
 
-from .closed_loop import _execute_bridged_logic
+from .resample_common import execute_aligned_loops_logic
 
 
 def _fully_selected_faces(edge, sel_set):
@@ -109,5 +109,5 @@ def execute(bm, obj, direction, report=None):
         return {'CANCELLED'}
 
     for rings_data in data:
-        _execute_bridged_logic(bm, obj, rings_data, direction, report=report)
+        execute_aligned_loops_logic(bm, obj, rings_data, direction, report=report)
     return {'FINISHED'}

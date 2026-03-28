@@ -19,9 +19,13 @@ def find_safe_deletion_index(ring_group):
     if n == 0:
         return -1
 
-    # Start at 1 for backwards compat with the old loop[1] deletion
-    for offset in range(n):
-        i = (1 + offset) % n
+    if ring_group.is_closed:
+        # Start at 1 for backwards compat with the old loop[1] deletion
+        candidate_indices = ((1 + offset) % n for offset in range(n))
+    else:
+        candidate_indices = range(1, n - 1)
+
+    for i in candidate_indices:
         safe = True
         for ring_info in ring_group.rings:
             if ring_info.verts[i] in ring_info.seam_verts:

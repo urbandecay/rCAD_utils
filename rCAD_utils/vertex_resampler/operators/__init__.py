@@ -39,7 +39,7 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
 
         open_data = open_loop.detect(bm)
         if open_data:
-            return open_loop.execute(bm, obj, self.direction)
+            return open_loop.execute(bm, obj, self.direction, report=self.report)
 
         if check_selected_junction(bm):
             return execute_anchored_logic(bm, obj, self.direction, mode='JUNCTION')

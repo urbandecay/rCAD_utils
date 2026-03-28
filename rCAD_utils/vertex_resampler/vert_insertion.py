@@ -14,8 +14,15 @@ def find_safe_insertion_index(ring_group):
 
     Returns -1 if the ring is too small to split.
     """
-    if ring_group.vert_count < 3:
+    if ring_group.is_closed:
+        if ring_group.vert_count < 3:
+            return -1
+        return 1
+
+    if ring_group.vert_count < 2:
         return -1
+    if ring_group.vert_count == 2:
+        return 0
     return 1
 
 

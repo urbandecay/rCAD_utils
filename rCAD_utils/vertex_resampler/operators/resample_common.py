@@ -3,6 +3,7 @@
 import bmesh
 
 from ..math_engine import CatmullRomSpline
+from ..ring_analyzer import analyze_rings
 from ..seam_manager import (
     load_seam_homes,
     save_seam_homes,
@@ -23,6 +24,128 @@ from .detection_utils import (
     get_anchored_chains,
     get_sorted_verts_after_edit,
 )
+
+
+def _report(report, level, message):
+    if report is not None:
+        report(level, message)
+
+
+def execute_aligned_loops_logic(bm, obj, data, direction, report=None):
+    loops, is_closed = data
+
+    splines = []
+    for loop in loops:
+        pts = [v.co.copy() for v in loop]
+        splines.append(CatmullRomSpline(pts, is_closed=is_closed))
+
+    ring_group = analyze_rings(loops, is_closed)
+
+    current_count = len(loops[0])
+    target_count = current_count + direction
+    has_seams = any(ring_info.seam_verts for ring_info in ring_group.rings)
+    min_limit = 4 if is_closed and has_seams else (3 if is_closed else 2)
+    if target_count < min_limit:
+        target_count = min_limit
+
+    if direction < 0 and ring_group.vert_count <= min_limit:
+        _report(
+            report,
+            {'WARNING'},
+            f"Can't remove any more verts. Minimum is {min_limit}.",
+        )
+        return {'CANCELLED'}
+
+    new_coords_stack = []
+    for spline in splines:
+        coords = []
+        num_segs = len(spline.segments)
+        for index in range(target_count):
+            if is_closed:
+                factor = index / target_count
+            else:
+                factor = index / (target_count - 1)
+            t_sample = factor * num_segs
+            coords.append(spline.eval_global(t_sample))
+        new_coords_stack.append(coords)
+
+    if direction < 0:
+        while ring_group.vert_count > target_count:
+            if ring_group.vert_count <= min_limit:
+                _report(
+                    report,
+                    {'WARNING'},
+                    f"Can't remove any more verts. Minimum is {min_limit}.",
+                )
+                break
+            idx = find_safe_deletion_index(ring_group)
+            if idx < 0:
+                _report(
+                    report,
+                    {'WARNING'},
+                    "Can't remove any more verts safely right now.",
+                )
+                break
+            neighbor_pairs = delete_at_index(bm, ring_group, idx)
+            repair_after_dissolve(bm, neighbor_pairs)
+
+    elif direction > 0:
+        while ring_group.vert_count < target_count:
+            idx = find_safe_insertion_index(ring_group)
+            if idx < 0:
+                break
+            repair_pairs = insert_at_index(bm, ring_group, idx)
+            repair_after_dissolve(bm, repair_pairs)
+
+    if is_closed:
+        stored_homes = load_seam_homes(obj)
+
+        loop0_verts = [v for v in ring_group.rings[0].verts if v.is_valid]
+        count = len(loop0_verts)
+        avg_edge_len = (
+            sum(
+                (loop0_verts[idx].co - loop0_verts[(idx + 1) % count].co).length
+                for idx in range(count)
+            ) / count
+            if count >= 2 else 0.1
+        )
+
+        seam_homes = match_seam_homes(ring_group, stored_homes, avg_edge_len)
+        save_seam_homes(obj, stored_homes)
+    else:
+        seam_homes = None
+
+    bm.verts.ensure_lookup_table()
+    for ring_index, ring_info in enumerate(ring_group.rings):
+        target_coords = new_coords_stack[ring_index]
+        loop = ring_info.verts
+        min_len = min(len(loop), len(target_coords))
+        for coord_index in range(min_len):
+            if loop[coord_index].is_valid:
+                loop[coord_index].co = target_coords[coord_index]
+                loop[coord_index].select = True
+
+    if is_closed and seam_homes:
+        edge_lengths = []
+        for ring_info in ring_group.rings:
+            loop = ring_info.verts
+            for idx in range(len(loop) - 1):
+                if loop[idx].is_valid and loop[idx + 1].is_valid:
+                    edge_lengths.append((loop[idx].co - loop[idx + 1].co).length)
+        threshold = (sum(edge_lengths) / len(edge_lengths) * 0.5) if edge_lengths else 0.1
+        migrate_drifted_seams(bm, ring_group, seam_homes, threshold)
+
+    ring_vert_set = set()
+    for ring_info in ring_group.rings:
+        for vert in ring_info.verts:
+            if vert.is_valid:
+                ring_vert_set.add(vert)
+    for face in bm.faces:
+        if all(vert in ring_vert_set for vert in face.verts):
+            face.select = True
+
+    bmesh.update_edit_mesh(obj.data)
+    return {'FINISHED'}
 
 
 def apply_resample(bm, verts, new_coords, closed, direction):
