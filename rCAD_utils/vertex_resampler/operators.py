@@ -8,6 +8,7 @@ from mathutils import Vector, kdtree
 
 from .ring_analyzer import analyze_rings
 from .vert_deletion import find_safe_deletion_index, delete_at_index
+from .vert_insertion import find_safe_insertion_index, insert_at_index
 from .topology_repair import repair_after_dissolve
 from .seam_manager import (load_seam_homes, save_seam_homes,
                            match_seam_homes, migrate_drifted_seams)
@@ -851,6 +852,17 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
                     break
                 neighbor_pairs = delete_at_index(bm, ring_group, idx)
                 repair_after_dissolve(bm, neighbor_pairs)
+
+        # Vert insertion — splits ring edges, repairs shaft faces after each
+        elif self.direction > 0:
+            while ring_group.vert_count < target_count:
+                idx = find_safe_insertion_index(ring_group)
+                if idx < 0:
+                    break
+                repair_pairs = insert_at_index(bm, ring_group, idx)
+                # Same repair logic as dissolve — find the expanded n-gon
+                # containing both new verts and split it back into quads
+                repair_after_dissolve(bm, repair_pairs)
 
         # Seam home management
         stored_homes = load_seam_homes(obj)
