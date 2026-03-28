@@ -23,7 +23,7 @@ class RingGroup:
     """
     __slots__ = ('rings', 'geometry_type', 'all_ring_verts')
 
-    def __init__(self, rings, geometry_type='cylinder'):
+    def __init__(self, rings, geometry_type='closed_loop'):
         self.rings = rings
         self.geometry_type = geometry_type
         self.all_ring_verts = set()
