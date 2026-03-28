@@ -872,6 +872,18 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
                     loop[k].co = target_coords[k]
                     loop[k].select = True
 
+        # face_split creates new faces with select=False. Re-select all shaft
+        # faces (faces whose verts are entirely ring verts) so hole-in-mesh
+        # cylinders don't end up with one dark unselected face.
+        ring_vert_set = set()
+        for loop in loops:
+            for v in loop:
+                if v.is_valid:
+                    ring_vert_set.add(v)
+        for f in bm.faces:
+            if all(v in ring_vert_set for v in f.verts):
+                f.select = True
+
         bmesh.update_edit_mesh(obj.data)
         return {'FINISHED'}
 

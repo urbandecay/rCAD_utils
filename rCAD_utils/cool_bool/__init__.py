@@ -156,6 +156,12 @@ class MESH_OT_CoolBool(bpy.types.Operator):
 
             def apply_bool_and_clean(main, operand, op):
                 if context.mode != 'OBJECT': bpy.ops.object.mode_set(mode='OBJECT')
+                for recalc_obj in (main, operand):
+                    context.view_layer.objects.active = recalc_obj
+                    bpy.ops.object.mode_set(mode='EDIT')
+                    bpy.ops.mesh.select_all(action='SELECT')
+                    bpy.ops.mesh.normals_make_consistent(inside=False)
+                    bpy.ops.object.mode_set(mode='OBJECT')
                 mod = main.modifiers.new("CB", 'BOOLEAN')
                 mod.operation = op
                 mod.object = operand
