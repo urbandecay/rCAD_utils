@@ -821,35 +821,42 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
                     v_kills.append(loop[1])
                     neighbor_pairs.append((loop[0], loop[2]))
 
-                print(f"[RCAD] dissolving {len(v_kills)} verts")
-                for v in v_kills:
-                    print(f"[RCAD] dissolving vert {v.index}, valid={v.is_valid}, edges={len(v.link_edges)}")
-                    if v.is_valid:
-                        bmesh.ops.dissolve_verts(bm, verts=[v])
+                # Dissolve all v_kills at once to avoid intermediate topology
+                valid_kills = [v for v in v_kills if v.is_valid]
+                if valid_kills:
+                    bmesh.ops.dissolve_verts(bm, verts=valid_kills)
 
-                # Repair pass after ALL dissolves.
+                bm.verts.ensure_lookup_table()
+                bm.edges.ensure_lookup_table()
+                bm.faces.ensure_lookup_table()
+
+                # Repair pass after dissolve.
                 # For hole-in-mesh rings, dissolve_verts merges shaft quads + mesh
                 # faces into one big n-gon — ring edge A-B ends up buried inside it.
-                # Splitting the n-gon at A, B gives exactly one quad (shaft) and one
-                # n-gon (mesh), with correct winding inherited from the existing face.
-                # Treat each ring independently — no special-casing needed.
-                bm.edges.ensure_lookup_table()
-
+                # Splitting the n-gon at A, B restores the shaft quad and mesh face.
                 for a, b in neighbor_pairs:
                     if not (a.is_valid and b.is_valid):
                         continue
                     if bm.edges.get([a, b]) is not None:
-                        continue  # dissolve already handled this ring
-                    merged_face = next(
-                        (f for f in a.link_faces if b in f.verts), None
-                    )
-                    if merged_face is not None:
-                        result = bmesh.utils.face_split(merged_face, a, b)
-                        if result and result[0].is_valid:
-                            result[0].select = True
-                    else:
+                        continue  # edge already exists, no repair needed
+
+                    # Find the LARGEST face containing both a and b — that's the
+                    # merged n-gon, not a shaft quad we'd accidentally split.
+                    merged_face = None
+                    max_verts = 0
+                    for f in a.link_faces:
+                        if b in f.verts and len(f.verts) > max_verts:
+                            max_verts = len(f.verts)
+                            merged_face = f
+
+                    if merged_face is not None and len(merged_face.verts) > 4:
+                        bmesh.utils.face_split(merged_face, a, b)
+                    elif merged_face is None:
                         bm.edges.new([a, b])
 
+                bm.verts.ensure_lookup_table()
+                bm.edges.ensure_lookup_table()
+                bm.faces.ensure_lookup_table()
                 bm.normal_update()
 
                 for loop in loops:
