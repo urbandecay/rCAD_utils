@@ -1,6 +1,18 @@
-# corner.py — Resample face-selected corner strips.
+# corner.py — Resample corner selections with extra faces on an open strip.
 
+from .open_strip_common import detect_open_strip_selection
 from .resample_common import execute_aligned_loops_logic
+
+
+def _selected_face_set(bm, sel_set):
+    return {
+        face for face in bm.faces
+        if len(face.verts) == 4 and (
+            face.select
+            or all(vert in sel_set for vert in face.verts)
+            or all(edge.select for edge in face.edges)
+        )
+    }
 
 
 def _selected_component_edges(component):
@@ -13,37 +25,10 @@ def _selected_component_edges(component):
     return list(edges)
 
 
-def _selected_components(bm):
-    selected_verts = [vert for vert in bm.verts if vert.select]
-    visited = set()
-    components = []
-
-    for vert in selected_verts:
-        if vert in visited:
-            continue
-        stack = [vert]
-        component = []
-        visited.add(vert)
-
-        while stack:
-            current = stack.pop()
-            component.append(current)
-            for edge in current.link_edges:
-                if not edge.select:
-                    continue
-                other = edge.other_vert(current)
-                if other.select and other not in visited:
-                    visited.add(other)
-                    stack.append(other)
-
-        if len(component) >= 2:
-            components.append(component)
-
-    return components
-
-
 def _fully_selected_faces(edge, sel_set):
-    return sum(1 for face in edge.link_faces if all(vert in sel_set for vert in face.verts))
+    return sum(
+        1 for face in edge.link_faces if all(vert in sel_set for vert in face.verts)
+    )
 
 
 def _order_path_from_edges(edges):
@@ -121,17 +106,16 @@ def _split_boundary_chains(boundary_edges, cut_edges):
 
 
 def _edge_lookup(edges):
-    return {
-        frozenset(edge.verts): edge
-        for edge in edges
-    }
+    return {frozenset(edge.verts): edge for edge in edges}
 
 
 def _align_chain_pair(chain_a, chain_b, edge_map):
     for candidate in (chain_b, list(reversed(chain_b))):
         if len(candidate) != len(chain_a):
             continue
-        if all(frozenset((va, vb)) in edge_map for va, vb in zip(chain_a, candidate)):
+        if all(
+            frozenset((va, vb)) in edge_map for va, vb in zip(chain_a, candidate)
+        ):
             return candidate
     return None
 
@@ -143,7 +127,11 @@ def _detect_corner_component(component):
         return None
 
     selected_degree = {
-        vert: sum(1 for edge in vert.link_edges if edge.select and edge.other_vert(vert) in component_set)
+        vert: sum(
+            1
+            for edge in vert.link_edges
+            if edge.select and edge.other_vert(vert) in component_set
+        )
         for vert in component
     }
     if any(degree < 2 or degree > 3 for degree in selected_degree.values()):
@@ -170,7 +158,9 @@ def _detect_corner_component(component):
     candidate_pairs = []
     if (
         len(candidate_cut_edges) == 2
-        and not set(candidate_cut_edges[0].verts).intersection(candidate_cut_edges[1].verts)
+        and not set(candidate_cut_edges[0].verts).intersection(
+            candidate_cut_edges[1].verts
+        )
     ):
         candidate_pairs.append((candidate_cut_edges[0], candidate_cut_edges[1]))
     else:
@@ -212,11 +202,9 @@ def _detect_corner_component(component):
     return best_pair
 
 
-def detect(bm):
-    selected_faces = [
-        face for face in bm.faces
-        if face.select and len(face.verts) == 4
-    ]
+def _legacy_corner_detect(bm):
+    selected_verts = {vert for vert in bm.verts if vert.select}
+    selected_faces = _selected_face_set(bm, selected_verts)
     if not selected_faces:
         return None
 
@@ -295,7 +283,6 @@ def detect(bm):
     if not corner_groups:
         return None
 
-    selected_verts = {vert for vert in bm.verts if vert.select}
     if covered_verts != selected_verts:
         return None
 
@@ -303,6 +290,24 @@ def detect(bm):
         'groups': corner_groups,
         'mode_label': 'Corner',
     }
+
+
+def detect(bm):
+    print("[vertex_resampler:dispatch] checking Corner")
+    data = detect_open_strip_selection(bm)
+    if data is None:
+        print("[vertex_resampler:dispatch] Corner rejected by shared detector")
+        return None
+
+    if data['has_extra_selected_faces'] or data['has_outside_side_faces']:
+        print("[vertex_resampler:dispatch] Corner matched via shared detector")
+        return {
+            'groups': data['groups'],
+            'mode_label': 'Corner',
+        }
+
+    print("[vertex_resampler:dispatch] Corner rejected by shared detector")
+    return None
 
 
 def execute(bm, obj, direction, report=None, data=None):
