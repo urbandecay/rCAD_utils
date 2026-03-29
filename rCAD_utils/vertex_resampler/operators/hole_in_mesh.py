@@ -1,5 +1,13 @@
 # hole_in_mesh.py — Resample punched holes in flat mesh or solids.
 
+from ..debug import (
+    begin_debug_operation,
+    debug_log,
+    debug_separator,
+    end_debug_operation,
+    loop_ref,
+    mesh_stats,
+)
 from ..ring_analyzer import analyze_rings
 from .detection_utils import get_selected_islands
 from .resample_common import execute_aligned_loops_logic
@@ -362,6 +370,7 @@ def _upper_ring_hole_groups(bm):
             'rings': matched_rings,
             'use_seams': True,
             'migrate_seams': True,
+            'max_seams': 2,
             'cleanup_edges': {
                 edge for edge in local_cleanup_edges if edge.is_valid
             },
@@ -441,6 +450,11 @@ def get_rings_from_selected(bm):
         if _is_shaft_face(face, selected_faces)
     }
     if not shaft_faces:
+        debug_log(
+            "hole_detect",
+            "No shaft faces found from fully-selected face set.",
+            mesh=mesh_stats(bm),
+        )
         return None
 
     cylinder_pairs = []
@@ -449,11 +463,24 @@ def get_rings_from_selected(bm):
         rings_data = _rings_from_component(component)
         if rings_data is None:
             invalid_components += 1
+            debug_log(
+                "hole_detect",
+                "Rejected shaft-face component because rings could not be extracted.",
+                component_faces=[face.index for face in sorted(component, key=lambda face: face.index)],
+            )
             continue
+        debug_log(
+            "hole_detect",
+            "Detected punched-hole ring pair from selected shaft faces.",
+            component_faces=[face.index for face in sorted(component, key=lambda face: face.index)],
+            ring0=loop_ref(rings_data[0][0]),
+            ring1=loop_ref(rings_data[0][1]),
+        )
         cylinder_pairs.append({
             'rings': rings_data,
             'use_seams': True,
             'migrate_seams': True,
+            'max_seams': 2,
         })
 
     return {
@@ -465,16 +492,33 @@ def get_rings_from_selected(bm):
 def detect(bm):
     data = get_rings_from_selected(bm)
     if data is not None and (data['groups'] or data['invalid_components']):
+        debug_log(
+            "hole_detect",
+            "Using fully-selected shaft-face detection path.",
+            groups=len(data['groups']),
+            invalid_components=data['invalid_components'],
+        )
         return data
 
     upper_ring_data = _upper_ring_hole_groups(bm)
     if upper_ring_data is not None and (
         upper_ring_data['groups'] or upper_ring_data['invalid_components']
     ):
+        debug_log(
+            "hole_detect",
+            "Using upper-ring hole detection path.",
+            groups=len(upper_ring_data['groups']),
+            invalid_components=upper_ring_data['invalid_components'],
+        )
         return upper_ring_data
 
     flat_groups = _flat_face_hole_groups(bm)
     if flat_groups:
+        debug_log(
+            "hole_detect",
+            "Using flat-face hole detection path.",
+            groups=len(flat_groups),
+        )
         return {
             'groups': flat_groups,
             'invalid_components': 0,
@@ -484,13 +528,18 @@ def detect(bm):
 
 
 def execute(bm, obj, direction, report=None, data=None):
+    op_id = begin_debug_operation("hole_resample")
     if data is None:
         data = detect(bm)
     if not data:
+        end_debug_operation(op_id, "hole_resample")
+        debug_separator()
         return {'CANCELLED'}
     if not data['groups']:
         if report is not None:
             report({'ERROR'}, "Could not detect a valid punched hole.")
+        end_debug_operation(op_id, "hole_resample")
+        debug_separator()
         return {'CANCELLED'}
 
     if data['invalid_components'] and report is not None:
@@ -499,7 +548,25 @@ def execute(bm, obj, direction, report=None, data=None):
             f"Skipped {data['invalid_components']} invalid hole component(s).",
         )
 
+    debug_log(
+        "hole_execute",
+        "Executing hole-in-mesh resample groups.",
+        direction=direction,
+        group_count=len(data['groups']),
+        invalid_components=data['invalid_components'],
+        mesh=mesh_stats(bm),
+    )
+
     for group_data in data['groups']:
+        debug_log(
+            "hole_execute",
+            "Dispatching aligned loop logic for hole group.",
+            ring_count=len(group_data['rings'][0]),
+            ring_sizes=[len(loop) for loop in group_data['rings'][0]],
+            use_seams=group_data.get('use_seams', True),
+            migrate_seams=group_data.get('migrate_seams'),
+            max_seams=group_data.get('max_seams'),
+        )
         _cleanup_selected_ring_edges(
             bm,
             group_data.get('cleanup_edges', set()),
@@ -515,4 +582,6 @@ def execute(bm, obj, direction, report=None, data=None):
             migrate_seams=group_data.get('migrate_seams'),
             max_seams=group_data.get('max_seams'),
         )
+    end_debug_operation(op_id, "hole_resample")
+    debug_separator()
     return {'FINISHED'}

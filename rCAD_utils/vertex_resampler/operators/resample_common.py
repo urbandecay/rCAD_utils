@@ -2,6 +2,7 @@
 
 import bmesh
 
+from ..debug import debug_log, mesh_stats, pair_ref, ring_group_ref
 from ..math_engine import CatmullRomSpline
 from ..ring_analyzer import analyze_rings
 from ..seam_manager import (
@@ -47,24 +48,107 @@ def _outside_edge_score(vert, all_ring_verts):
     return max(lengths, default=0.0)
 
 
+def _ring_vert_positions(ring_info):
+    return {
+        vert: index
+        for index, vert in enumerate(ring_info.verts)
+        if vert.is_valid
+    }
+
+
+def _ring_step_distance(ring_info, index_a, index_b):
+    delta = abs(index_a - index_b)
+    if ring_info.is_closed:
+        count = len(ring_info.verts)
+        return min(delta, count - delta)
+    return delta
+
+
+def _min_ring_spacing(ring_info, vert, other_verts, positions=None):
+    if not other_verts:
+        return len(ring_info.verts)
+
+    if positions is None:
+        positions = _ring_vert_positions(ring_info)
+
+    index = positions.get(vert)
+    if index is None:
+        return -1
+
+    valid_other_indices = [
+        positions[other]
+        for other in other_verts
+        if other in positions
+    ]
+    if not valid_other_indices:
+        return len(ring_info.verts)
+
+    return min(
+        _ring_step_distance(ring_info, index, other_index)
+        for other_index in valid_other_indices
+    )
+
+
+def _seam_clearance_steps(ring_info):
+    if not ring_info.is_closed:
+        return 1
+    return 2 if len(ring_info.verts) >= 8 else 1
+
+
+def _pick_spaced_ring_verts(ring_group, ring_info, candidate_verts, limit):
+    candidates = [
+        vert for vert in candidate_verts
+        if vert.is_valid
+    ]
+    if limit is None or len(candidates) <= limit:
+        return set(candidates)
+
+    positions = _ring_vert_positions(ring_info)
+    candidates = [vert for vert in candidates if vert in positions]
+    if len(candidates) <= limit:
+        return set(candidates)
+
+    selected = [
+        max(
+            candidates,
+            key=lambda vert: (
+                _outside_edge_score(vert, ring_group.all_ring_verts),
+                -vert.index,
+            ),
+        )
+    ]
+    remaining = [vert for vert in candidates if vert not in selected]
+    clearance = _seam_clearance_steps(ring_info)
+
+    while remaining and len(selected) < limit:
+        clear_candidates = [
+            vert for vert in remaining
+            if _min_ring_spacing(ring_info, vert, selected, positions) >= clearance
+        ]
+        candidate_pool = clear_candidates or remaining
+        best = max(
+            candidate_pool,
+            key=lambda vert: (
+                _outside_edge_score(vert, ring_group.all_ring_verts),
+                _min_ring_spacing(ring_info, vert, selected, positions),
+                -vert.index,
+            ),
+        )
+        selected.append(best)
+        remaining.remove(best)
+
+    return set(selected)
+
+
 def _limit_seam_sets(ring_group, seam_sets, max_seams):
     if max_seams is None:
         return seam_sets
 
     limited_sets = []
-    for seam_set in seam_sets:
-        if len(seam_set) <= max_seams:
-            limited_sets.append(set(seam_set))
-            continue
-
-        ranked = sorted(
-            seam_set,
-            key=lambda vert: (
-                -_outside_edge_score(vert, ring_group.all_ring_verts),
-                vert.index,
-            ),
+    for ring_info, seam_set in zip(ring_group.rings, seam_sets):
+        limited_sets.append(
+            _pick_spaced_ring_verts(ring_group, ring_info, seam_set, max_seams)
         )
-        limited_sets.append(set(ranked[:max_seams]))
 
     return limited_sets
 
@@ -75,18 +159,35 @@ def _enforce_max_seams(bm, ring_group, max_seams):
 
     for ring_info in ring_group.rings:
         outside_edges = []
+        candidate_edges_by_vert = {}
         for vert in ring_info.verts:
-            for edge in vert.link_edges:
-                if edge.other_vert(vert) not in ring_group.all_ring_verts:
-                    outside_edges.append(edge)
+            vert_outside_edges = [
+                edge
+                for edge in vert.link_edges
+                if edge.other_vert(vert) not in ring_group.all_ring_verts
+            ]
+            outside_edges.extend(vert_outside_edges)
+            if vert_outside_edges:
+                candidate_edges_by_vert[vert] = max(
+                    vert_outside_edges,
+                    key=lambda edge: (edge.calc_length(), -edge.index),
+                )
 
         unique_edges = list({edge for edge in outside_edges if edge.is_valid})
         if len(unique_edges) <= max_seams:
             continue
 
-        keep_edges = set(
-            sorted(unique_edges, key=lambda edge: (-edge.calc_length(), edge.index))[:max_seams]
+        keep_verts = _pick_spaced_ring_verts(
+            ring_group,
+            ring_info,
+            candidate_edges_by_vert.keys(),
+            max_seams,
         )
+        keep_edges = {
+            candidate_edges_by_vert[vert]
+            for vert in keep_verts
+            if vert in candidate_edges_by_vert
+        }
         drop_edges = [edge for edge in unique_edges if edge not in keep_edges]
         if drop_edges:
             bmesh.ops.dissolve_edges(
@@ -96,12 +197,7 @@ def _enforce_max_seams(bm, ring_group, max_seams):
                 use_face_split=False,
             )
 
-        seam_verts = set()
-        for edge in keep_edges:
-            for vert in edge.verts:
-                if vert in ring_group.all_ring_verts:
-                    seam_verts.add(vert)
-        ring_info.seam_verts = seam_verts
+        ring_info.seam_verts = set(keep_verts)
 
     bm.verts.ensure_lookup_table()
     bm.edges.ensure_lookup_table()
@@ -130,6 +226,19 @@ def execute_aligned_loops_logic(
         splines.append(CatmullRomSpline(pts, is_closed=is_closed))
 
     ring_group = analyze_rings(loops, is_closed)
+    if use_seams and max_seams is not None:
+        _enforce_max_seams(bm, ring_group, max_seams)
+    current_count = len(loops[0])
+    debug_log(
+        "aligned",
+        "Starting aligned loop resample.",
+        direction=direction,
+        is_closed=is_closed,
+        current_count=current_count,
+        loop_count=len(loops),
+        ring_group=ring_group_ref(ring_group),
+        mesh=mesh_stats(bm),
+    )
     migration_seams = [set(ring_info.seam_verts) for ring_info in ring_group.rings]
     migration_seams = _limit_seam_sets(ring_group, migration_seams, max_seams)
     if not use_seams:
@@ -139,7 +248,6 @@ def execute_aligned_loops_logic(
         for ring_info, seam_verts in zip(ring_group.rings, migration_seams):
             ring_info.seam_verts = set(seam_verts)
 
-    current_count = len(loops[0])
     target_count = current_count + direction
     has_seams = use_seams and any(
         ring_info.seam_verts for ring_info in ring_group.rings
@@ -170,6 +278,7 @@ def execute_aligned_loops_logic(
         new_coords_stack.append(coords)
 
     if direction < 0:
+        reduction_step = 0
         while ring_group.vert_count > target_count:
             if ring_group.vert_count <= min_limit:
                 _report(
@@ -186,8 +295,32 @@ def execute_aligned_loops_logic(
                     "Can't remove any more verts safely right now.",
                 )
                 break
+            debug_log(
+                "aligned",
+                "Beginning reduction step.",
+                step=reduction_step,
+                delete_index=idx,
+                ring_group=ring_group_ref(ring_group),
+            )
             neighbor_pairs = delete_at_index(bm, ring_group, idx)
+            debug_log(
+                "aligned",
+                "Deletion produced neighbor pairs.",
+                step=reduction_step,
+                neighbor_pairs=[
+                    pair_ref(item["a"], item["b"]) if isinstance(item, dict) else pair_ref(*item)
+                    for item in neighbor_pairs
+                ],
+            )
             repair_after_dissolve(bm, neighbor_pairs)
+            debug_log(
+                "aligned",
+                "Finished reduction step.",
+                step=reduction_step,
+                ring_group=ring_group_ref(ring_group),
+                mesh=mesh_stats(bm),
+            )
+            reduction_step += 1
 
     elif direction > 0:
         while ring_group.vert_count < target_count:
@@ -249,6 +382,14 @@ def execute_aligned_loops_logic(
             face.select = True
 
     bmesh.update_edit_mesh(obj.data)
+    debug_log(
+        "aligned",
+        "Finished aligned loop resample.",
+        direction=direction,
+        target_count=target_count,
+        final_ring_group=ring_group_ref(ring_group),
+        mesh=mesh_stats(bm),
+    )
     return {'FINISHED'}
 
 
