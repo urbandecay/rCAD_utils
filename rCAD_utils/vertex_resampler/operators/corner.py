@@ -212,7 +212,7 @@ def _detect_corner_component(component):
     return best_pair
 
 
-def detect(bm):
+def detect_strip_groups(bm):
     components = _selected_components(bm)
     if not components:
         return None
@@ -235,6 +235,98 @@ def detect(bm):
 
     return {
         'groups': groups,
+    }
+
+
+def detect(bm):
+    selected_faces = [
+        face for face in bm.faces
+        if face.select and len(face.verts) == 4
+    ]
+    if not selected_faces:
+        return None
+
+    selected_face_set = set(selected_faces)
+
+    def face_neighbors(face, face_set):
+        neighbors = set()
+        for edge in face.edges:
+            for other_face in edge.link_faces:
+                if other_face is face or other_face not in face_set:
+                    continue
+                neighbors.add(other_face)
+        return neighbors
+
+    def face_components(faces):
+        visited = set()
+        components = []
+        for face in sorted(faces, key=lambda item: item.index):
+            if face in visited:
+                continue
+            component = set()
+            stack = [face]
+            visited.add(face)
+            while stack:
+                current = stack.pop()
+                component.add(current)
+                for neighbor in face_neighbors(current, faces):
+                    if neighbor in visited:
+                        continue
+                    visited.add(neighbor)
+                    stack.append(neighbor)
+            components.append(component)
+        return components
+
+    def is_shaft_face(face, face_set):
+        internal_edges = []
+        for edge in face.edges:
+            has_neighbor = any(
+                other_face is not face and other_face in face_set
+                for other_face in edge.link_faces
+            )
+            if has_neighbor:
+                internal_edges.append(edge)
+
+        if len(internal_edges) != 2:
+            return False
+        return not set(internal_edges[0].verts).intersection(internal_edges[1].verts)
+
+    corner_groups = []
+    covered_verts = set()
+
+    for face_component in face_components(selected_face_set):
+        shaft_faces = {
+            face for face in face_component
+            if is_shaft_face(face, face_component)
+        }
+        if not shaft_faces or shaft_faces == face_component:
+            continue
+
+        shaft_verts = []
+        shaft_vert_seen = set()
+        for face in sorted(shaft_faces, key=lambda item: item.index):
+            for vert in face.verts:
+                if vert in shaft_vert_seen:
+                    continue
+                shaft_vert_seen.add(vert)
+                shaft_verts.append(vert)
+
+        strip_group = _detect_corner_component(shaft_verts)
+        if strip_group is None:
+            continue
+
+        corner_groups.append(strip_group)
+        covered_verts.update(vert for face in face_component for vert in face.verts)
+
+    if not corner_groups:
+        return None
+
+    selected_verts = {vert for vert in bm.verts if vert.select}
+    if covered_verts != selected_verts:
+        return None
+
+    return {
+        'groups': corner_groups,
         'mode_label': 'Corner',
     }
 

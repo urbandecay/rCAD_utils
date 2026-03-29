@@ -1,6 +1,7 @@
 # bridged_open_loop.py — Resample bridged open-loop selections.
 
 from .bridge_utils import get_bridged_chain
+from . import corner
 from .resample_common import execute_aligned_loops_logic
 
 
@@ -11,6 +12,14 @@ def detect(bm):
             'groups': [bridged_data],
             'mode_label': 'Bridged open loop',
         }
+
+    strip_data = corner.detect_strip_groups(bm)
+    if strip_data and strip_data.get('groups'):
+        return {
+            'groups': strip_data['groups'],
+            'mode_label': 'Bridged open loop',
+        }
+
     return None
 
 

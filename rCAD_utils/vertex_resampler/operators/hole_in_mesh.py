@@ -39,7 +39,7 @@ def _cleanup_selected_ring_edges(bm, cleanup_edges, ring_edges):
 
 
 def detect(bm, report=None):
-    data = hole_punch_solid.detect(bm)
+    data = hole_punch_solid.detect(bm, report=report)
     if data is not None:
         return data
 
@@ -63,6 +63,14 @@ def execute(bm, obj, direction, report=None, data=None):
         )
 
     for group_data in data['groups']:
+        if any(
+            not vert.is_valid
+            for loop in group_data['rings'][0]
+            for vert in loop
+        ):
+            if report is not None:
+                report({'WARNING'}, "Skipped stale hole ring after mesh update.")
+            continue
         _cleanup_selected_ring_edges(
             bm,
             group_data.get('cleanup_edges', set()),

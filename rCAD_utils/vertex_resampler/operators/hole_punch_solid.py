@@ -1,9 +1,18 @@
 # hole_punch_solid.py — Detect punched holes that pass through solid mesh.
 
+
+def _report_debug(report, message):
+    if report is not None:
+        report({'INFO'}, message)
+
 def _selected_face_set(bm, sel_set):
     return {
         face for face in bm.faces
-        if len(face.verts) >= 3 and all(vert in sel_set for vert in face.verts)
+        if len(face.verts) >= 3 and (
+            face.select
+            or all(vert in sel_set for vert in face.verts)
+            or all(edge.select for edge in face.edges)
+        )
     }
 
 
@@ -23,11 +32,13 @@ def _is_shaft_face(face, selected_faces):
 
     internal_edges = []
     for edge in face.edges:
-        has_selected_neighbor = any(
-            other_face is not face and other_face in selected_faces
+        has_selected_quad_neighbor = any(
+            other_face is not face
+            and other_face in selected_faces
+            and len(other_face.verts) == 4
             for other_face in edge.link_faces
         )
-        if has_selected_neighbor:
+        if has_selected_quad_neighbor:
             internal_edges.append(edge)
 
     if len(internal_edges) != 2:
@@ -343,18 +354,23 @@ def _upper_ring_hole_groups(bm):
     }
 
 
-def _shaft_face_hole_groups(bm):
+def _shaft_face_detection_data(bm, report=None):
     sel_verts = [vert for vert in bm.verts if vert.select]
-    if len(sel_verts) < 4:
-        return None
-
     sel_set = set(sel_verts)
     selected_faces = _selected_face_set(bm, sel_set)
+    if not selected_faces:
+        _report_debug(report, "Solid hole check: selected-faces=0")
+        return None
+
     shaft_faces = {
         face for face in selected_faces
         if _is_shaft_face(face, selected_faces)
     }
     if not shaft_faces:
+        _report_debug(
+            report,
+            f"Solid hole check: selected-faces={len(selected_faces)} shaft-faces=0",
+        )
         return None
 
     cylinder_pairs = []
@@ -371,15 +387,47 @@ def _shaft_face_hole_groups(bm):
             'max_seams': 2,
         })
 
+    has_extra_selected_faces = bool(selected_faces - shaft_faces)
+    _report_debug(
+        report,
+        "Solid hole check: "
+        f"selected-faces={len(selected_faces)} "
+        f"shaft-faces={len(shaft_faces)} "
+        f"groups={len(cylinder_pairs)} "
+        f"invalid={invalid_components} "
+        f"extra={int(has_extra_selected_faces)}",
+    )
+
     return {
         'groups': cylinder_pairs,
         'invalid_components': invalid_components,
+        'selected_face_count': len(selected_faces),
+        'shaft_face_count': len(shaft_faces),
+        'has_extra_selected_faces': has_extra_selected_faces,
+    }
+
+
+def detect_shaft_face_groups(bm, require_embedded=None, report=None):
+    data = _shaft_face_detection_data(bm, report=report)
+    if data is None:
+        return None
+
+    has_extra = data['has_extra_selected_faces']
+    if require_embedded is True and not has_extra:
+        _report_debug(report, "Solid hole check: shaft found but no surrounding solid")
+        return None
+    if require_embedded is False and has_extra:
+        return None
+
+    return {
+        'groups': data['groups'],
+        'invalid_components': data['invalid_components'],
         'mode_label': 'Solid hole punch',
     }
 
 
-def detect(bm):
-    data = _shaft_face_hole_groups(bm)
+def detect(bm, report=None):
+    data = detect_shaft_face_groups(bm, require_embedded=True, report=report)
     if data is not None and (data['groups'] or data['invalid_components']):
         return data
 

@@ -4,7 +4,7 @@ import os
 
 
 def _env_enabled():
-    value = os.environ.get("RCAD_VERTEX_RESAMPLER_DEBUG", "1").strip().lower()
+    value = os.environ.get("RCAD_VERTEX_RESAMPLER_DEBUG", "0").strip().lower()
     return value not in {"0", "false", "off", "no"}
 
 
