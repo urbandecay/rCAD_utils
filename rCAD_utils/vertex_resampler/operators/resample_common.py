@@ -38,8 +38,19 @@ def _sanitize_chain_verts(verts, closed):
     return get_sorted_verts_after_edit(valid_verts, closed)
 
 
-def execute_aligned_loops_logic(bm, obj, data, direction, report=None):
+def execute_aligned_loops_logic(
+    bm,
+    obj,
+    data,
+    direction,
+    report=None,
+    use_seams=True,
+    migrate_seams=None,
+):
     loops, is_closed = data
+
+    if migrate_seams is None:
+        migrate_seams = use_seams
 
     splines = []
     for loop in loops:
@@ -47,10 +58,16 @@ def execute_aligned_loops_logic(bm, obj, data, direction, report=None):
         splines.append(CatmullRomSpline(pts, is_closed=is_closed))
 
     ring_group = analyze_rings(loops, is_closed)
+    migration_seams = [set(ring_info.seam_verts) for ring_info in ring_group.rings]
+    if not use_seams:
+        for ring_info in ring_group.rings:
+            ring_info.seam_verts = set()
 
     current_count = len(loops[0])
     target_count = current_count + direction
-    has_seams = any(ring_info.seam_verts for ring_info in ring_group.rings)
+    has_seams = use_seams and any(
+        ring_info.seam_verts for ring_info in ring_group.rings
+    )
     min_limit = 4 if is_closed and has_seams else (3 if is_closed else 2)
     if target_count < min_limit:
         target_count = min_limit
@@ -104,7 +121,10 @@ def execute_aligned_loops_logic(bm, obj, data, direction, report=None):
             repair_pairs = insert_at_index(bm, ring_group, idx)
             repair_after_dissolve(bm, repair_pairs)
 
-    if is_closed:
+    if is_closed and migrate_seams:
+        if not use_seams:
+            for ring_info, seam_verts in zip(ring_group.rings, migration_seams):
+                ring_info.seam_verts = {vert for vert in seam_verts if vert.is_valid}
         stored_homes = load_seam_homes(obj)
 
         loop0_verts = [v for v in ring_group.rings[0].verts if v.is_valid]
@@ -132,7 +152,7 @@ def execute_aligned_loops_logic(bm, obj, data, direction, report=None):
                 loop[coord_index].co = target_coords[coord_index]
                 loop[coord_index].select = True
 
-    if is_closed and seam_homes:
+    if is_closed and migrate_seams and seam_homes:
         edge_lengths = []
         for ring_info in ring_group.rings:
             loop = ring_info.verts

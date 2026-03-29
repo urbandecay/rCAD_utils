@@ -1,5 +1,7 @@
-# hole_in_mesh.py — Resample cylinders punched through flat mesh.
+# hole_in_mesh.py — Resample punched holes in flat mesh or solids.
 
+from ..ring_analyzer import analyze_rings
+from .detection_utils import get_selected_islands
 from .resample_common import execute_aligned_loops_logic
 
 
@@ -203,6 +205,54 @@ def _rings_from_component(component):
     return None
 
 
+def _selected_loop_degree(vert, ring_set):
+    return sum(
+        1
+        for edge in vert.link_edges
+        if edge.select and edge.other_vert(vert) in ring_set
+    )
+
+
+def _flat_face_hole_groups(bm):
+    groups = []
+    covered_verts = set()
+
+    for island in get_selected_islands(bm):
+        if not island['closed']:
+            continue
+
+        ring = island['verts']
+        if len(ring) < 4:
+            continue
+
+        ring_set = set(ring)
+        if any(_selected_loop_degree(vert, ring_set) != 2 for vert in ring):
+            continue
+
+        ring_group = analyze_rings([ring], is_closed=True)
+        seam_verts = ring_group.rings[0].seam_verts
+        if not seam_verts:
+            continue
+
+        use_seams = len(seam_verts) < len(ring)
+
+        groups.append({
+            'rings': ([ring], True),
+            'use_seams': use_seams,
+            'migrate_seams': True,
+        })
+        covered_verts.update(ring)
+
+    if not groups:
+        return []
+
+    selected_verts = {vert for vert in bm.verts if vert.select}
+    if covered_verts != selected_verts:
+        return []
+
+    return groups
+
+
 def get_rings_from_selected(bm):
     sel_verts = [vert for vert in bm.verts if vert.select]
     if len(sel_verts) < 4:
@@ -224,7 +274,11 @@ def get_rings_from_selected(bm):
         if rings_data is None:
             invalid_components += 1
             continue
-        cylinder_pairs.append(rings_data)
+        cylinder_pairs.append({
+            'rings': rings_data,
+            'use_seams': True,
+            'migrate_seams': True,
+        })
 
     return {
         'groups': cylinder_pairs,
@@ -234,10 +288,16 @@ def get_rings_from_selected(bm):
 
 def detect(bm):
     data = get_rings_from_selected(bm)
-    if data is None:
-        return None
-    if data['groups'] or data['invalid_components']:
+    if data is not None and (data['groups'] or data['invalid_components']):
         return data
+
+    flat_groups = _flat_face_hole_groups(bm)
+    if flat_groups:
+        return {
+            'groups': flat_groups,
+            'invalid_components': 0,
+        }
+
     return None
 
 
@@ -257,6 +317,14 @@ def execute(bm, obj, direction, report=None, data=None):
             f"Skipped {data['invalid_components']} invalid hole component(s).",
         )
 
-    for rings_data in data['groups']:
-        execute_aligned_loops_logic(bm, obj, rings_data, direction, report=report)
+    for group_data in data['groups']:
+        execute_aligned_loops_logic(
+            bm,
+            obj,
+            group_data['rings'],
+            direction,
+            report=report,
+            use_seams=group_data.get('use_seams', True),
+            migrate_seams=group_data.get('migrate_seams'),
+        )
     return {'FINISHED'}
