@@ -70,5 +70,7 @@ def insert_at_index(bm, ring_group, index):
     repair_pairs = []
     for i in range(len(new_verts) - 1):
         repair_pairs.append((new_verts[i], new_verts[i + 1]))
+    if getattr(ring_group, "stack_is_cyclic", False) and len(new_verts) > 1:
+        repair_pairs.append((new_verts[-1], new_verts[0]))
 
     return repair_pairs

@@ -214,6 +214,7 @@ def execute_aligned_loops_logic(
     use_seams=True,
     migrate_seams=None,
     max_seams=None,
+    stack_is_cyclic=False,
 ):
     loops, is_closed = data
 
@@ -225,7 +226,11 @@ def execute_aligned_loops_logic(
         pts = [v.co.copy() for v in loop]
         splines.append(CatmullRomSpline(pts, is_closed=is_closed))
 
-    ring_group = analyze_rings(loops, is_closed)
+    ring_group = analyze_rings(
+        loops,
+        is_closed,
+        stack_is_cyclic=stack_is_cyclic,
+    )
     if use_seams and max_seams is not None:
         _enforce_max_seams(bm, ring_group, max_seams)
     current_count = len(loops[0])

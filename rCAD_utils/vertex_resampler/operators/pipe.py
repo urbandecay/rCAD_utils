@@ -426,6 +426,7 @@ def _detect_pipe_component(component):
         'rings': (ordered_loops, True),
         'use_seams': False,
         'migrate_seams': False,
+        'stack_is_cyclic': True,
     }
 
 
@@ -465,6 +466,7 @@ def execute(bm, obj, direction, report=None, data=None):
             report=report,
             use_seams=group_data.get('use_seams', False),
             migrate_seams=group_data.get('migrate_seams', False),
+            stack_is_cyclic=group_data.get('stack_is_cyclic', False),
         )
 
     return {'FINISHED'}

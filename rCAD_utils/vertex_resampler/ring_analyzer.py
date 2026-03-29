@@ -21,11 +21,12 @@ class RingGroup:
     a RingGroup with the right alignment and geometry_type label.
     The rest of the pipeline (deletion, repair, seams) doesn't change.
     """
-    __slots__ = ('rings', 'geometry_type', 'all_ring_verts')
+    __slots__ = ('rings', 'geometry_type', 'all_ring_verts', 'stack_is_cyclic')
 
-    def __init__(self, rings, geometry_type='closed_loop'):
+    def __init__(self, rings, geometry_type='closed_loop', stack_is_cyclic=False):
         self.rings = rings
         self.geometry_type = geometry_type
+        self.stack_is_cyclic = stack_is_cyclic
         self.all_ring_verts = set()
         for r in rings:
             self.all_ring_verts.update(r.verts)
@@ -43,7 +44,7 @@ class RingGroup:
         return len(self.rings[0].verts) if self.rings else 0
 
 
-def analyze_rings(loops, is_closed=True):
+def analyze_rings(loops, is_closed=True, stack_is_cyclic=False):
     """Build a RingGroup from aligned loops.
 
     Detects seam verts per ring — any ring vert with at least one edge
@@ -64,4 +65,4 @@ def analyze_rings(loops, is_closed=True):
                     break
         rings.append(RingInfo(loop, seam_verts, is_closed))
 
-    return RingGroup(rings)
+    return RingGroup(rings, stack_is_cyclic=stack_is_cyclic)
