@@ -42,7 +42,7 @@ def get_auto_bridged_chain(bm):
 
     shaft_map = {}
     for v in verts:
-        for e in v.link_edges:
+        for e in sorted(v.link_edges, key=lambda edge: edge.index):
             if not e.select:
                 other = e.other_vert(v)
                 if other not in sel_verts_set:
@@ -53,13 +53,13 @@ def get_auto_bridged_chain(bm):
         return None
 
     partner_set = set(shaft_map.values())
-    start = shaft_map[verts[0]]
+    start = min(partner_set, key=lambda vert: vert.index)
     partner_ordered = [start]
     visited = {start}
     curr = start
     for _ in range(len(verts) - 1):
         found = False
-        for e in curr.link_edges:
+        for e in sorted(curr.link_edges, key=lambda edge: edge.index):
             other = e.other_vert(curr)
             if other in partner_set and other not in visited:
                 partner_ordered.append(other)
@@ -89,8 +89,8 @@ def get_bridged_chain(bm):
     adj = {i: [] for i in island_map}
     for idx_a, island_a in island_map.items():
         verts_a = set(island_a['verts'])
-        for va in verts_a:
-            for e in va.link_edges:
+        for va in sorted(verts_a, key=lambda vert: vert.index):
+            for e in sorted(va.link_edges, key=lambda edge: edge.index):
                 if not e.select:
                     other = e.other_vert(va)
                     for idx_b, island_b in island_map.items():
@@ -102,7 +102,7 @@ def get_bridged_chain(bm):
                             break
 
     start_node = None
-    for idx, neighbors in adj.items():
+    for idx, neighbors in sorted(adj.items()):
         if len(neighbors) == 1:
             start_node = idx
             break
@@ -114,7 +114,7 @@ def get_bridged_chain(bm):
     curr = start_node
 
     while True:
-        neighbors = adj[curr]
+        neighbors = sorted(adj[curr])
         next_node = None
         for n in neighbors:
             if n not in visited_idx:
@@ -138,7 +138,7 @@ def get_bridged_chain(bm):
 
         connection_map = {}
         for v_curr in curr_loop_verts:
-            for e in v_curr.link_edges:
+            for e in sorted(v_curr.link_edges, key=lambda edge: edge.index):
                 if not e.select:
                     other = e.other_vert(v_curr)
                     if other in next_loop_verts:

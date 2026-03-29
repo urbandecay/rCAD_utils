@@ -48,7 +48,7 @@ def _face_components(faces):
     visited = set()
     components = []
 
-    for face in faces:
+    for face in sorted(faces, key=lambda item: item.index):
         if face in visited:
             continue
 
@@ -59,7 +59,10 @@ def _face_components(faces):
         while stack:
             current = stack.pop()
             component.add(current)
-            for neighbor in _selected_face_neighbors(current, faces):
+            for neighbor in sorted(
+                _selected_face_neighbors(current, faces),
+                key=lambda item: item.index,
+            ):
                 if neighbor in visited:
                     continue
                 visited.add(neighbor)
@@ -90,14 +93,14 @@ def _order_boundary_loop(edges):
     if any(len(neighbors) != 2 for neighbors in adjacency.values()):
         return None
 
-    start = next(iter(adjacency))
+    start = min(adjacency, key=lambda vert: vert.index)
     ordered = [start]
     previous = None
     current = start
 
     while True:
         next_vert = None
-        for neighbor in adjacency[current]:
+        for neighbor in sorted(adjacency[current], key=lambda vert: vert.index):
             if neighbor is previous:
                 continue
             next_vert = neighbor
@@ -133,7 +136,7 @@ def _boundary_loops(boundary_edges):
     visited = set()
     loops = []
 
-    for edge in boundary_edges:
+    for edge in sorted(boundary_edges, key=lambda item: item.index):
         if edge in visited:
             continue
 
@@ -144,7 +147,7 @@ def _boundary_loops(boundary_edges):
         while stack:
             current = stack.pop()
             component_edges.add(current)
-            for other in edge_neighbors[current]:
+            for other in sorted(edge_neighbors[current], key=lambda item: item.index):
                 if other in visited:
                     continue
                 visited.add(other)
@@ -164,7 +167,7 @@ def _aligned_partner_loop(ring0, ring1, edge_face_counts):
 
     for vert in ring0:
         partner = None
-        for edge in vert.link_edges:
+        for edge in sorted(vert.link_edges, key=lambda item: item.index):
             if edge_face_counts.get(edge) != 2:
                 continue
             other = edge.other_vert(vert)
@@ -240,6 +243,7 @@ def _flat_face_hole_groups(bm):
             'rings': ([ring], True),
             'use_seams': use_seams,
             'migrate_seams': True,
+            'max_seams': 1,
         })
         covered_verts.update(ring)
 
@@ -326,5 +330,6 @@ def execute(bm, obj, direction, report=None, data=None):
             report=report,
             use_seams=group_data.get('use_seams', True),
             migrate_seams=group_data.get('migrate_seams'),
+            max_seams=group_data.get('max_seams'),
         )
     return {'FINISHED'}

@@ -9,6 +9,10 @@ def get_centroid(verts):
     return sum((v.co for v in verts), Vector((0, 0, 0))) / len(verts)
 
 
+def _sorted_edges(edges):
+    return sorted(edges, key=lambda edge: edge.index)
+
+
 def get_selected_islands(bm):
     sel_verts = [v for v in bm.verts if v.select]
     if not sel_verts:
@@ -24,7 +28,7 @@ def get_selected_islands(bm):
         while stack:
             curr = stack.pop()
             component.append(curr)
-            for e in curr.link_edges:
+            for e in _sorted_edges(curr.link_edges):
                 if not e.select:
                     continue
                 other = e.other_vert(curr)
@@ -40,19 +44,19 @@ def get_selected_islands(bm):
         ordered_verts = []
         closed = False
         if len(endpoints) == 2:
-            curr = endpoints[0]
+            curr = min(endpoints, key=lambda vert: vert.index)
             ordered_verts.append(curr)
             local_vis = {curr}
         elif len(endpoints) == 0:
             closed = True
-            curr = component[0]
+            curr = min(component, key=lambda vert: vert.index)
             ordered_verts.append(curr)
             local_vis = {curr}
         else:
             continue
         while len(ordered_verts) < len(component):
             found = False
-            for e in curr.link_edges:
+            for e in _sorted_edges(curr.link_edges):
                 if not e.select:
                     continue
                 other = e.other_vert(curr)
@@ -73,7 +77,7 @@ def get_sorted_verts_after_edit(verts, closed):
     if not verts:
         return []
     candidate_set = set(verts)
-    start_v = verts[0]
+    start_v = min(verts, key=lambda vert: vert.index)
 
     if not closed:
         endpoints = []
@@ -95,7 +99,7 @@ def get_sorted_verts_after_edit(verts, closed):
     current = start_v
     for _ in range(len(verts) - 1):
         found_next = False
-        for e in current.link_edges:
+        for e in _sorted_edges(current.link_edges):
             other = e.other_vert(current)
             if other in candidate_set and other not in visited:
                 sorted_v.append(other)

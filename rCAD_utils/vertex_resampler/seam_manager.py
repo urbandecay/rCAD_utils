@@ -74,13 +74,16 @@ def _migrate_seam_vert(bm, old_sv, new_sv, all_ring_verts):
     if not seam_edges:
         return
 
-    for old_edge in seam_edges:
-        non_ring_vert = old_edge.other_vert(old_sv)
-        if not bm.edges.get([new_sv, non_ring_vert]):
-            bmesh.ops.connect_verts(bm, verts=[new_sv, non_ring_vert])
-        if old_edge.is_valid:
-            bmesh.ops.dissolve_edges(bm, edges=[old_edge],
-                                     use_verts=False, use_face_split=False)
+    # Only migrate one primary outside connection. Prefer the main support edge,
+    # not a tiny side edge from surrounding triangulation.
+    old_edge = max(seam_edges, key=lambda edge: edge.calc_length())
+    non_ring_vert = old_edge.other_vert(old_sv)
+
+    if not bm.edges.get([new_sv, non_ring_vert]):
+        bmesh.ops.connect_verts(bm, verts=[new_sv, non_ring_vert])
+    if old_edge.is_valid:
+        bmesh.ops.dissolve_edges(bm, edges=[old_edge],
+                                 use_verts=False, use_face_split=False)
 
 
 def migrate_drifted_seams(bm, ring_group, seam_homes, threshold):

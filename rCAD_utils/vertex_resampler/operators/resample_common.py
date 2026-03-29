@@ -38,6 +38,77 @@ def _sanitize_chain_verts(verts, closed):
     return get_sorted_verts_after_edit(valid_verts, closed)
 
 
+def _outside_edge_score(vert, all_ring_verts):
+    lengths = [
+        edge.calc_length()
+        for edge in vert.link_edges
+        if edge.other_vert(vert) not in all_ring_verts
+    ]
+    return max(lengths, default=0.0)
+
+
+def _limit_seam_sets(ring_group, seam_sets, max_seams):
+    if max_seams is None:
+        return seam_sets
+
+    limited_sets = []
+    for seam_set in seam_sets:
+        if len(seam_set) <= max_seams:
+            limited_sets.append(set(seam_set))
+            continue
+
+        ranked = sorted(
+            seam_set,
+            key=lambda vert: (
+                -_outside_edge_score(vert, ring_group.all_ring_verts),
+                vert.index,
+            ),
+        )
+        limited_sets.append(set(ranked[:max_seams]))
+
+    return limited_sets
+
+
+def _enforce_max_seams(bm, ring_group, max_seams):
+    if max_seams is None:
+        return
+
+    for ring_info in ring_group.rings:
+        outside_edges = []
+        for vert in ring_info.verts:
+            for edge in vert.link_edges:
+                if edge.other_vert(vert) not in ring_group.all_ring_verts:
+                    outside_edges.append(edge)
+
+        unique_edges = list({edge for edge in outside_edges if edge.is_valid})
+        if len(unique_edges) <= max_seams:
+            continue
+
+        keep_edges = set(
+            sorted(unique_edges, key=lambda edge: (-edge.calc_length(), edge.index))[:max_seams]
+        )
+        drop_edges = [edge for edge in unique_edges if edge not in keep_edges]
+        if drop_edges:
+            bmesh.ops.dissolve_edges(
+                bm,
+                edges=drop_edges,
+                use_verts=False,
+                use_face_split=False,
+            )
+
+        seam_verts = set()
+        for edge in keep_edges:
+            for vert in edge.verts:
+                if vert in ring_group.all_ring_verts:
+                    seam_verts.add(vert)
+        ring_info.seam_verts = seam_verts
+
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    bm.normal_update()
+
+
 def execute_aligned_loops_logic(
     bm,
     obj,
@@ -46,6 +117,7 @@ def execute_aligned_loops_logic(
     report=None,
     use_seams=True,
     migrate_seams=None,
+    max_seams=None,
 ):
     loops, is_closed = data
 
@@ -59,9 +131,13 @@ def execute_aligned_loops_logic(
 
     ring_group = analyze_rings(loops, is_closed)
     migration_seams = [set(ring_info.seam_verts) for ring_info in ring_group.rings]
+    migration_seams = _limit_seam_sets(ring_group, migration_seams, max_seams)
     if not use_seams:
         for ring_info in ring_group.rings:
             ring_info.seam_verts = set()
+    elif max_seams is not None:
+        for ring_info, seam_verts in zip(ring_group.rings, migration_seams):
+            ring_info.seam_verts = set(seam_verts)
 
     current_count = len(loops[0])
     target_count = current_count + direction
@@ -161,6 +237,7 @@ def execute_aligned_loops_logic(
                     edge_lengths.append((loop[idx].co - loop[idx + 1].co).length)
         threshold = (sum(edge_lengths) / len(edge_lengths) * 0.5) if edge_lengths else 0.1
         migrate_drifted_seams(bm, ring_group, seam_homes, threshold)
+        _enforce_max_seams(bm, ring_group, max_seams)
 
     ring_vert_set = set()
     for ring_info in ring_group.rings:
