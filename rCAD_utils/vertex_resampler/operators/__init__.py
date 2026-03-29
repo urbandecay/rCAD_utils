@@ -3,7 +3,7 @@
 import bpy
 import bmesh
 
-from . import closed_loop, hole_in_mesh, pipe, open_loop
+from . import closed_loop, corner, hole_in_mesh, open_loop, pipe
 from .resample_common import execute_anchored_logic, execute_floating_logic
 from .detection_utils import (
     get_selected_islands,
@@ -42,6 +42,16 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
         pipe_data = pipe.detect(bm)
         if pipe_data:
             return pipe.execute(bm, obj, self.direction)
+
+        corner_data = corner.detect(bm)
+        if corner_data:
+            return corner.execute(
+                bm,
+                obj,
+                self.direction,
+                report=self.report,
+                data=corner_data,
+            )
 
         open_data = open_loop.detect(bm)
         if open_data:
