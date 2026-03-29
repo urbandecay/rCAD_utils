@@ -75,6 +75,8 @@ def _sorted_candidate_faces(candidate_faces, context, preferred_pair=None):
 
 
 def _candidate_faces_for_pair(a, b):
+    if not (a.is_valid and b.is_valid):
+        return []
     return [face for face in a.link_faces if face.is_valid and b in face.verts]
 
 
@@ -90,6 +92,8 @@ def _cleanup_loose_edges(bm, edges):
 def _shared_delete_face(contexts):
     shared_faces = None
     for context in contexts:
+        if not (context["a"].is_valid and context["b"].is_valid):
+            return []
         faces = set(_candidate_faces_for_pair(context["a"], context["b"]))
         if shared_faces is None:
             shared_faces = faces
@@ -118,6 +122,9 @@ def _quad_cycle_from_contexts(bm, contexts):
     b0 = contexts[0]["b"]
     a1 = contexts[1]["a"]
     b1 = contexts[1]["b"]
+
+    if not all(vert.is_valid for vert in (a0, b0, a1, b1)):
+        return None
 
     cycles = [
         (a0, b0, b1, a1),
@@ -234,6 +241,8 @@ def _repair_paired_delete_contexts(bm, contexts):
     if len(contexts) != 2:
         return False
     if any(context.get("kind") != "delete_pair" for context in contexts):
+        return False
+    if any(not (context["a"].is_valid and context["b"].is_valid) for context in contexts):
         return False
 
     cycle = _quad_cycle_from_contexts(bm, contexts)

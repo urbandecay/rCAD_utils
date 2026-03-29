@@ -36,15 +36,15 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
         bm = bmesh.from_edit_mesh(obj.data)
         bm.verts.ensure_lookup_table()
 
-        corner_data = corner.detect(bm)
-        if corner_data:
-            self._report_mode(corner_data['mode_label'])
-            return corner.execute(
+        bridged_closed_data = closed_loop_bridged.detect(bm)
+        if bridged_closed_data:
+            self._report_mode(bridged_closed_data['mode_label'])
+            return closed_loop_bridged.execute(
                 bm,
                 obj,
                 self.direction,
                 report=self.report,
-                data=corner_data,
+                data=bridged_closed_data,
             )
 
         bridged_open_data = bridged_open_loop.detect(bm)
@@ -58,15 +58,15 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
                 data=bridged_open_data,
             )
 
-        bridged_closed_data = closed_loop_bridged.detect(bm)
-        if bridged_closed_data:
-            self._report_mode(bridged_closed_data['mode_label'])
-            return closed_loop_bridged.execute(
+        corner_data = corner.detect(bm)
+        if corner_data:
+            self._report_mode(corner_data['mode_label'])
+            return corner.execute(
                 bm,
                 obj,
                 self.direction,
                 report=self.report,
-                data=bridged_closed_data,
+                data=corner_data,
             )
 
         hole_data = hole_in_mesh.detect(bm, report=self.report)

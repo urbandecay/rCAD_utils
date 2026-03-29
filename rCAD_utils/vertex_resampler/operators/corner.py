@@ -212,32 +212,6 @@ def _detect_corner_component(component):
     return best_pair
 
 
-def detect_strip_groups(bm):
-    components = _selected_components(bm)
-    if not components:
-        return None
-
-    groups = []
-    covered_verts = set()
-    for component in components:
-        strip_group = _detect_corner_component(component)
-        if strip_group is None:
-            continue
-        groups.append(strip_group)
-        covered_verts.update(component)
-
-    if not groups:
-        return None
-
-    selected_verts = {vert for vert in bm.verts if vert.select}
-    if covered_verts != selected_verts:
-        return None
-
-    return {
-        'groups': groups,
-    }
-
-
 def detect(bm):
     selected_faces = [
         face for face in bm.faces
