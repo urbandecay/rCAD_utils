@@ -26,7 +26,9 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
         bm.verts.ensure_lookup_table()
 
         hole_data = hole_in_mesh.detect(bm)
-        if hole_data and hole_data.get('groups'):
+        if hole_data and (
+            hole_data.get('groups') or hole_data.get('invalid_components')
+        ):
             return hole_in_mesh.execute(
                 bm,
                 obj,

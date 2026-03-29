@@ -216,6 +216,178 @@ def _selected_loop_degree(vert, ring_set):
     )
 
 
+def _quad_faces_for_edge(edge):
+    return [face for face in edge.link_faces if len(face.verts) == 4]
+
+
+def _is_selected_ring_edge(edge):
+    if len(_quad_faces_for_edge(edge)) != 1:
+        return False
+    if len(edge.link_faces) < 2:
+        return False
+    return any(len(face.verts) != 4 for face in edge.link_faces)
+
+
+def _connected_quad_component(seed_faces):
+    if not seed_faces:
+        return set()
+
+    component = set()
+    stack = sorted(seed_faces, key=lambda face: face.index)
+
+    while stack:
+        face = stack.pop()
+        if face in component or len(face.verts) != 4:
+            continue
+
+        component.add(face)
+        for edge in face.edges:
+            for other_face in edge.link_faces:
+                if other_face in component or len(other_face.verts) != 4:
+                    continue
+                stack.append(other_face)
+
+    return component
+
+
+def _match_selected_loop_pair(component, selected_ring):
+    rings_data = _rings_from_component(component)
+    if rings_data is None:
+        return None
+
+    loops, is_closed = rings_data
+    if not is_closed or len(loops) != 2:
+        return None
+
+    selected_set = set(selected_ring)
+    loop0_set = set(loops[0])
+    loop1_set = set(loops[1])
+
+    if selected_set == loop0_set:
+        return rings_data
+    if selected_set == loop1_set:
+        return ([loops[1], loops[0]], is_closed)
+    return None
+
+
+def _cleanup_selected_ring_edges(bm, cleanup_edges, ring_edges):
+    if not cleanup_edges:
+        return
+
+    ring_vert_set = set()
+    for edge in ring_edges:
+        if not edge.is_valid:
+            continue
+        edge.select = True
+        ring_vert_set.update(edge.verts)
+
+    touched_non_ring_verts = set()
+    for edge in cleanup_edges:
+        if not edge.is_valid:
+            continue
+        edge.select = False
+        for vert in edge.verts:
+            if vert not in ring_vert_set:
+                touched_non_ring_verts.add(vert)
+
+    for vert in ring_vert_set:
+        if vert.is_valid:
+            vert.select = True
+
+    for vert in touched_non_ring_verts:
+        if not vert.is_valid:
+            continue
+        if any(edge.select for edge in vert.link_edges):
+            continue
+        vert.select = False
+
+    bm.select_flush_mode()
+
+
+def _upper_ring_hole_groups(bm):
+    selected_edges = {edge for edge in bm.edges if edge.select}
+    if not selected_edges:
+        return None
+
+    ring_edges = {
+        edge for edge in selected_edges
+        if _is_selected_ring_edge(edge)
+    }
+    if not ring_edges:
+        return None
+
+    selected_loops = _boundary_loops(ring_edges)
+    if selected_loops is None:
+        return {
+            'groups': [],
+            'invalid_components': 1,
+        }
+
+    groups = []
+    invalid_components = 0
+    covered_ring_edges = set()
+    allowed_extra_edges = set()
+    seen_components = set()
+
+    for selected_ring in selected_loops:
+        ring_set = set(selected_ring)
+        local_ring_edges = {
+            edge for edge in ring_edges
+            if edge.verts[0] in ring_set and edge.verts[1] in ring_set
+        }
+        covered_ring_edges.update(local_ring_edges)
+
+        local_cleanup_edges = {
+            edge for edge in (selected_edges - ring_edges)
+            if edge.verts[0] in ring_set or edge.verts[1] in ring_set
+        }
+        allowed_extra_edges.update(local_cleanup_edges)
+
+        seed_faces = set()
+        for edge in local_ring_edges:
+            seed_faces.update(_quad_faces_for_edge(edge))
+
+        component = _connected_quad_component(seed_faces)
+        component_key = tuple(sorted(face.index for face in component))
+        if component_key in seen_components:
+            continue
+
+        matched_rings = _match_selected_loop_pair(component, selected_ring)
+        if matched_rings is None:
+            invalid_components += 1
+            continue
+
+        seen_components.add(component_key)
+        groups.append({
+            'rings': matched_rings,
+            'use_seams': True,
+            'migrate_seams': True,
+            'cleanup_edges': {
+                edge for edge in local_cleanup_edges if edge.is_valid
+            },
+            'cleanup_ring_edges': {
+                edge for edge in local_ring_edges if edge.is_valid
+            },
+        })
+
+    stray_edges = [
+        edge for edge in selected_edges
+        if edge.is_valid
+        and edge not in covered_ring_edges
+        and edge not in allowed_extra_edges
+    ]
+    if stray_edges:
+        invalid_components += 1
+
+    if any(edge.is_valid and edge not in covered_ring_edges for edge in ring_edges):
+        invalid_components += 1
+
+    return {
+        'groups': groups,
+        'invalid_components': invalid_components,
+    }
+
+
 def _flat_face_hole_groups(bm):
     groups = []
     covered_verts = set()
@@ -295,6 +467,12 @@ def detect(bm):
     if data is not None and (data['groups'] or data['invalid_components']):
         return data
 
+    upper_ring_data = _upper_ring_hole_groups(bm)
+    if upper_ring_data is not None and (
+        upper_ring_data['groups'] or upper_ring_data['invalid_components']
+    ):
+        return upper_ring_data
+
     flat_groups = _flat_face_hole_groups(bm)
     if flat_groups:
         return {
@@ -322,6 +500,11 @@ def execute(bm, obj, direction, report=None, data=None):
         )
 
     for group_data in data['groups']:
+        _cleanup_selected_ring_edges(
+            bm,
+            group_data.get('cleanup_edges', set()),
+            group_data.get('cleanup_ring_edges', set()),
+        )
         execute_aligned_loops_logic(
             bm,
             obj,
