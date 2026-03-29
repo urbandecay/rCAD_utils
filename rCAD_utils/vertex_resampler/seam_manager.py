@@ -133,6 +133,20 @@ def _candidate_in_home_sector(ring_info, candidate_vert, seam_vert, home_indices
     return best_seam == seam_vert
 
 
+def _ring_move_steps(ring_info, from_vert, to_vert, positions):
+    from_index = positions.get(from_vert)
+    to_index = positions.get(to_vert)
+    if from_index is None or to_index is None:
+        return None
+    return _ring_step_distance(ring_info, from_index, to_index)
+
+
+def _migration_horizon_steps(ring_info):
+    if not ring_info.is_closed:
+        return 1
+    return 2
+
+
 def load_seam_homes(obj):
     """Load persistent seam home positions from object custom property."""
     stored_flat = list(obj.get("rcad_seam_origins", []))
@@ -225,12 +239,17 @@ def _migrate_seam_vert(bm, old_sv, new_sv, all_ring_verts):
     # not a tiny side edge from surrounding triangulation.
     old_edge = max(seam_edges, key=lambda edge: edge.calc_length())
     non_ring_vert = old_edge.other_vert(old_sv)
+    old_len = old_edge.calc_length()
+    new_len = (new_sv.co - non_ring_vert.co).length
 
     occupied_targets = [
         edge for edge in _outside_edges_for_vert(new_sv, all_ring_verts)
         if edge.other_vert(new_sv) != non_ring_vert
     ]
     if occupied_targets:
+        return False
+
+    if new_len > max(old_len * 2.0, old_len + 1e-6):
         return False
 
     if not bm.edges.get([new_sv, non_ring_vert]):
@@ -252,6 +271,7 @@ def migrate_drifted_seams(bm, ring_group, seam_homes, threshold):
     for ring_info in ring_group.rings:
         positions = _ring_vert_positions(ring_info)
         clearance_steps = _seam_clearance_steps(ring_info)
+        horizon_steps = _migration_horizon_steps(ring_info)
         home_indices = _home_indices_for_seams(ring_info, seam_homes)
         reserved_targets = set()
         for seam_vert in list(ring_info.seam_verts):
@@ -294,6 +314,9 @@ def migrate_drifted_seams(bm, ring_group, seam_homes, threshold):
             for v in ring_info.verts:
                 if not v.is_valid or v in blocked_targets:
                     continue
+                move_steps = _ring_move_steps(ring_info, seam_vert, v, positions)
+                if move_steps is not None and move_steps > horizon_steps:
+                    continue
                 if not _candidate_in_home_sector(
                     ring_info,
                     v,
@@ -325,6 +348,7 @@ def migrate_drifted_seams(bm, ring_group, seam_homes, threshold):
                     current_spacing=current_spacing,
                     new_spacing=best_spacing,
                     clearance_steps=clearance_steps,
+                    horizon_steps=horizon_steps,
                     home_index=home_indices.get(seam_vert),
                     occupied_targets=[vert_ref(v) for v in sorted(occupied_targets, key=lambda vert: vert.index)],
                     blocked_targets=[vert_ref(v) for v in sorted(blocked_targets, key=lambda vert: vert.index)],
@@ -339,7 +363,7 @@ def migrate_drifted_seams(bm, ring_group, seam_homes, threshold):
                 else:
                     debug_log(
                         "seam_migrate",
-                        "Rejected seam target because that ring vert already had another outside seam edge.",
+                        "Rejected seam target because it was occupied or would create an overlong support edge.",
                         old_seam=vert_ref(seam_vert),
                         rejected_target=vert_ref(best),
                     )
@@ -353,6 +377,7 @@ def migrate_drifted_seams(bm, ring_group, seam_homes, threshold):
                     crowded=is_crowded,
                     current_spacing=current_spacing,
                     clearance_steps=clearance_steps,
+                    horizon_steps=horizon_steps,
                     home_index=home_indices.get(seam_vert),
                     best_candidate=vert_ref(best),
                     best_score=best_score,
