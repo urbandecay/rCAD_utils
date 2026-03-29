@@ -150,6 +150,78 @@ def _quad_face_for_cycle(cycle):
     return None
 
 
+def _cyclic_face_path(face_verts, start_index, end_index):
+    count = len(face_verts)
+    path = [face_verts[start_index]]
+    index = start_index
+    while index != end_index:
+        index = (index + 1) % count
+        path.append(face_verts[index])
+    return path
+
+
+def _local_quad_cycle_for_pair(bm, face, a, b):
+    if face is None or not face.is_valid:
+        return None
+    if not (a.is_valid and b.is_valid):
+        return None
+
+    face_verts = list(face.verts)
+    try:
+        index_a = face_verts.index(a)
+        index_b = face_verts.index(b)
+    except ValueError:
+        return None
+
+    candidate_paths = [
+        _cyclic_face_path(face_verts, index_a, index_b),
+        _cyclic_face_path(face_verts, index_b, index_a),
+    ]
+
+    for path in candidate_paths:
+        if len(path) != 4:
+            continue
+        v0, v1, v2, v3 = path
+        if bm.edges.get([v1, v2]) is None:
+            continue
+        if v0 == a and v3 == b:
+            return (v0, v1, v2, v3)
+        if v0 == b and v3 == a:
+            return (a, v2, v1, b)
+
+    return None
+
+
+def _safe_local_pair_split(bm, face, a, b):
+    cycle = _local_quad_cycle_for_pair(bm, face, a, b)
+    if cycle is None:
+        return False
+
+    split_result = bmesh.utils.face_split(face, a, b)
+    quad_face = _quad_face_for_cycle(cycle)
+    if quad_face is None:
+        debug_log(
+            "repair_step",
+            "Local quad split did not produce the expected quad face.",
+            pair=pair_ref(a, b),
+            merged_face=face_ref(face),
+            cycle=[pair_ref(cycle[0], cycle[1]), pair_ref(cycle[3], cycle[2])],
+            split_result=repr(split_result),
+        )
+        return False
+
+    debug_log(
+        "repair_step",
+        "Recovered delete pair with safe local quad split.",
+        pair=pair_ref(a, b),
+        merged_face=face_ref(face),
+        cycle=[pair_ref(cycle[0], cycle[1]), pair_ref(cycle[3], cycle[2])],
+        split_result=repr(split_result),
+        quad_face=face_ref(quad_face),
+    )
+    return True
+
+
 def _skip_pair_split_fallback(face, context):
     if face is None:
         return False
@@ -307,13 +379,16 @@ def repair_after_dissolve(bm, neighbor_pairs):
         )
 
         if _skip_pair_split_fallback(merged_face, context):
-            debug_log(
-                "repair_step",
-                "Skipped unsafe giant-face split fallback for delete pair.",
-                pair=_pair_ref_from_context(context),
-                merged_face=face_ref(merged_face),
-            )
-            previous_pair = (a, b)
+            if _safe_local_pair_split(bm, merged_face, a, b):
+                previous_pair = (a, b)
+            else:
+                debug_log(
+                    "repair_step",
+                    "Skipped unsafe giant-face split fallback for delete pair.",
+                    pair=_pair_ref_from_context(context),
+                    merged_face=face_ref(merged_face),
+                )
+                previous_pair = (a, b)
         elif merged_face is not None and len(merged_face.verts) > 4:
             split_result = bmesh.utils.face_split(merged_face, a, b)
             edge_after_split = bm.edges.get([a, b])
