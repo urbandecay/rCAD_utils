@@ -72,13 +72,27 @@ def get_selected_islands(bm):
 def get_sorted_verts_after_edit(verts, closed):
     if not verts:
         return []
+    candidate_set = set(verts)
     start_v = verts[0]
+
+    if not closed:
+        endpoints = []
+        for vert in verts:
+            neighbor_count = 0
+            for e in vert.link_edges:
+                other = e.other_vert(vert)
+                if other in candidate_set:
+                    neighbor_count += 1
+            if neighbor_count <= 1:
+                endpoints.append(vert)
+        if endpoints:
+            start_v = min(endpoints, key=lambda v: v.index)
+
     if not start_v.is_valid:
         return verts
     sorted_v = [start_v]
     visited = {start_v}
     current = start_v
-    candidate_set = set(verts)
     for _ in range(len(verts) - 1):
         found_next = False
         for e in current.link_edges:

@@ -31,6 +31,13 @@ def _report(report, level, message):
         report(level, message)
 
 
+def _sanitize_chain_verts(verts, closed):
+    valid_verts = [v for v in verts if v.is_valid]
+    if len(valid_verts) < 2:
+        return valid_verts
+    return get_sorted_verts_after_edit(valid_verts, closed)
+
+
 def execute_aligned_loops_logic(bm, obj, data, direction, report=None):
     loops, is_closed = data
 
@@ -149,6 +156,10 @@ def execute_aligned_loops_logic(bm, obj, data, direction, report=None):
 
 
 def apply_resample(bm, verts, new_coords, closed, direction):
+    verts[:] = _sanitize_chain_verts(verts, closed)
+    if len(verts) < 2:
+        return
+
     target_count = len(new_coords)
 
     if direction > 0:
@@ -184,9 +195,9 @@ def apply_resample(bm, verts, new_coords, closed, direction):
                 bmesh.ops.dissolve_verts(bm, verts=[v_kill])
 
     bm.verts.ensure_lookup_table()
-    if closed:
-        valid_verts = [v for v in verts if v.is_valid]
-        verts[:] = get_sorted_verts_after_edit(valid_verts, closed)
+    verts[:] = _sanitize_chain_verts(verts, closed)
+    if len(verts) < 2:
+        return
 
     min_len = min(len(verts), len(new_coords))
     for k in range(min_len):
@@ -253,7 +264,7 @@ def execute_anchored_logic(bm, obj, direction, mode='ANCHORED', precalc_chains=N
         return {'CANCELLED'}
 
     for c in chains:
-        verts = c['verts']
+        verts = _sanitize_chain_verts(c['verts'], c['closed'])
         if len(verts) < 2:
             continue
         pts = [v.co.copy() for v in verts]
@@ -271,7 +282,8 @@ def execute_anchored_logic(bm, obj, direction, mode='ANCHORED', precalc_chains=N
             t = (i / (target_count - 1)) * num_segs
             new_coords.append(spline.eval_global(t))
 
-        apply_resample(bm, verts, new_coords, False, direction)
+        c['verts'] = verts
+        apply_resample(bm, c['verts'], new_coords, False, direction)
 
     bmesh.update_edit_mesh(obj.data)
     return {'FINISHED'}
