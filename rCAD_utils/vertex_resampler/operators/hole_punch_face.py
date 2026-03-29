@@ -92,6 +92,98 @@ def _selected_edge_graph(selected_edges):
     return adjacency
 
 
+def _selected_face_set(bm, sel_set):
+    return {
+        face for face in bm.faces
+        if len(face.verts) >= 3 and (
+            face.select
+            or all(vert in sel_set for vert in face.verts)
+            or all(edge.select for edge in face.edges)
+        )
+    }
+
+
+def _selected_face_neighbors(face, selected_faces):
+    neighbors = set()
+    for edge in face.edges:
+        for other_face in edge.link_faces:
+            if other_face is face or other_face not in selected_faces:
+                continue
+            neighbors.add(other_face)
+    return neighbors
+
+
+def _face_components(faces):
+    visited = set()
+    components = []
+
+    for face in sorted(faces, key=lambda item: item.index):
+        if face in visited:
+            continue
+
+        component = set()
+        stack = [face]
+        visited.add(face)
+
+        while stack:
+            current = stack.pop()
+            component.add(current)
+            for neighbor in sorted(
+                _selected_face_neighbors(current, faces),
+                key=lambda item: item.index,
+            ):
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                stack.append(neighbor)
+
+        components.append(component)
+
+    return components
+
+
+def _component_edge_face_counts(component):
+    counts = {}
+    for face in component:
+        if len(face.verts) != 4:
+            return None
+        for edge in face.edges:
+            counts[edge] = counts.get(edge, 0) + 1
+    return counts
+
+
+def _is_closed_quad_shell(component):
+    edge_face_counts = _component_edge_face_counts(component)
+    if edge_face_counts is None:
+        return False
+    if any(count != 2 for count in edge_face_counts.values()):
+        return False
+
+    component_edges = set(edge_face_counts)
+    component_verts = set()
+    for face in component:
+        component_verts.update(face.verts)
+
+    for vert in component_verts:
+        degree = sum(1 for edge in vert.link_edges if edge in component_edges)
+        if degree != 4:
+            return False
+
+    return True
+
+
+def _has_closed_quad_shell_selection(bm):
+    sel_verts = {vert for vert in bm.verts if vert.select}
+    selected_faces = _selected_face_set(bm, sel_verts)
+    if not selected_faces:
+        return False
+
+    return any(
+        _is_closed_quad_shell(component)
+        for component in _face_components(selected_faces)
+    )
+
+
 def _tree_path_edges(parent_edge, depth, vert_a, vert_b):
     path_edges = []
     current_a = vert_a
@@ -308,6 +400,11 @@ def _disjoint_loops(loop_data):
 def detect(bm, report=None):
     selected_edges = {edge for edge in bm.edges if edge.select}
     if not selected_edges:
+        return None
+
+    if _has_closed_quad_shell_selection(bm):
+        if report is not None:
+            report({'INFO'}, "Face hole check: rejected closed quad shell selection")
         return None
 
     loop_data = _extract_cycle_loops(selected_edges)

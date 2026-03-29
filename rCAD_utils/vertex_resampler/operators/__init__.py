@@ -73,6 +73,18 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
                 data=bridged_open_data,
             )
 
+        pipe_data = pipe.detect(bm)
+        if pipe_data:
+            print("[vertex_resampler:dispatch] matched Pipe")
+            self._report_mode(pipe_data['mode_label'])
+            return pipe.execute(
+                bm,
+                obj,
+                self.direction,
+                report=self.report,
+                data=pipe_data,
+            )
+
         hole_data = hole_in_mesh.detect(bm, report=self.report)
         if hole_data and (
             hole_data.get('groups') or hole_data.get('invalid_components')
@@ -101,12 +113,6 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
                 report=self.report,
                 data=closed_data,
             )
-
-        pipe_data = pipe.detect(bm)
-        if pipe_data:
-            print("[vertex_resampler:dispatch] matched Pipe")
-            self._report_mode("Pipe")
-            return pipe.execute(bm, obj, self.direction)
 
         open_data = open_loop.detect(bm)
         if open_data:
