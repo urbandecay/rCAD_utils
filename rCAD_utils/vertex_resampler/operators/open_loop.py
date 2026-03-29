@@ -8,12 +8,16 @@ def detect(bm):
     islands = get_selected_islands(bm)
     open_islands = [island for island in islands if not island['closed']]
     if open_islands:
-        return {'islands': open_islands}
+        return {
+            'islands': open_islands,
+            'mode_label': 'Open loop',
+        }
     return None
 
 
-def execute(bm, obj, direction, report=None):
-    data = detect(bm)
+def execute(bm, obj, direction, report=None, data=None):
+    if data is None:
+        data = detect(bm)
     if not data:
         return {'CANCELLED'}
 

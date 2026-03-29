@@ -233,7 +233,10 @@ def detect(bm):
     if covered_verts != selected_verts:
         return None
 
-    return {'groups': groups}
+    return {
+        'groups': groups,
+        'mode_label': 'Corner',
+    }
 
 
 def execute(bm, obj, direction, report=None, data=None):

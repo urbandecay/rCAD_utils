@@ -3,7 +3,15 @@
 import bpy
 import bmesh
 
-from . import closed_loop, corner, hole_in_mesh, open_loop, pipe
+from . import (
+    bridged_open_loop,
+    closed_loop,
+    closed_loop_bridged,
+    corner,
+    hole_in_mesh,
+    open_loop,
+    pipe,
+)
 from .resample_common import execute_anchored_logic, execute_floating_logic
 from .detection_utils import (
     get_selected_islands,
@@ -20,15 +28,52 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
 
     direction: bpy.props.IntProperty(default=0)
 
+    def _report_mode(self, label):
+        self.report({'INFO'}, f"Mode: {label}")
+
     def execute(self, context):
         obj = context.edit_object
         bm = bmesh.from_edit_mesh(obj.data)
         bm.verts.ensure_lookup_table()
 
-        hole_data = hole_in_mesh.detect(bm)
+        bridged_closed_data = closed_loop_bridged.detect(bm)
+        if bridged_closed_data:
+            self._report_mode(bridged_closed_data['mode_label'])
+            return closed_loop_bridged.execute(
+                bm,
+                obj,
+                self.direction,
+                report=self.report,
+                data=bridged_closed_data,
+            )
+
+        bridged_open_data = bridged_open_loop.detect(bm)
+        if bridged_open_data:
+            self._report_mode(bridged_open_data['mode_label'])
+            return bridged_open_loop.execute(
+                bm,
+                obj,
+                self.direction,
+                report=self.report,
+                data=bridged_open_data,
+            )
+
+        corner_data = corner.detect(bm)
+        if corner_data:
+            self._report_mode(corner_data['mode_label'])
+            return corner.execute(
+                bm,
+                obj,
+                self.direction,
+                report=self.report,
+                data=corner_data,
+            )
+
+        hole_data = hole_in_mesh.detect(bm, report=self.report)
         if hole_data and (
             hole_data.get('groups') or hole_data.get('invalid_components')
         ):
+            self._report_mode(hole_data.get('mode_label', 'Hole punch'))
             return hole_in_mesh.execute(
                 bm,
                 obj,
@@ -39,29 +84,36 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
 
         closed_data = closed_loop.detect(bm)
         if closed_data:
-            return closed_loop.execute(bm, obj, self.direction, report=self.report)
-
-        pipe_data = pipe.detect(bm)
-        if pipe_data:
-            return pipe.execute(bm, obj, self.direction)
-
-        corner_data = corner.detect(bm)
-        if corner_data:
-            return corner.execute(
+            self._report_mode(closed_data['mode_label'])
+            return closed_loop.execute(
                 bm,
                 obj,
                 self.direction,
                 report=self.report,
-                data=corner_data,
+                data=closed_data,
             )
+
+        pipe_data = pipe.detect(bm)
+        if pipe_data:
+            self._report_mode("Pipe")
+            return pipe.execute(bm, obj, self.direction)
 
         open_data = open_loop.detect(bm)
         if open_data:
-            return open_loop.execute(bm, obj, self.direction, report=self.report)
+            self._report_mode(open_data['mode_label'])
+            return open_loop.execute(
+                bm,
+                obj,
+                self.direction,
+                report=self.report,
+                data=open_data,
+            )
 
         if check_selected_junction(bm):
+            self._report_mode("Junction")
             return execute_anchored_logic(bm, obj, self.direction, mode='JUNCTION')
         elif check_if_anchored(bm):
+            self._report_mode("Anchored")
             return execute_anchored_logic(bm, obj, self.direction, mode='ANCHORED')
         else:
             islands = get_selected_islands(bm)
@@ -69,6 +121,7 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
             kissing_chains = get_kissing_chains(bm, single_mode=is_single_mode)
 
             if kissing_chains:
+                self._report_mode("Kissing")
                 return execute_anchored_logic(
                     bm,
                     obj,
@@ -76,6 +129,7 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
                     mode='KISSING',
                     precalc_chains=kissing_chains,
                 )
+            self._report_mode("Closed loop")
             return execute_floating_logic(bm, obj, self.direction, islands=islands)
 
 

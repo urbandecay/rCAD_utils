@@ -12,11 +12,12 @@ def _selected_loop_degree(vert, ring_set):
     )
 
 
-def detect(bm):
+def detect(bm, report=None):
     groups = []
     covered_verts = set()
+    islands = get_selected_islands(bm)
 
-    for island in get_selected_islands(bm):
+    for island in islands:
         if not island['closed']:
             continue
 
@@ -53,4 +54,5 @@ def detect(bm):
     return {
         'groups': groups,
         'invalid_components': 0,
+        'mode_label': 'Face hole punch',
     }

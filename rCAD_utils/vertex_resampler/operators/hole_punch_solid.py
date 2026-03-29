@@ -1,8 +1,5 @@
 # hole_punch_solid.py — Detect punched holes that pass through solid mesh.
 
-from ..debug import debug_log, loop_ref, mesh_stats
-
-
 def _selected_face_set(bm, sel_set):
     return {
         face for face in bm.faces
@@ -342,6 +339,7 @@ def _upper_ring_hole_groups(bm):
     return {
         'groups': groups,
         'invalid_components': invalid_components,
+        'mode_label': 'Solid hole punch',
     }
 
 
@@ -357,11 +355,6 @@ def _shaft_face_hole_groups(bm):
         if _is_shaft_face(face, selected_faces)
     }
     if not shaft_faces:
-        debug_log(
-            "hole_detect",
-            "No shaft faces found from fully-selected face set.",
-            mesh=mesh_stats(bm),
-        )
         return None
 
     cylinder_pairs = []
@@ -370,19 +363,7 @@ def _shaft_face_hole_groups(bm):
         rings_data = _rings_from_component(component)
         if rings_data is None:
             invalid_components += 1
-            debug_log(
-                "hole_detect",
-                "Rejected shaft-face component because rings could not be extracted.",
-                component_faces=[face.index for face in sorted(component, key=lambda face: face.index)],
-            )
             continue
-        debug_log(
-            "hole_detect",
-            "Detected punched-hole ring pair from selected shaft faces.",
-            component_faces=[face.index for face in sorted(component, key=lambda face: face.index)],
-            ring0=loop_ref(rings_data[0][0]),
-            ring1=loop_ref(rings_data[0][1]),
-        )
         cylinder_pairs.append({
             'rings': rings_data,
             'use_seams': True,
@@ -393,30 +374,19 @@ def _shaft_face_hole_groups(bm):
     return {
         'groups': cylinder_pairs,
         'invalid_components': invalid_components,
+        'mode_label': 'Solid hole punch',
     }
 
 
 def detect(bm):
     data = _shaft_face_hole_groups(bm)
     if data is not None and (data['groups'] or data['invalid_components']):
-        debug_log(
-            "hole_detect",
-            "Using fully-selected shaft-face detection path.",
-            groups=len(data['groups']),
-            invalid_components=data['invalid_components'],
-        )
         return data
 
     upper_ring_data = _upper_ring_hole_groups(bm)
     if upper_ring_data is not None and (
         upper_ring_data['groups'] or upper_ring_data['invalid_components']
     ):
-        debug_log(
-            "hole_detect",
-            "Using upper-ring hole detection path.",
-            groups=len(upper_ring_data['groups']),
-            invalid_components=upper_ring_data['invalid_components'],
-        )
         return upper_ring_data
 
     return None
