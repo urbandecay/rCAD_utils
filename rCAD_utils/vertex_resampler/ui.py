@@ -49,8 +49,6 @@ class RCAD_PT_VertexResampler(Panel):
         for mode_id, label, _description in MODE_ITEMS:
             row = col.row(align=True)
             is_active = (active_mode == mode_id)
-            if active_mode != 'NONE' and not is_active:
-                row.enabled = False
             op = row.operator(
                 "rcad.set_resampler_mode",
                 text=label,
