@@ -4,6 +4,13 @@ from .bridge_utils import get_auto_bridged_chain, get_bridged_chain
 from .resample_common import execute_aligned_loops_logic
 
 
+def _vert_is_usable(vert):
+    try:
+        return bool(vert is not None and vert.is_valid)
+    except Exception:
+        return False
+
+
 def _selected_face_set(bm, sel_set):
     return {
         face for face in bm.faces
@@ -277,11 +284,70 @@ def execute(bm, obj, direction, report=None, data=None):
     if data is None:
         data = detect(bm)
     if not data:
+        if report is not None:
+            report({'ERROR'}, "Could not detect a valid closed loop bridge.")
         return {'CANCELLED'}
 
-    for group_data in data['groups']:
+    if not data['groups']:
+        if report is not None:
+            if data.get('invalid_components'):
+                report(
+                    {'ERROR'},
+                    "Detected closed loop bridge faces, but no valid bridge groups were found.",
+                )
+            else:
+                report({'ERROR'}, "Could not detect a valid closed loop bridge.")
+        return {'CANCELLED'}
+
+    if data.get('invalid_components') and report is not None:
+        report(
+            {'WARNING'},
+            f"Skipped {data['invalid_components']} invalid bridge component(s).",
+        )
+
+    if report is not None:
+        report(
+            {'INFO'},
+            f"Closed loop bridge exec: groups={len(data['groups'])}, direction={direction}.",
+        )
+
+    finished_groups = 0
+    for group_index, group_data in enumerate(data['groups'], start=1):
+        before_vert_count = len(bm.verts)
+        if isinstance(group_data, dict) and group_data.get('strip_faces'):
+            live_faces = {
+                face for face in group_data['strip_faces']
+                if face is not None and getattr(face, "is_valid", False)
+            }
+            if live_faces:
+                rebuilt_rings = _rings_from_component(live_faces)
+                if rebuilt_rings is not None:
+                    group_data = dict(group_data)
+                    group_data['rings'] = rebuilt_rings
+
+        loops = group_data['rings'][0] if isinstance(group_data, dict) else group_data[0]
+        if any(not _vert_is_usable(vert) for loop in loops for vert in loop):
+            if report is not None:
+                report(
+                    {'WARNING'},
+                    f"Bridge group {group_index} skipped because its verts were invalidated by an earlier edit.",
+                )
+            continue
+
+        if isinstance(group_data, dict) and group_data.get('strip_faces'):
+            live_faces = {
+                face for face in group_data['strip_faces']
+                if face is not None and getattr(face, "is_valid", False)
+            }
+            if not live_faces:
+                if report is not None:
+                    report(
+                        {'WARNING'},
+                        f"Bridge group {group_index} skipped because its faces were invalidated by an earlier edit.",
+                    )
+                continue
         if isinstance(group_data, dict):
-            execute_aligned_loops_logic(
+            result = execute_aligned_loops_logic(
                 bm,
                 obj,
                 group_data['rings'],
@@ -290,8 +356,37 @@ def execute(bm, obj, direction, report=None, data=None):
                 use_seams=group_data.get('use_seams', True),
                 migrate_seams=group_data.get('migrate_seams'),
                 max_seams=group_data.get('max_seams'),
+                forced_seam_verts=group_data.get('forced_seam_verts'),
             )
+            after_vert_count = len(bm.verts)
+            if result == {'FINISHED'}:
+                finished_groups += 1
+            elif report is not None:
+                report(
+                    {'WARNING'},
+                    f"Bridge group {group_index} cancelled during execution "
+                    f"(mesh verts {before_vert_count}->{after_vert_count}).",
+                )
             continue
 
-        execute_aligned_loops_logic(bm, obj, group_data, direction, report=report)
+        result = execute_aligned_loops_logic(
+            bm,
+            obj,
+            group_data,
+            direction,
+            report=report,
+        )
+        after_vert_count = len(bm.verts)
+        if result == {'FINISHED'}:
+            finished_groups += 1
+        elif report is not None:
+            report(
+                {'WARNING'},
+                f"Bridge group {group_index} cancelled during execution "
+                f"(mesh verts {before_vert_count}->{after_vert_count}).",
+            )
+    if finished_groups == 0:
+        if report is not None:
+            report({'ERROR'}, "Closed loop bridge exec failed: all groups cancelled.")
+        return {'CANCELLED'}
     return {'FINISHED'}

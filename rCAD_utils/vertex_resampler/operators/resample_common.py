@@ -32,6 +32,34 @@ def _report(report, level, message):
         report(level, message)
 
 
+def _vert_is_usable(vert):
+    try:
+        return bool(vert is not None and vert.is_valid)
+    except Exception:
+        return False
+
+
+def _normalize_forced_seam_verts(ring_group, forced_seam_verts):
+    if forced_seam_verts is None:
+        return None
+
+    if len(forced_seam_verts) != len(ring_group.rings):
+        return None
+
+    normalized = []
+    for ring_info, seam_verts in zip(ring_group.rings, forced_seam_verts):
+        if seam_verts is None:
+            normalized.append(set())
+            continue
+
+        normalized.append({
+            vert for vert in seam_verts
+            if _vert_is_usable(vert) and vert in ring_info.verts
+        })
+
+    return normalized
+
+
 def _sanitize_chain_verts(verts, closed):
     valid_verts = [v for v in verts if v.is_valid]
     if len(valid_verts) < 2:
@@ -215,11 +243,21 @@ def execute_aligned_loops_logic(
     migrate_seams=None,
     max_seams=None,
     stack_is_cyclic=False,
+    forced_seam_verts=None,
 ):
     loops, is_closed = data
 
     if migrate_seams is None:
         migrate_seams = use_seams
+
+    for loop_index, loop in enumerate(loops, start=1):
+        if any(not _vert_is_usable(vert) for vert in loop):
+            _report(
+                report,
+                {'WARNING'},
+                f"Aligned resample skipped because loop {loop_index} contains stale verts.",
+            )
+            return {'CANCELLED'}
 
     splines = []
     for loop in loops:
@@ -231,7 +269,14 @@ def execute_aligned_loops_logic(
         is_closed,
         stack_is_cyclic=stack_is_cyclic,
     )
-    if use_seams and max_seams is not None:
+    normalized_forced_seams = _normalize_forced_seam_verts(
+        ring_group,
+        forced_seam_verts,
+    )
+    if normalized_forced_seams is not None:
+        for ring_info, seam_verts in zip(ring_group.rings, normalized_forced_seams):
+            ring_info.seam_verts = set(seam_verts)
+    elif use_seams and max_seams is not None:
         _enforce_max_seams(bm, ring_group, max_seams)
     current_count = len(loops[0])
     debug_log(
@@ -249,6 +294,9 @@ def execute_aligned_loops_logic(
     if not use_seams:
         for ring_info in ring_group.rings:
             ring_info.seam_verts = set()
+    elif normalized_forced_seams is not None:
+        for ring_info, seam_verts in zip(ring_group.rings, normalized_forced_seams):
+            ring_info.seam_verts = set(seam_verts)
     elif max_seams is not None:
         for ring_info, seam_verts in zip(ring_group.rings, migration_seams):
             ring_info.seam_verts = set(seam_verts)
@@ -260,6 +308,15 @@ def execute_aligned_loops_logic(
     min_limit = 4 if is_closed and has_seams else (3 if is_closed else 2)
     if target_count < min_limit:
         target_count = min_limit
+
+    if report is not None:
+        _report(
+            report,
+            {'INFO'},
+            "Aligned resample exec: "
+            f"loops={len(loops)}, current={current_count}, target={target_count}, "
+            f"closed={is_closed}, seams={'yes' if has_seams else 'no'}.",
+        )
 
     if direction < 0 and ring_group.vert_count <= min_limit:
         _report(
@@ -326,14 +383,47 @@ def execute_aligned_loops_logic(
                 mesh=mesh_stats(bm),
             )
             reduction_step += 1
+        if reduction_step == 0 and report is not None and current_count > target_count:
+            _report(
+                report,
+                {'WARNING'},
+                "Subtract path made no reduction steps.",
+            )
 
     elif direction > 0:
+        insertion_made = False
+        insertion_steps = 0
         while ring_group.vert_count < target_count:
             idx = find_safe_insertion_index(ring_group)
             if idx < 0:
+                if not insertion_made:
+                    _report(
+                        report,
+                        {'WARNING'},
+                        "Can't add any more verts safely right now.",
+                    )
+                    return {'CANCELLED'}
                 break
+            prev_count = ring_group.vert_count
             repair_pairs = insert_at_index(bm, ring_group, idx)
+            if ring_group.vert_count == prev_count:
+                if not insertion_made:
+                    _report(
+                        report,
+                        {'WARNING'},
+                        "Add-vert step failed before any verts were inserted.",
+                    )
+                    return {'CANCELLED'}
+                break
+            insertion_made = True
+            insertion_steps += 1
             repair_after_dissolve(bm, repair_pairs)
+        if report is not None:
+            _report(
+                report,
+                {'INFO'},
+                f"Add path steps={insertion_steps}, final_ring_count={ring_group.vert_count}.",
+            )
 
     if is_closed and migrate_seams:
         if not use_seams:
@@ -387,6 +477,12 @@ def execute_aligned_loops_logic(
             face.select = True
 
     bmesh.update_edit_mesh(obj.data)
+    if report is not None:
+        _report(
+            report,
+            {'INFO'},
+            f"Aligned resample finished: final_ring_count={len(ring_group.rings[0].verts)}.",
+        )
     debug_log(
         "aligned",
         "Finished aligned loop resample.",
