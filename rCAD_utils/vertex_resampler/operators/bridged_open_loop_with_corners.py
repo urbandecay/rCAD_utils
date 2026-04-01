@@ -2,6 +2,7 @@
 
 import bmesh
 
+from . import bridged_open_loop
 from .open_strip_common import (
     _face_components,
     _faces_to_component_verts,
@@ -680,6 +681,15 @@ def _same_position(vec_a, vec_b, tolerance=_POSITION_TOLERANCE):
     return (vec_a - vec_b).length <= tolerance
 
 
+def _group_loops(group_data):
+    if isinstance(group_data, dict):
+        rings = group_data.get('rings')
+        if rings is None:
+            return []
+        return list(rings[0])
+    return list(group_data[0])
+
+
 def _tip_neighbor_edge(edge, tip_position, neighbor_position):
     if not getattr(edge, "is_valid", False):
         return False
@@ -946,6 +956,163 @@ def _weld_boundary_positions(bm, positions):
         return 0
 
 
+def _cluster_loop_match_count(loop, split_info):
+    loop_set = {vert for vert in loop if getattr(vert, "is_valid", False)}
+    return sum(
+        1
+        for cluster in split_info['clusters']
+        if any(vert in loop_set for vert in cluster['verts'] if getattr(vert, "is_valid", False))
+    )
+
+
+def _open_group_matches(groups, split_info):
+    matches = []
+    for group_index, group_data in enumerate(groups or [], start=1):
+        loops = _group_loops(group_data)
+        best_match_count = 0
+        best_loop_index = None
+        best_loop_size = 0
+        for loop_index, loop in enumerate(loops, start=1):
+            match_count = _cluster_loop_match_count(loop, split_info)
+            if match_count <= 0:
+                continue
+            loop_size = sum(
+                1 for vert in loop
+                if getattr(vert, "is_valid", False)
+            )
+            candidate = (match_count, loop_size, -loop_index)
+            if (
+                best_loop_index is None
+                or candidate > (best_match_count, best_loop_size, -best_loop_index)
+            ):
+                best_match_count = match_count
+                best_loop_index = loop_index
+                best_loop_size = loop_size
+        if best_loop_index is None:
+            continue
+        matches.append({
+            'group_index': group_index,
+            'loop_index': best_loop_index,
+            'loop_size': best_loop_size,
+            'matched_positions': best_match_count,
+        })
+    return matches
+
+
+def _anchor_index_for_open_loop(loop, anchor_home):
+    if not loop:
+        return None
+    start_dist = (loop[0].co - anchor_home).length if getattr(loop[0], "is_valid", False) else None
+    end_dist = (loop[-1].co - anchor_home).length if getattr(loop[-1], "is_valid", False) else None
+    if start_dist is None and end_dist is None:
+        return None
+    if end_dist is not None and (start_dist is None or end_dist < start_dist):
+        return -1
+    return 0
+
+
+def _reverse_loop_with_fixed_start(loop):
+    if len(loop) <= 1:
+        return list(loop)
+    return [loop[0]] + list(reversed(loop[1:]))
+
+
+def _pair_distance_score(loop_a, loop_b):
+    if len(loop_a) != len(loop_b):
+        return None
+    return sum(
+        (vert_a.co - vert_b.co).length
+        for vert_a, vert_b in zip(loop_a, loop_b)
+        if getattr(vert_a, "is_valid", False) and getattr(vert_b, "is_valid", False)
+    )
+
+
+def _live_open_loop_pair(groups, split_info):
+    matches = _open_group_matches(groups, split_info)
+    if len(matches) < 2:
+        return None
+
+    matches = sorted(
+        matches,
+        key=lambda item: (
+            item['matched_positions'],
+            item['loop_size'],
+            -item['group_index'],
+            -item['loop_index'],
+        ),
+        reverse=True,
+    )
+    first = matches[0]
+    second = next(
+        (item for item in matches[1:] if item['group_index'] != first['group_index']),
+        None,
+    )
+    if second is None:
+        return None
+
+    pair_loops = []
+    for match in (first, second):
+        group_data = groups[match['group_index'] - 1]
+        loops = _group_loops(group_data)
+        loop = list(loops[match['loop_index'] - 1])
+        if not loop:
+            return None
+        anchor_index = _anchor_index_for_open_loop(loop, split_info['anchor_home'])
+        if anchor_index == -1:
+            loop = list(reversed(loop))
+        pair_loops.append(loop)
+
+    loop_a, loop_b = pair_loops
+    if len(loop_a) != len(loop_b):
+        return None
+
+    reversed_b = _reverse_loop_with_fixed_start(loop_b)
+    forward_score = _pair_distance_score(loop_a, loop_b)
+    reverse_score = _pair_distance_score(loop_a, reversed_b)
+    if reverse_score is not None and (
+        forward_score is None or reverse_score < forward_score
+    ):
+        loop_b = reversed_b
+
+    return (loop_a, loop_b)
+
+
+def _weld_live_open_loops(bm, split_infos):
+    live_data = bridged_open_loop.detect(bm)
+    groups = live_data.get('groups') if live_data else []
+    if not groups:
+        return 0
+
+    targetmap = {}
+    for split_info in split_infos:
+        pair = _live_open_loop_pair(groups, split_info)
+        if pair is None:
+            continue
+        loop_a, loop_b = pair
+        for vert_a, vert_b in zip(loop_a, loop_b):
+            if (
+                not getattr(vert_a, "is_valid", False)
+                or not getattr(vert_b, "is_valid", False)
+                or vert_a is vert_b
+            ):
+                continue
+            targetmap[vert_b] = vert_a
+
+    if not targetmap:
+        return 0
+
+    try:
+        bmesh.ops.weld_verts(bm, targetmap=targetmap)
+    except Exception:
+        return 0
+
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    bm.normal_update()
+    return len(targetmap)
+
+
 def _targetmap_from_split_clusters(split_infos):
     targetmap = {}
     for split_info in split_infos:
@@ -1112,7 +1279,9 @@ def execute(bm, obj, direction, report=None, data=None):
         if result == {'CANCELLED'}:
             result = {'FINISHED'}
     finally:
-        welded = _weld_boundary_positions(bm, boundary_positions)
+        welded = _weld_live_open_loops(bm, split_infos)
+        if welded == 0:
+            welded = _weld_boundary_positions(bm, boundary_positions)
         if welded == 0:
             targetmap = _targetmap_from_live_split_positions(bm, split_infos)
             if not targetmap:
