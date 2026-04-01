@@ -9,6 +9,7 @@ from .open_strip_common import (
     _selected_face_set,
     detect_open_strip_selection,
 )
+from .resample_common import execute_aligned_loops_logic
 
 _POSITION_TOLERANCE = 1.0e-6
 
@@ -52,6 +53,33 @@ def _selected_faces(bm):
         face for face in bm.faces
         if getattr(face, "is_valid", False) and face.select
     }
+
+
+def _connected_quad_faces(start_faces):
+    live_start_faces = {
+        face for face in start_faces
+        if face is not None and getattr(face, "is_valid", False) and len(face.verts) == 4
+    }
+    if not live_start_faces:
+        return set()
+
+    visited = set(live_start_faces)
+    stack = list(live_start_faces)
+
+    while stack:
+        face = stack.pop()
+        for edge in face.edges:
+            for neighbor in edge.link_faces:
+                if (
+                    neighbor in visited
+                    or not getattr(neighbor, "is_valid", False)
+                    or len(neighbor.verts) != 4
+                ):
+                    continue
+                visited.add(neighbor)
+                stack.append(neighbor)
+
+    return visited
 
 
 def _edge_components(edges):
@@ -514,6 +542,7 @@ def _all_seam_records(bm):
         return []
 
     seam_records = {}
+    shaft_face_indices = set()
     for face_component in _face_components(selected_faces):
         candidates = _open_face_strip_candidates(face_component)
         if not candidates:
@@ -533,6 +562,8 @@ def _all_seam_records(bm):
             threshold=keep_threshold,
             kept=len(candidates),
         )
+        for candidate in candidates:
+            shaft_face_indices.update(_face_indices(candidate.get('strip_faces', set())))
 
         seam_entries = {}
         for candidate_index, candidate in enumerate(candidates, start=1):
@@ -615,7 +646,7 @@ def _all_seam_records(bm):
             item['key'],
         )
     )
-    return filtered_records
+    return filtered_records, shaft_face_indices
 
 
 def _split_infos_from_boundary_components(bm, boundary_components):
@@ -851,7 +882,7 @@ def _split_single_seam_record(bm, seam_record, seam_index=None):
     _separate_stuck_boundary_tips(bm, [boundary_component], seam_index=seam_index)
     bm.select_flush_mode()
     bm.normal_update()
-    return True
+    return _split_infos_from_boundary_components(bm, [boundary_component])
 
 
 def _verts_at_position(bm, position, tolerance=_POSITION_TOLERANCE):
@@ -860,6 +891,113 @@ def _verts_at_position(bm, position, tolerance=_POSITION_TOLERANCE):
         if getattr(vert, "is_valid", False)
         and (vert.co - position).length <= tolerance
     ]
+
+
+def _boundary_positions_from_records(seam_records):
+    positions = []
+    seen = set()
+    for record in seam_records:
+        boundary_edges = {
+            edge for edge in record.get('boundary_edges', set())
+            if edge is not None and getattr(edge, "is_valid", False)
+        }
+        if not boundary_edges:
+            continue
+        chain = _ordered_chain_verts(boundary_edges)
+        for vert in chain:
+            if not getattr(vert, "is_valid", False):
+                continue
+            pos = vert.co.copy()
+            key = (round(pos.x, 6), round(pos.y, 6), round(pos.z, 6))
+            if key not in seen:
+                seen.add(key)
+                positions.append(pos)
+    return positions
+
+
+def _weld_boundary_positions(bm, positions):
+    if not positions:
+        return 0
+
+    targetmap = {}
+    for position in positions:
+        live_verts = _verts_at_position(bm, position)
+        if len(live_verts) < 2:
+            continue
+        target = live_verts[0]
+        for vert in live_verts[1:]:
+            if vert is not target:
+                targetmap[vert] = target
+
+    if not targetmap:
+        _debug_step("weld skip", reason="no duplicate verts at boundary positions")
+        return 0
+
+    try:
+        bmesh.ops.weld_verts(bm, targetmap=targetmap)
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+        bm.normal_update()
+        _debug_step("weld done", merged=len(targetmap))
+        return len(targetmap)
+    except Exception:
+        _debug_step("weld failed", targetmap_size=len(targetmap))
+        return 0
+
+
+def _targetmap_from_split_clusters(split_infos):
+    targetmap = {}
+    for split_info in split_infos:
+        for cluster in split_info['clusters']:
+            valid_verts = [
+                vert for vert in cluster['verts']
+                if getattr(vert, "is_valid", False)
+            ]
+            if len(valid_verts) < 2:
+                continue
+            target = valid_verts[0]
+            for vert in valid_verts[1:]:
+                if vert is not target:
+                    targetmap[vert] = target
+    return targetmap
+
+
+def _targetmap_from_live_split_positions(bm, split_infos):
+    targetmap = {}
+    for split_info in split_infos:
+        for cluster in split_info['clusters']:
+            live_verts = _verts_at_position(bm, cluster['position'])
+            if len(live_verts) < 2:
+                continue
+            target = live_verts[0]
+            for vert in live_verts[1:]:
+                if vert is not target:
+                    targetmap[vert] = target
+    return targetmap
+
+
+def _anchor_open_group_endpoints(rings_data):
+    loops, _is_closed = rings_data
+    forced_seam_verts = []
+    for loop in loops:
+        seam_verts = set()
+        if loop:
+            first_vert = loop[0]
+            last_vert = loop[-1]
+            if getattr(first_vert, "is_valid", False):
+                seam_verts.add(first_vert)
+            if getattr(last_vert, "is_valid", False):
+                seam_verts.add(last_vert)
+        forced_seam_verts.append(seam_verts)
+
+    return {
+        'rings': rings_data,
+        'use_seams': True,
+        'migrate_seams': False,
+        'max_seams': 2,
+        'forced_seam_verts': forced_seam_verts,
+    }
 
 
 def detect(bm):
@@ -887,13 +1025,19 @@ def execute(bm, obj, direction, report=None, data=None):
     if not data:
         return {'CANCELLED'}
 
-    seam_records = _all_seam_records(bm)
+    original_face_indices = _face_indices(_selected_faces(bm))
+    seam_records, shaft_face_indices = _all_seam_records(bm)
     if not seam_records:
         if report is not None:
             report({'ERROR'}, "Could not find open bridge corner seam edges.")
         return {'CANCELLED'}
 
+    # --- Pre-split bookkeeping ---
+    boundary_positions = _boundary_positions_from_records(seam_records)
+
+    # --- Split seams ---
     total_split_seams = 0
+    split_infos = []
     for seam_index, seam_record in enumerate(seam_records, start=1):
         _debug_step(
             "seam split begin",
@@ -901,9 +1045,10 @@ def execute(bm, obj, direction, report=None, data=None):
             support=seam_record['support'],
             boundary_edge_count=len(seam_record['boundary_edges']),
         )
-        did_split = _split_single_seam_record(bm, seam_record, seam_index=seam_index)
-        if did_split:
+        seam_split_infos = _split_single_seam_record(bm, seam_record, seam_index=seam_index)
+        if seam_split_infos:
             total_split_seams += 1
+            split_infos.extend(seam_split_infos)
             continue
         _debug_step("seam split failed", seam_index=seam_index)
 
@@ -912,8 +1057,88 @@ def execute(bm, obj, direction, report=None, data=None):
             report({'ERROR'}, "Could not split any open bridge corner cross sections.")
         return {'CANCELLED'}
 
-    bmesh.update_edit_mesh(obj.data)
-    _debug_step("split summary", seam_record_count=len(seam_records), total_split_seams=total_split_seams)
+    _debug_step(
+        "split summary",
+        seam_record_count=len(seam_records),
+        total_split_seams=total_split_seams,
+    )
+
+    # --- Select only shaft faces and detect open loops per component ---
+    shaft_faces = {
+        face for face in bm.faces
+        if getattr(face, "is_valid", False) and face.index in shaft_face_indices
+    }
+    _debug_step("shaft faces", count=len(shaft_faces))
+    _select_only_faces(bm, shaft_faces)
+
+    open_groups = []
+    for face_component in _face_components(shaft_faces):
+        component_verts = _faces_to_component_verts(face_component)
+        rings_data = _detect_open_strip_component(component_verts)
+        if rings_data is not None and not rings_data[1]:
+            open_groups.append(rings_data)
+
+    if not open_groups:
+        _debug_step("post-split detection failed")
+        if report is not None:
+            report({'ERROR'}, "Could not detect open loop bridges after corner split.")
+        _weld_boundary_positions(bm, boundary_positions)
+        bmesh.update_edit_mesh(obj.data)
+        return {'CANCELLED'}
+
+    _debug_step("post-split detection", group_count=len(open_groups))
+
+    # --- Execute open loop bridge resampling ---
+    result = {'CANCELLED'}
+    try:
+        anchored_groups = [
+            _anchor_open_group_endpoints(rings_data)
+            for rings_data in open_groups
+        ]
+        for group_data in anchored_groups:
+            group_result = execute_aligned_loops_logic(
+                bm,
+                obj,
+                group_data['rings'],
+                direction,
+                report=report,
+                use_seams=group_data['use_seams'],
+                migrate_seams=group_data['migrate_seams'],
+                max_seams=group_data['max_seams'],
+                forced_seam_verts=group_data['forced_seam_verts'],
+            )
+            if group_result != {'FINISHED'}:
+                result = group_result
+        if result == {'CANCELLED'}:
+            result = {'FINISHED'}
+    finally:
+        welded = _weld_boundary_positions(bm, boundary_positions)
+        if welded == 0:
+            targetmap = _targetmap_from_live_split_positions(bm, split_infos)
+            if not targetmap:
+                targetmap = _targetmap_from_split_clusters(split_infos)
+            if targetmap:
+                try:
+                    bmesh.ops.weld_verts(bm, targetmap=targetmap)
+                    bm.verts.ensure_lookup_table()
+                    bm.edges.ensure_lookup_table()
+                    bm.faces.ensure_lookup_table()
+                    bm.normal_update()
+                except Exception:
+                    pass
+        restored_faces = _connected_quad_faces(_selected_faces(bm))
+        if not restored_faces:
+            restored_faces = _live_faces_from_indices(bm, original_face_indices)
+        if restored_faces:
+            _select_only_faces(bm, restored_faces)
+            bm.select_flush_mode()
+            bm.normal_update()
+        bmesh.update_edit_mesh(obj.data)
+
     if report is not None:
-        report({'INFO'}, f"Open loop bridge corner split finished: seams={total_split_seams}.")
-    return {'FINISHED'}
+        if result == {'FINISHED'}:
+            report({'INFO'}, f"Open loop bridge with corners finished: seams={total_split_seams}.")
+        else:
+            report({'ERROR'}, "Open loop bridge with corners: resampling failed.")
+
+    return result
