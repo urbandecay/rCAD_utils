@@ -4,7 +4,7 @@ import bmesh
 
 from . import closed_loop_bridged
 from .bridge_utils import get_auto_bridged_chain, get_bridged_chain
-from ..debug import debug_log, face_ref, face_refs, loop_ref, mesh_stats
+from ..debug import face_ref, face_refs, loop_ref
 from ..seam_manager import load_seam_homes, save_seam_homes
 
 _LAST_DETECT_REASON = None
@@ -250,13 +250,6 @@ def _selected_faces_and_candidates(bm):
         return None, []
 
     selected_faces = closed_loop_bridged._selected_face_set(bm, set(sel_verts))
-    debug_log(
-        "clbwc",
-        "Face-corner detect start.",
-        mesh=mesh_stats(bm),
-        selected_face_count=len(selected_faces),
-        selected_faces=face_refs(selected_faces),
-    )
     if not selected_faces:
         _set_last_detect_reason("no selected face set could be built from the selection")
         return None, []
@@ -265,17 +258,6 @@ def _selected_faces_and_candidates(bm):
     component_failures = []
     for component in closed_loop_bridged._face_components(selected_faces):
         component_candidates, diagnostics = _all_face_ring_candidates(component)
-        debug_log(
-            "clbwc",
-            "Processed face component.",
-            component_faces=diagnostics['component_faces'],
-            quad_face_count=diagnostics['quad_face_count'],
-            reason=diagnostics.get('reason'),
-            chosen_strip_faces=diagnostics.get('chosen_strip_faces'),
-            chosen_extra_faces=diagnostics.get('chosen_extra_faces'),
-            chosen_loops=diagnostics.get('chosen_loops'),
-            attempts=diagnostics['attempts'][:8],
-        )
         if not component_candidates:
             failure = diagnostics.get('reason') or "unknown component failure"
             attempts = diagnostics.get('attempts') or []
@@ -348,6 +330,239 @@ def _shared_ring_loops(candidates):
         if len(loops) >= 2:
             shared_loops.append(loops[0])
     return shared_loops
+
+
+def _selection_has_open_path_endpoints(selected_faces):
+    if not selected_faces:
+        return False
+
+    selected_edges = {
+        edge
+        for face in selected_faces
+        for edge in face.edges
+        if getattr(edge, "is_valid", False)
+    }
+    selected_verts = {
+        vert
+        for face in selected_faces
+        for vert in face.verts
+        if getattr(vert, "is_valid", False)
+    }
+    return any(
+        sum(1 for edge in vert.link_edges if edge in selected_edges) == 3
+        for vert in selected_verts
+    )
+
+
+def _path_detection_summary(selected_faces):
+    selected_edges = {
+        edge
+        for face in selected_faces or []
+        for edge in face.edges
+        if getattr(edge, "is_valid", False)
+    }
+    selected_verts = sorted(
+        {
+            vert
+            for face in selected_faces or []
+            for vert in face.verts
+            if getattr(vert, "is_valid", False)
+        },
+        key=lambda vert: vert.index,
+    )
+    degree_counts = {}
+    degree3_verts = []
+    for vert in selected_verts:
+        degree = sum(1 for edge in vert.link_edges if edge in selected_edges)
+        degree_counts[degree] = degree_counts.get(degree, 0) + 1
+        if degree == 3:
+            degree3_verts.append(vert.index)
+
+    return {
+        'selected_vert_count': len(selected_verts),
+        'degree_counts': degree_counts,
+        'degree3_verts': degree3_verts,
+        'is_open_path': bool(degree3_verts),
+    }
+
+
+def _shared_loop_entries(candidates):
+    loop_map = {}
+    for candidate_index, candidate in enumerate(candidates):
+        for loop in candidate['rings'][0]:
+            key = _loop_key(loop)
+            if len(key) != len(loop):
+                continue
+            entry = loop_map.setdefault(
+                key,
+                {
+                    'key': key,
+                    'loop': loop,
+                    'candidate_indices': [],
+                },
+            )
+            entry['candidate_indices'].append(candidate_index)
+
+    shared_entries = []
+    for entry in loop_map.values():
+        if len(entry['candidate_indices']) >= 2:
+            entry = dict(entry)
+            entry['candidate_indices'] = sorted(set(entry['candidate_indices']))
+            shared_entries.append(entry)
+    return shared_entries
+
+
+def _classify_path_type(selected_faces, candidates):
+    shared_entries = _shared_loop_entries(candidates)
+    if candidates and shared_entries:
+        candidate_to_corners = {index: 0 for index in range(len(candidates))}
+        shared_corner_candidate_counts = []
+        for entry in shared_entries:
+            count = len(entry['candidate_indices'])
+            shared_corner_candidate_counts.append(count)
+            for candidate_index in entry['candidate_indices']:
+                candidate_to_corners[candidate_index] = candidate_to_corners.get(candidate_index, 0) + 1
+
+        candidate_corner_counts = [
+            candidate_to_corners.get(index, 0)
+            for index in range(len(candidates))
+        ]
+
+        if (
+            len(shared_entries) == len(candidates)
+            and all(count == 2 for count in candidate_corner_counts)
+            and all(count == 2 for count in shared_corner_candidate_counts)
+        ):
+            return {
+                'path_type': 'closed',
+                'reason': 'candidate cycle',
+            }
+
+        endpoint_count = sum(1 for count in candidate_corner_counts if count == 1)
+        if (
+            endpoint_count == 2
+            and all(count in {1, 2} for count in candidate_corner_counts)
+            and all(count == 2 for count in shared_corner_candidate_counts)
+        ):
+            return {
+                'path_type': 'open',
+                'reason': 'candidate chain',
+            }
+
+    fallback = _path_detection_summary(selected_faces)
+    return {
+        'path_type': 'open' if fallback['is_open_path'] else 'closed',
+        'reason': 'selected-edge degree fallback',
+    }
+
+
+def _loop_centroid(loop):
+    positions = _loop_positions(loop)
+    if not positions:
+        return None
+    total = positions[0].copy()
+    for position in positions[1:]:
+        total += position
+    return total / len(positions)
+
+
+def _order_closed_path_shared_loops(candidates):
+    ordered_loops, _diagnostics = _order_closed_path_shared_loops_with_diagnostics(candidates)
+    return ordered_loops
+
+
+def _order_closed_path_shared_loops_with_diagnostics(candidates):
+    shared_entries = _shared_loop_entries(candidates)
+    diagnostics = {
+        'candidate_count': len(candidates or []),
+        'shared_corner_count': len(shared_entries),
+        'candidate_corner_counts': [],
+        'shared_corner_candidate_counts': [],
+        'start_corner_key': None,
+        'ordered_corner_keys': [],
+        'fallback_reason': None,
+    }
+    if not shared_entries:
+        diagnostics['fallback_reason'] = "no shared corner entries"
+        return [], diagnostics
+
+    candidate_to_corners = {index: [] for index in range(len(candidates))}
+    entry_by_key = {}
+    for entry in shared_entries:
+        key = entry['key']
+        entry_by_key[key] = entry
+        for candidate_index in entry['candidate_indices']:
+            candidate_to_corners.setdefault(candidate_index, []).append(key)
+
+    diagnostics['candidate_corner_counts'] = [
+        len(candidate_to_corners[index])
+        for index in range(len(candidates))
+    ]
+    diagnostics['shared_corner_candidate_counts'] = [
+        len(entry['candidate_indices'])
+        for entry in shared_entries
+    ]
+
+    if any(len(candidate_to_corners[index]) != 2 for index in range(len(candidates))):
+        diagnostics['fallback_reason'] = "some strip candidates do not touch exactly 2 shared corners"
+        return [entry['loop'] for entry in shared_entries], diagnostics
+    if any(len(entry['candidate_indices']) != 2 for entry in shared_entries):
+        diagnostics['fallback_reason'] = "some shared corners do not touch exactly 2 strip candidates"
+        return [entry['loop'] for entry in shared_entries], diagnostics
+
+    def _start_corner_key(item):
+        centroid = _loop_centroid(item['loop'])
+        if centroid is None:
+            return (float("inf"), float("inf"), float("inf"), item['key'])
+        return (centroid.x, centroid.y, centroid.z, item['key'])
+
+    start_entry = min(shared_entries, key=_start_corner_key)
+    start_key = start_entry['key']
+    diagnostics['start_corner_key'] = start_key
+    ordered_keys = []
+    current_key = start_key
+    previous_candidate = None
+
+    while True:
+        ordered_keys.append(current_key)
+        current_entry = entry_by_key[current_key]
+        candidate_indices = current_entry['candidate_indices']
+        if previous_candidate is None:
+            next_candidate = min(candidate_indices)
+        else:
+            next_candidate = next(
+                (
+                    candidate_index for candidate_index in candidate_indices
+                    if candidate_index != previous_candidate
+                ),
+                None,
+            )
+        if next_candidate is None:
+            diagnostics['fallback_reason'] = "cycle walk could not pick next strip candidate"
+            return [entry['loop'] for entry in shared_entries], diagnostics
+
+        next_corner_keys = [
+            key for key in candidate_to_corners[next_candidate]
+            if key != current_key
+        ]
+        if len(next_corner_keys) != 1:
+            diagnostics['fallback_reason'] = "cycle walk found ambiguous next shared corner"
+            return [entry['loop'] for entry in shared_entries], diagnostics
+
+        previous_candidate = next_candidate
+        current_key = next_corner_keys[0]
+        if current_key == start_key:
+            break
+        if current_key in ordered_keys or len(ordered_keys) > len(shared_entries):
+            diagnostics['fallback_reason'] = "cycle walk repeated before closing cleanly"
+            return [entry['loop'] for entry in shared_entries], diagnostics
+
+    if len(ordered_keys) != len(shared_entries):
+        diagnostics['fallback_reason'] = "cycle walk did not visit all shared corners"
+        return [entry['loop'] for entry in shared_entries], diagnostics
+
+    diagnostics['ordered_corner_keys'] = ordered_keys
+    return [entry_by_key[key]['loop'] for key in ordered_keys], diagnostics
 
 
 def _group_ring_sizes(groups):
@@ -814,19 +1029,9 @@ def _weld_live_corner_rings(bm, split_infos):
 
 def detect(bm):
     _set_last_detect_reason(None)
-    debug_log(
-        "clbwc",
-        "Detect start.",
-        mesh=mesh_stats(bm),
-    )
     face_corner_data = _detect_face_corner_groups(bm)
     if face_corner_data and face_corner_data['groups']:
         _set_last_detect_reason("matched face-corner groups")
-        debug_log(
-            "clbwc",
-            "Matched face-corner groups.",
-            group_count=len(face_corner_data['groups']),
-        )
         return face_corner_data
 
     bridged_data = get_bridged_chain(bm)
@@ -834,11 +1039,6 @@ def detect(bm):
         result = _result([bridged_data])
         if result is not None:
             _set_last_detect_reason("matched direct bridged chain")
-            debug_log(
-                "clbwc",
-                "Matched direct bridged chain.",
-                loops=[loop_ref(loop) for loop in bridged_data[0]],
-            )
             return result
 
     auto_bridged = get_auto_bridged_chain(bm)
@@ -846,24 +1046,228 @@ def detect(bm):
         result = _result([auto_bridged])
         if result is not None:
             _set_last_detect_reason("matched auto bridged chain")
-            debug_log(
-                "clbwc",
-                "Matched auto bridged chain.",
-                loops=[loop_ref(loop) for loop in auto_bridged[0]],
-            )
             return result
 
-    debug_log("clbwc", "No corner-group match; falling back to legacy bridge detection only.")
     return face_corner_data
 
 
-def execute(bm, obj, direction, report=None, data=None):
-    debug_log(
-        "clbwc",
-        "Execute start.",
-        direction=direction,
-        mesh=mesh_stats(bm),
+def _execute_open_path(bm, obj, direction, report, selected_faces, candidates):
+    path_label = 'open'
+    shared_loops = _shared_ring_loops(candidates)
+    if not shared_loops:
+        data = closed_loop_bridged.detect(bm)
+        if data is None:
+            if report is not None:
+                detail = _LAST_DETECT_REASON or "no detail"
+                report(
+                    {'ERROR'},
+                    f"CLBWC exec failed: path={path_label}, could not detect any shared corner rings. Reason: {detail}",
+                )
+            return {'CANCELLED'}
+        result = closed_loop_bridged.execute(
+            bm,
+            obj,
+            direction,
+            report=report,
+            data=data,
+        )
+        if report is not None and result == {'FINISHED'}:
+            report({'INFO'}, f"CLBWC exec finished: path={path_label}.")
+        return result
+
+    anchor_homes = _choose_anchor_homes(shared_loops, obj)
+    split_infos = _split_shared_corner_rings(bm, selected_faces, shared_loops, anchor_homes)
+    if not split_infos:
+        if report is not None:
+            report({'ERROR'}, f"CLBWC exec failed: path={path_label}, could not split shared corner rings.")
+        return {'CANCELLED'}
+
+    try:
+        fresh_data = closed_loop_bridged.detect(bm)
+        if not fresh_data or not fresh_data.get('groups'):
+            if report is not None:
+                report({'ERROR'}, f"CLBWC exec failed: path={path_label}, disconnected bridge detection found no groups.")
+            return {'CANCELLED'}
+
+        fresh_data = {
+            **fresh_data,
+            'groups': [
+                _anchor_group_rings(group_data, split_infos)
+                for group_data in fresh_data['groups']
+            ],
+        }
+        result = closed_loop_bridged.execute(
+            bm,
+            obj,
+            direction,
+            report=report,
+            data=fresh_data,
+        )
+    finally:
+        merged, _live_weld_diagnostics = _weld_live_corner_rings(bm, split_infos)
+        if merged == 0:
+            fallback_targetmap = _targetmap_from_split_clusters(split_infos)
+            if fallback_targetmap:
+                try:
+                    bmesh.ops.weld_verts(
+                        bm,
+                        targetmap=fallback_targetmap,
+                    )
+                    bm.verts.ensure_lookup_table()
+                    bm.edges.ensure_lookup_table()
+                    bm.faces.ensure_lookup_table()
+                    bm.normal_update()
+                    merged = len(fallback_targetmap)
+                except Exception:
+                    merged = 0
+        bmesh.update_edit_mesh(obj.data)
+
+    if report is not None and result != {'FINISHED'}:
+        report(
+            {'ERROR'},
+            f"CLBWC exec failed: path={path_label}, cancelled by closed loop bridge: result={sorted(result)}.",
+        )
+    elif report is not None:
+        report({'INFO'}, f"CLBWC exec finished: path={path_label}.")
+    return result
+
+
+def _execute_closed_path(bm, obj, direction, report, selected_faces, candidates):
+    path_label = 'closed'
+    shared_loops, _closed_path_diagnostics = _order_closed_path_shared_loops_with_diagnostics(candidates)
+    if not shared_loops:
+        data = closed_loop_bridged.detect(bm)
+        if data is None:
+            if report is not None:
+                detail = _LAST_DETECT_REASON or "no detail"
+                report(
+                    {'ERROR'},
+                    f"CLBWC exec failed: path={path_label}, could not detect any shared corner rings. Reason: {detail}",
+                )
+            return {'CANCELLED'}
+        result = closed_loop_bridged.execute(
+            bm,
+            obj,
+            direction,
+            report=report,
+            data=data,
+        )
+        if report is not None and result == {'FINISHED'}:
+            report({'INFO'}, f"CLBWC exec finished: path={path_label}.")
+        return result
+
+    synthetic_loop = [shared_loops[0]]
+    synthetic_anchor_homes = _choose_anchor_homes(synthetic_loop, obj)
+    synthetic_split_infos = _split_shared_corner_rings(
+        bm,
+        selected_faces,
+        synthetic_loop,
+        synthetic_anchor_homes,
     )
+    if not synthetic_split_infos:
+        if report is not None:
+            report({'ERROR'}, f"CLBWC exec failed: path={path_label}, could not split synthetic seam ring.")
+        return {'CANCELLED'}
+
+    selected_faces, candidates = _selected_faces_and_candidates(bm)
+    shared_loops = _shared_ring_loops(candidates)
+    if not shared_loops:
+        if report is not None:
+            report({'ERROR'}, f"CLBWC exec failed: path={path_label}, synthetic seam created no shared corner rings.")
+        merged, _live_weld_diagnostics = _weld_live_corner_rings(bm, synthetic_split_infos)
+        if merged == 0:
+            fallback_targetmap = _targetmap_from_split_clusters(synthetic_split_infos)
+            if fallback_targetmap:
+                try:
+                    bmesh.ops.weld_verts(
+                        bm,
+                        targetmap=fallback_targetmap,
+                    )
+                    bm.verts.ensure_lookup_table()
+                    bm.edges.ensure_lookup_table()
+                    bm.faces.ensure_lookup_table()
+                    bm.normal_update()
+                except Exception:
+                    pass
+        bmesh.update_edit_mesh(obj.data)
+        return {'CANCELLED'}
+
+    anchor_homes = _choose_anchor_homes(shared_loops, obj)
+    split_infos = _split_shared_corner_rings(bm, selected_faces, shared_loops, anchor_homes)
+    if not split_infos:
+        if report is not None:
+            report({'ERROR'}, f"CLBWC exec failed: path={path_label}, could not split shared corner rings after synthetic seam.")
+        merged, _live_weld_diagnostics = _weld_live_corner_rings(bm, synthetic_split_infos)
+        if merged == 0:
+            fallback_targetmap = _targetmap_from_split_clusters(synthetic_split_infos)
+            if fallback_targetmap:
+                try:
+                    bmesh.ops.weld_verts(
+                        bm,
+                        targetmap=fallback_targetmap,
+                    )
+                    bm.verts.ensure_lookup_table()
+                    bm.edges.ensure_lookup_table()
+                    bm.faces.ensure_lookup_table()
+                    bm.normal_update()
+                except Exception:
+                    pass
+        bmesh.update_edit_mesh(obj.data)
+        return {'CANCELLED'}
+
+    split_infos = synthetic_split_infos + split_infos
+
+    try:
+        fresh_data = closed_loop_bridged.detect(bm)
+        if not fresh_data or not fresh_data.get('groups'):
+            if report is not None:
+                report({'ERROR'}, f"CLBWC exec failed: path={path_label}, disconnected bridge detection found no groups.")
+            return {'CANCELLED'}
+
+        fresh_data = {
+            **fresh_data,
+            'groups': [
+                _anchor_group_rings(group_data, split_infos)
+                for group_data in fresh_data['groups']
+            ],
+        }
+        result = closed_loop_bridged.execute(
+            bm,
+            obj,
+            direction,
+            report=report,
+            data=fresh_data,
+        )
+    finally:
+        merged, _live_weld_diagnostics = _weld_live_corner_rings(bm, split_infos)
+        if merged == 0:
+            fallback_targetmap = _targetmap_from_split_clusters(split_infos)
+            if fallback_targetmap:
+                try:
+                    bmesh.ops.weld_verts(
+                        bm,
+                        targetmap=fallback_targetmap,
+                    )
+                    bm.verts.ensure_lookup_table()
+                    bm.edges.ensure_lookup_table()
+                    bm.faces.ensure_lookup_table()
+                    bm.normal_update()
+                    merged = len(fallback_targetmap)
+                except Exception:
+                    merged = 0
+        bmesh.update_edit_mesh(obj.data)
+
+    if report is not None and result != {'FINISHED'}:
+        report(
+            {'ERROR'},
+            f"CLBWC exec failed: path={path_label}, cancelled by closed loop bridge: result={sorted(result)}.",
+        )
+    elif report is not None:
+        report({'INFO'}, f"CLBWC exec finished: path={path_label}.")
+    return result
+
+
+def execute(bm, obj, direction, report=None, data=None):
     selected_faces, candidates = _selected_faces_and_candidates(bm)
     if not selected_faces:
         data = closed_loop_bridged.detect(bm)
@@ -883,154 +1287,22 @@ def execute(bm, obj, direction, report=None, data=None):
             data=data,
         )
 
-    shared_loops = _shared_ring_loops(candidates)
-    if not shared_loops:
-        data = closed_loop_bridged.detect(bm)
-        if data is None:
-            if report is not None:
-                detail = _LAST_DETECT_REASON or "no detail"
-                report(
-                    {'ERROR'},
-                    f"Could not detect any shared corner rings. Reason: {detail}",
-                )
-            return {'CANCELLED'}
-        return closed_loop_bridged.execute(
+    path_info = _classify_path_type(selected_faces, candidates)
+    if path_info['path_type'] == 'open':
+        return _execute_open_path(
             bm,
             obj,
             direction,
-            report=report,
-            data=data,
+            report,
+            selected_faces,
+            candidates,
         )
 
-    if report is not None:
-        report(
-            {'INFO'},
-            f"CLBWC exec: splitting {len(shared_loops)} shared corner ring(s).",
-        )
-
-    anchor_homes = _choose_anchor_homes(shared_loops, obj)
-    split_infos = _split_shared_corner_rings(bm, selected_faces, shared_loops, anchor_homes)
-    if not split_infos:
-        if report is not None:
-            report({'ERROR'}, "CLBWC exec failed: could not split shared corner rings.")
-        return {'CANCELLED'}
-
-    try:
-        fresh_data = closed_loop_bridged.detect(bm)
-        if not fresh_data or not fresh_data.get('groups'):
-            if report is not None:
-                report({'ERROR'}, "CLBWC exec failed: disconnected bridge detection found no groups.")
-            return {'CANCELLED'}
-
-        if report is not None:
-            report(
-                {'INFO'},
-                f"CLBWC exec: disconnected detect found {len(fresh_data['groups'])} group(s).",
-            )
-            group_sizes = _group_ring_sizes(fresh_data['groups'])
-            if group_sizes:
-                report(
-                    {'INFO'},
-                    f"CLBWC exec: disconnected group ring sizes={group_sizes}.",
-                )
-            for summary in _corner_pre_resample_summaries(
-                fresh_data['groups'],
-                split_infos,
-                direction,
-            ):
-                matches = [
-                    (
-                        f"g{item['group_index']}"
-                        f"/l{item['loop_index']}"
-                        f":{item['matched_positions']}/{item['ring_size']}"
-                    )
-                    for item in summary['matches']
-                ]
-                report(
-                    {'INFO'},
-                    "CLBWC exec: "
-                    f"corner {summary['corner_index']}: "
-                    f"recorded_positions={summary['recorded_positions']}, "
-                    f"matched={matches or ['none']}, "
-                    f"predicted_sizes={summary['predicted_sizes'] or []}, "
-                    f"untracked_new_positions={summary['untracked_new_positions'] or []}.",
-                )
-        fresh_data = {
-            **fresh_data,
-            'groups': [
-                _anchor_group_rings(group_data, split_infos)
-                for group_data in fresh_data['groups']
-            ],
-        }
-        result = closed_loop_bridged.execute(
-            bm,
-            obj,
-            direction,
-            report=report,
-            data=fresh_data,
-        )
-    finally:
-        merged, live_weld_diagnostics = _weld_live_corner_rings(bm, split_infos)
-        if merged == 0:
-            fallback_targetmap = _targetmap_from_split_clusters(split_infos)
-            if fallback_targetmap:
-                try:
-                    bmesh.ops.weld_verts(
-                        bm,
-                        targetmap=fallback_targetmap,
-                    )
-                    bm.verts.ensure_lookup_table()
-                    bm.edges.ensure_lookup_table()
-                    bm.faces.ensure_lookup_table()
-                    bm.normal_update()
-                    merged = len(fallback_targetmap)
-                except Exception:
-                    merged = 0
-        post_weld = _post_weld_selection_summary(bm)
-        corner_post_weld = _corner_post_weld_summaries(split_infos)
-        bmesh.update_edit_mesh(obj.data)
-        if report is not None:
-            report({'INFO'}, f"CLBWC exec: welded {merged} corner vert pair(s).")
-            for diagnostic in live_weld_diagnostics:
-                if diagnostic['status'] != 'paired':
-                    report(
-                        {'INFO'},
-                        f"CLBWC exec: corner {diagnostic['corner_index']} live weld={diagnostic['status']}.",
-                    )
-                    continue
-                report(
-                    {'INFO'},
-                    "CLBWC exec: "
-                    f"corner {diagnostic['corner_index']} live weld: "
-                    f"ring_size={diagnostic['ring_size']}, "
-                    f"pair_count={diagnostic['pair_count']}, "
-                    f"direction={diagnostic['direction']}.",
-                )
-            for summary in corner_post_weld:
-                report(
-                    {'INFO'},
-                    "CLBWC exec: "
-                    f"corner {summary['corner_index']} post-weld: "
-                    f"recorded_positions={summary['recorded_positions']}, "
-                    f"remaining_duplicate_positions={summary['remaining_duplicate_positions']}, "
-                    f"live_cluster_counts={summary['live_cluster_counts']}.",
-                )
-            shared_ring_sizes = post_weld['shared_ring_sizes']
-            if shared_ring_sizes:
-                report(
-                    {'INFO'},
-                    f"CLBWC exec: post-weld shared ring sizes={shared_ring_sizes}.",
-                )
-            candidate_ring_sizes = post_weld['candidate_ring_sizes']
-            if candidate_ring_sizes:
-                report(
-                    {'INFO'},
-                    f"CLBWC exec: post-weld candidate ring sizes={candidate_ring_sizes}.",
-                )
-
-    if report is not None and result != {'FINISHED'}:
-        report(
-            {'ERROR'},
-            f"CLBWC exec cancelled by closed loop bridge: result={sorted(result)}.",
-        )
-    return result
+    return _execute_closed_path(
+        bm,
+        obj,
+        direction,
+        report,
+        selected_faces,
+        candidates,
+    )
