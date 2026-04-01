@@ -1156,66 +1156,12 @@ def _execute_closed_path(bm, obj, direction, report, selected_faces, candidates)
             report({'INFO'}, f"CLBWC exec finished: path={path_label}.")
         return result
 
-    synthetic_loop = [shared_loops[0]]
-    synthetic_anchor_homes = _choose_anchor_homes(synthetic_loop, obj)
-    synthetic_split_infos = _split_shared_corner_rings(
-        bm,
-        selected_faces,
-        synthetic_loop,
-        synthetic_anchor_homes,
-    )
-    if not synthetic_split_infos:
-        if report is not None:
-            report({'ERROR'}, f"CLBWC exec failed: path={path_label}, could not split synthetic seam ring.")
-        return {'CANCELLED'}
-
-    selected_faces, candidates = _selected_faces_and_candidates(bm)
-    shared_loops = _shared_ring_loops(candidates)
-    if not shared_loops:
-        if report is not None:
-            report({'ERROR'}, f"CLBWC exec failed: path={path_label}, synthetic seam created no shared corner rings.")
-        merged, _live_weld_diagnostics = _weld_live_corner_rings(bm, synthetic_split_infos)
-        if merged == 0:
-            fallback_targetmap = _targetmap_from_split_clusters(synthetic_split_infos)
-            if fallback_targetmap:
-                try:
-                    bmesh.ops.weld_verts(
-                        bm,
-                        targetmap=fallback_targetmap,
-                    )
-                    bm.verts.ensure_lookup_table()
-                    bm.edges.ensure_lookup_table()
-                    bm.faces.ensure_lookup_table()
-                    bm.normal_update()
-                except Exception:
-                    pass
-        bmesh.update_edit_mesh(obj.data)
-        return {'CANCELLED'}
-
     anchor_homes = _choose_anchor_homes(shared_loops, obj)
     split_infos = _split_shared_corner_rings(bm, selected_faces, shared_loops, anchor_homes)
     if not split_infos:
         if report is not None:
-            report({'ERROR'}, f"CLBWC exec failed: path={path_label}, could not split shared corner rings after synthetic seam.")
-        merged, _live_weld_diagnostics = _weld_live_corner_rings(bm, synthetic_split_infos)
-        if merged == 0:
-            fallback_targetmap = _targetmap_from_split_clusters(synthetic_split_infos)
-            if fallback_targetmap:
-                try:
-                    bmesh.ops.weld_verts(
-                        bm,
-                        targetmap=fallback_targetmap,
-                    )
-                    bm.verts.ensure_lookup_table()
-                    bm.edges.ensure_lookup_table()
-                    bm.faces.ensure_lookup_table()
-                    bm.normal_update()
-                except Exception:
-                    pass
-        bmesh.update_edit_mesh(obj.data)
+            report({'ERROR'}, f"CLBWC exec failed: path={path_label}, could not split shared corner rings.")
         return {'CANCELLED'}
-
-    split_infos = synthetic_split_infos + split_infos
 
     try:
         fresh_data = closed_loop_bridged.detect(bm)

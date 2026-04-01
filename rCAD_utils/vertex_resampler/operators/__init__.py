@@ -7,8 +7,6 @@ from . import (
     bridged_open_loop,
     bridged_open_loop_with_corners,
     closed_loop,
-    closed_loop_bridged,
-    closed_loop_bridged_with_corners,
     corner,
     hole_in_mesh,
     hole_punch_face,
@@ -45,17 +43,10 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
             self.report({'WARNING'}, "Pick a mesh type first.")
             return {'CANCELLED'}
 
+        if mode in {'CLOSED_LOOP_BRIDGED_WITH_CORNERS', 'CLOSED_LOOP_BRIDGED'}:
+            mode = 'CLOSED_LOOP'
+
         self._report_mode(MODE_LABELS[mode])
-
-        if mode == 'CLOSED_LOOP_BRIDGED_WITH_CORNERS':
-            return closed_loop_bridged_with_corners.execute(
-                bm, obj, self.direction, report=self.report
-            )
-
-        if mode == 'CLOSED_LOOP_BRIDGED':
-            return closed_loop_bridged.execute(
-                bm, obj, self.direction, report=self.report
-            )
 
         if mode == 'BRIDGED_OPEN_LOOP_WITH_CORNERS':
             return bridged_open_loop_with_corners.execute(

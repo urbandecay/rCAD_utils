@@ -6,6 +6,11 @@ from bpy.types import Operator, Panel
 
 from .mode_options import MODE_ITEMS, MODE_LABELS
 
+_LEGACY_MODE_REMAP = {
+    'CLOSED_LOOP_BRIDGED_WITH_CORNERS': 'CLOSED_LOOP',
+    'CLOSED_LOOP_BRIDGED': 'CLOSED_LOOP',
+}
+
 
 class RCAD_OT_SetResamplerMode(Operator):
     bl_idname = "rcad.set_resampler_mode"
@@ -36,6 +41,7 @@ class RCAD_PT_VertexResampler(Panel):
         layout = self.layout
         scene = context.scene
         active_mode = getattr(scene, "rcad_vertex_resampler_mode", 'NONE')
+        active_mode = _LEGACY_MODE_REMAP.get(active_mode, active_mode)
 
         box = layout.box()
         col = box.column(align=True)
@@ -44,7 +50,10 @@ class RCAD_PT_VertexResampler(Panel):
         if active_mode == 'NONE':
             col.label(text="Pick one mesh type.", icon='INFO')
         else:
-            col.label(text=f"Selected: {MODE_LABELS[active_mode]}", icon='CHECKMARK')
+            col.label(
+                text=f"Selected: {MODE_LABELS.get(active_mode, 'Closed Loop')}",
+                icon='CHECKMARK',
+            )
 
         for mode_id, label, _description in MODE_ITEMS:
             row = col.row(align=True)

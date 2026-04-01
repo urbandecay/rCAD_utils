@@ -3,25 +3,6 @@
 from .bridge_utils import get_bridged_chain
 
 
-def _debug(message, **details):
-    print(f"[vertex_resampler:open_strip] {message}")
-    for key, value in details.items():
-        print(f"  {key}: {value}")
-
-
-def _face_ids(faces):
-    return [face.index for face in sorted(faces, key=lambda item: item.index)]
-
-
-def _vert_ids(verts):
-    return [vert.index for vert in sorted(verts, key=lambda item: item.index)]
-
-
-def _loop_ids(group):
-    loops, _is_closed = group
-    return [[vert.index for vert in loop] for loop in loops]
-
-
 def _edge_between(vert_a, vert_b):
     for edge in vert_a.link_edges:
         if edge.other_vert(vert_a) is vert_b:
@@ -474,60 +455,32 @@ def _detect_open_strips_from_selected_verts(bm):
 def detect_open_strip_selection(bm):
     selected_verts = {vert for vert in bm.verts if vert.select}
     if not selected_verts:
-        _debug("detect skipped: no selected verts")
         return None
 
     selected_faces = _selected_face_set(bm, selected_verts)
-    _debug(
-        "detect start",
-        selected_vert_count=len(selected_verts),
-        selected_face_count=len(selected_faces),
-        selected_verts=_vert_ids(selected_verts),
-        selected_faces=_face_ids(selected_faces),
-    )
     if selected_faces:
         groups = []
+        components = []
         has_extra_selected_faces = False
         has_outside_side_faces = False
         covered_verts = set()
 
         for face_component in _face_components(selected_faces):
             candidates = _strip_candidates(face_component)
-            _debug(
-                "component candidates",
-                component_faces=_face_ids(face_component),
-                candidate_count=len(candidates),
-            )
-            for index, candidate in enumerate(candidates, start=1):
-                _debug(
-                    f"candidate {index}",
-                    shaft_faces=_face_ids(candidate['shaft_faces']),
-                    extra_faces=_face_ids(candidate['extra_faces']),
-                    outside_side_faces=_face_ids(candidate['outside_side_faces']),
-                    face_count=candidate['face_count'],
-                    loop_size=candidate['loop_size'],
-                    loops=_loop_ids(candidate['group']),
-                )
-
             match, reason = _choose_strip_candidate(candidates)
             if match is None:
-                _debug(
-                    "component rejected",
-                    component_faces=_face_ids(face_component),
-                    reason=reason,
-                )
                 return None
 
-            _debug(
-                "candidate chosen",
-                component_faces=_face_ids(face_component),
-                reason=reason,
-                chosen_shaft_faces=_face_ids(match['shaft_faces']),
-                chosen_extra_faces=_face_ids(match['extra_faces']),
-                chosen_outside_side_faces=_face_ids(match['outside_side_faces']),
-                chosen_loops=_loop_ids(match['group']),
-            )
             groups.append(match['group'])
+            components.append({
+                'group': match['group'],
+                'component_faces': set(face_component),
+                'shaft_faces': set(match['shaft_faces']),
+                'extra_faces': set(match['extra_faces']),
+                'outside_side_faces': set(match['outside_side_faces']),
+                'face_count': match['face_count'],
+                'loop_size': match['loop_size'],
+            })
             if match['extra_faces']:
                 has_extra_selected_faces = True
             if match['outside_side_faces']:
@@ -535,27 +488,14 @@ def detect_open_strip_selection(bm):
             covered_verts.update(vert for face in face_component for vert in face.verts)
 
         if covered_verts != selected_verts:
-            _debug(
-                "detect rejected",
-                reason="covered verts did not match selection",
-                covered_verts=_vert_ids(covered_verts),
-                selected_verts=_vert_ids(selected_verts),
-            )
             return None
 
-        result = {
+        return {
             'groups': groups,
+            'components': components,
             'has_extra_selected_faces': has_extra_selected_faces,
             'has_outside_side_faces': has_outside_side_faces,
         }
-        _debug(
-            "detect result from faces",
-            group_count=len(groups),
-            has_extra_selected_faces=has_extra_selected_faces,
-            has_outside_side_faces=has_outside_side_faces,
-            groups=[_loop_ids(group) for group in groups],
-        )
-        return result
 
     bridged_data = get_bridged_chain(bm)
     if (
@@ -564,29 +504,20 @@ def detect_open_strip_selection(bm):
         and len(bridged_data[0]) >= 2
         and _matches_selected_verts([bridged_data], selected_verts)
     ):
-        result = {
+        return {
             'groups': [bridged_data],
+            'components': [],
             'has_extra_selected_faces': False,
             'has_outside_side_faces': False,
         }
-        _debug(
-            "detect result from bridged chain",
-            groups=[_loop_ids(group) for group in result['groups']],
-        )
-        return result
 
     strip_groups = _detect_open_strips_from_selected_verts(bm)
     if strip_groups and _matches_selected_verts(strip_groups, selected_verts):
-        result = {
+        return {
             'groups': strip_groups,
+            'components': [],
             'has_extra_selected_faces': False,
             'has_outside_side_faces': False,
         }
-        _debug(
-            "detect result from selected verts",
-            groups=[_loop_ids(group) for group in strip_groups],
-        )
-        return result
 
-    _debug("detect failed: no matching open strip")
     return None
