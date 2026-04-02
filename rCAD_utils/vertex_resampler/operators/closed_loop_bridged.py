@@ -11,6 +11,157 @@ def _vert_is_usable(vert):
         return False
 
 
+def _loop_centroid(loop):
+    valid = [vert for vert in loop if _vert_is_usable(vert)]
+    if not valid:
+        return None
+    count = float(len(valid))
+    return (
+        sum(vert.co.x for vert in valid) / count,
+        sum(vert.co.y for vert in valid) / count,
+        sum(vert.co.z for vert in valid) / count,
+    )
+
+
+def _loop_relative_positions(loop):
+    valid = [vert for vert in loop if _vert_is_usable(vert)]
+    centroid = _loop_centroid(valid)
+    if not valid or centroid is None:
+        return []
+    cx, cy, cz = centroid
+    return [
+        (vert.co.x - cx, vert.co.y - cy, vert.co.z - cz)
+        for vert in valid
+    ]
+
+
+def _rotate_loop(loop, start_index):
+    if not loop:
+        return list(loop)
+    start_index %= len(loop)
+    return list(loop[start_index:]) + list(loop[:start_index])
+
+
+def _reverse_loop_with_fixed_start(loop):
+    if len(loop) <= 1:
+        return list(loop)
+    return [loop[0]] + list(reversed(loop[1:]))
+
+
+def _relative_loop_score(loop_a, loop_b):
+    rel_a = _loop_relative_positions(loop_a)
+    rel_b = _loop_relative_positions(loop_b)
+    if len(rel_a) != len(rel_b) or not rel_a:
+        return None
+    return sum(
+        ((ax - bx) ** 2 + (ay - by) ** 2 + (az - bz) ** 2) ** 0.5
+        for (ax, ay, az), (bx, by, bz) in zip(rel_a, rel_b)
+    )
+
+
+def _updated_group_with_loops(group_data, loops, is_closed):
+    forced_seam_verts = [
+        {loop_item[0]} if loop_item else set()
+        for loop_item in loops
+    ]
+    if isinstance(group_data, dict):
+        updated = dict(group_data)
+    else:
+        updated = {}
+    updated['rings'] = (loops, is_closed)
+    updated['use_seams'] = True
+    updated['migrate_seams'] = True
+    updated['max_seams'] = 2
+    updated['forced_seam_verts'] = forced_seam_verts
+    return updated
+
+
+def _group_centroid_sort_key(group_data):
+    loops = group_data['rings'][0] if isinstance(group_data, dict) else group_data[0]
+    centroids = [
+        centroid for centroid in (_loop_centroid(loop) for loop in loops)
+        if centroid is not None
+    ]
+    if not centroids:
+        return (float("inf"), float("inf"), float("inf"))
+    count = float(len(centroids))
+    return (
+        sum(item[0] for item in centroids) / count,
+        sum(item[1] for item in centroids) / count,
+        sum(item[2] for item in centroids) / count,
+    )
+
+
+def _normalize_group_anchor_phase(groups):
+    if len(groups or []) < 2:
+        return groups
+
+    ordered = sorted(
+        enumerate(groups),
+        key=lambda item: _group_centroid_sort_key(item[1]),
+    )
+    reference_index, reference_group = ordered[0]
+    reference_loops = reference_group['rings'][0] if isinstance(reference_group, dict) else reference_group[0]
+    if not reference_loops:
+        return groups
+    reference_loop = list(reference_loops[0])
+    if not reference_loop:
+        return groups
+
+    normalized = list(groups)
+    normalized[reference_index] = _updated_group_with_loops(reference_group, [list(loop) for loop in reference_loops], True)
+
+    for group_index, group_data in ordered[1:]:
+        loops, is_closed = group_data['rings'] if isinstance(group_data, dict) else group_data
+        if not is_closed or not loops or len(loops[0]) != len(reference_loop):
+            normalized[group_index] = group_data
+            continue
+
+        best = None
+        for start_index in range(len(loops[0])):
+            rotated_loops = [
+                _rotate_loop(loop_item, start_index)
+                for loop_item in loops
+            ]
+            forward_score = _relative_loop_score(rotated_loops[0], reference_loop)
+            reversed_loops = [
+                _reverse_loop_with_fixed_start(loop_item)
+                for loop_item in rotated_loops
+            ]
+            reverse_score = _relative_loop_score(reversed_loops[0], reference_loop)
+
+            candidates = []
+            if forward_score is not None:
+                candidates.append((forward_score, False))
+            if reverse_score is not None:
+                candidates.append((reverse_score, True))
+            if not candidates:
+                continue
+
+            score, reverse_group = min(candidates, key=lambda item: item[0])
+            candidate = (score, start_index, reverse_group)
+            if best is None or candidate < best:
+                best = candidate
+
+        if best is None:
+            normalized[group_index] = group_data
+            continue
+
+        _score, start_index, reverse_group = best
+        rotated_loops = [
+            _rotate_loop(loop_item, start_index)
+            for loop_item in loops
+        ]
+        if reverse_group:
+            rotated_loops = [
+                _reverse_loop_with_fixed_start(loop_item)
+                for loop_item in rotated_loops
+            ]
+        normalized[group_index] = _updated_group_with_loops(group_data, rotated_loops, is_closed)
+
+    return normalized
+
+
 def _selected_face_set(bm, sel_set):
     return {
         face for face in bm.faces
@@ -310,6 +461,11 @@ def execute(bm, obj, direction, report=None, data=None):
             {'INFO'},
             f"Closed loop bridge exec: groups={len(data['groups'])}, direction={direction}.",
         )
+
+    data = {
+        **data,
+        'groups': _normalize_group_anchor_phase(data['groups']),
+    }
 
     finished_groups = 0
     for group_index, group_data in enumerate(data['groups'], start=1):
