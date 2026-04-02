@@ -1076,6 +1076,114 @@ def _ordered_open_path_candidates(candidates):
     return ordered_candidates, ordered_entries
 
 
+def _ordered_open_path_candidate_components(candidates):
+    shared_entries = _shared_loop_entries(candidates)
+    if not shared_entries:
+        return []
+
+    entry_by_key = {
+        entry['key']: entry
+        for entry in shared_entries
+    }
+    candidate_to_keys = {index: [] for index in range(len(candidates))}
+    for entry in shared_entries:
+        for candidate_index in entry['candidate_indices']:
+            candidate_to_keys.setdefault(candidate_index, []).append(entry['key'])
+
+    adjacency = {index: set() for index in range(len(candidates))}
+    for entry in shared_entries:
+        if len(entry['candidate_indices']) != 2:
+            continue
+        a, b = entry['candidate_indices']
+        adjacency[a].add(b)
+        adjacency[b].add(a)
+
+    def _candidate_key(candidate_index):
+        return _group_sort_key({
+            'rings': candidates[candidate_index]['rings'],
+        })
+
+    components = []
+    visited = set()
+    for start_candidate in sorted(adjacency.keys(), key=_candidate_key):
+        if start_candidate in visited or not adjacency[start_candidate]:
+            continue
+
+        component_candidates = set()
+        stack = [start_candidate]
+        visited.add(start_candidate)
+        while stack:
+            current = stack.pop()
+            component_candidates.add(current)
+            for neighbor in sorted(adjacency[current], key=_candidate_key):
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                stack.append(neighbor)
+
+        endpoints = [
+            candidate_index
+            for candidate_index in component_candidates
+            if sum(1 for key in candidate_to_keys.get(candidate_index, []) if entry_by_key[key]['candidate_indices']) == 1
+        ]
+        if len(endpoints) != 2:
+            continue
+
+        current_candidate = min(endpoints, key=_candidate_key)
+        ordered_candidates = [current_candidate]
+        ordered_entries = []
+        previous_key = None
+
+        while True:
+            next_key = next(
+                (
+                    key for key in candidate_to_keys.get(current_candidate, [])
+                    if key in entry_by_key
+                    and current_candidate in entry_by_key[key]['candidate_indices']
+                    and key != previous_key
+                    and any(
+                        candidate_index in component_candidates
+                        for candidate_index in entry_by_key[key]['candidate_indices']
+                    )
+                ),
+                None,
+            )
+            if next_key is None:
+                break
+
+            entry = entry_by_key[next_key]
+            next_candidate = next(
+                (
+                    candidate_index
+                    for candidate_index in entry['candidate_indices']
+                    if candidate_index != current_candidate
+                    and candidate_index in component_candidates
+                ),
+                None,
+            )
+            if next_candidate is None:
+                break
+
+            ordered_entries.append(entry)
+            ordered_candidates.append(next_candidate)
+            previous_key = next_key
+            current_candidate = next_candidate
+
+            if len(ordered_candidates) > len(component_candidates):
+                break
+
+        if (
+            len(ordered_candidates) == len(component_candidates)
+            and len(ordered_entries) == max(len(component_candidates) - 1, 0)
+        ):
+            components.append({
+                'ordered_candidates': ordered_candidates,
+                'ordered_entries': ordered_entries,
+            })
+
+    return components
+
+
 def _open_path_group_edges(groups, split_infos):
     edges = []
     for split_index, split_info in enumerate(split_infos):
@@ -1154,6 +1262,79 @@ def _ordered_open_path_groups(groups, split_infos):
     return ordered_groups, ordered_edges
 
 
+def _ordered_open_path_group_components(groups, split_infos):
+    edges = _open_path_group_edges(groups, split_infos)
+    if not edges:
+        return []
+
+    adjacency = {index: [] for index in range(len(groups))}
+    for edge in edges:
+        adjacency[edge['group_a']].append((edge['group_b'], edge))
+        adjacency[edge['group_b']].append((edge['group_a'], edge))
+
+    components = []
+    visited = set()
+    for start_group in sorted(range(len(groups)), key=lambda index: _group_sort_key(groups[index])):
+        if start_group in visited or not adjacency[start_group]:
+            continue
+
+        component_groups = set()
+        stack = [start_group]
+        visited.add(start_group)
+        while stack:
+            current = stack.pop()
+            component_groups.add(current)
+            for neighbor_group, _edge in adjacency.get(current, []):
+                if neighbor_group in visited:
+                    continue
+                visited.add(neighbor_group)
+                stack.append(neighbor_group)
+
+        endpoints = [
+            group_index
+            for group_index in component_groups
+            if sum(1 for neighbor_group, _edge in adjacency[group_index] if neighbor_group in component_groups) == 1
+        ]
+        if len(endpoints) != 2:
+            continue
+
+        current_group = min(endpoints, key=lambda index: _group_sort_key(groups[index]))
+        ordered_groups = [current_group]
+        ordered_edges = []
+        previous_group = None
+
+        while True:
+            next_step = next(
+                (
+                    (neighbor_group, edge)
+                    for neighbor_group, edge in adjacency.get(current_group, [])
+                    if neighbor_group in component_groups and neighbor_group != previous_group
+                ),
+                None,
+            )
+            if next_step is None:
+                break
+            neighbor_group, edge = next_step
+            ordered_edges.append(edge)
+            ordered_groups.append(neighbor_group)
+            previous_group = current_group
+            current_group = neighbor_group
+
+            if len(ordered_groups) > len(component_groups):
+                break
+
+        if (
+            len(ordered_groups) == len(component_groups)
+            and len(ordered_edges) == max(len(component_groups) - 1, 0)
+        ):
+            components.append({
+                'ordered_groups': ordered_groups,
+                'ordered_edges': ordered_edges,
+            })
+
+    return components
+
+
 def _choose_anchor_home_for_loop(loop, obj):
     positions = _loop_positions(loop)
     if not positions:
@@ -1181,86 +1362,105 @@ def _choose_anchor_home_for_loop(loop, obj):
 
 
 def _build_open_path_anchor_plan(candidates, obj):
-    ordered_candidates, ordered_entries = _ordered_open_path_candidates(candidates)
-    if not ordered_candidates or not ordered_entries:
+    components = _ordered_open_path_candidate_components(candidates)
+    if not components:
         return None
-
-    anchored = {}
-    first_candidate_index = ordered_candidates[0]
-    first_candidate = candidates[first_candidate_index]
-    first_loop_keys = _candidate_loop_keys(first_candidate)
-    first_shared_key = ordered_entries[0]['key']
-    try:
-        first_shared_loop_index = first_loop_keys.index(first_shared_key)
-    except ValueError:
-        return None
-
-    first_base_loop_index = next(
-        (
-            loop_index
-            for loop_index in range(len(first_loop_keys))
-            if loop_index != first_shared_loop_index
-        ),
-        None,
-    )
-    if first_base_loop_index is None:
-        return None
-
-    base_anchor_home = _choose_anchor_home_for_loop(
-        _group_loops(first_candidate)[first_base_loop_index],
-        obj,
-    )
-    if base_anchor_home is None:
-        return None
-
-    anchored[first_candidate_index] = _anchor_group_to_split_loop(
-        first_candidate,
-        first_base_loop_index,
-        {'anchor_home': base_anchor_home},
-    )
 
     shared_loops = []
     anchor_homes = []
     corner_directions = []
+    master_reference_loop = None
 
-    for shared_entry, previous_candidate_index, current_candidate_index in zip(
-        ordered_entries,
-        ordered_candidates,
-        ordered_candidates[1:],
-    ):
-        previous_group = anchored[previous_candidate_index]
-        previous_loop_keys = _candidate_loop_keys(candidates[previous_candidate_index])
-        current_loop_keys = _candidate_loop_keys(candidates[current_candidate_index])
+    for component in components:
+        ordered_candidates = component['ordered_candidates']
+        ordered_entries = component['ordered_entries']
+        if not ordered_candidates or not ordered_entries:
+            continue
 
+        anchored = {}
+        first_candidate_index = ordered_candidates[0]
+        first_candidate = candidates[first_candidate_index]
+        first_loop_keys = _candidate_loop_keys(first_candidate)
+        first_shared_key = ordered_entries[0]['key']
         try:
-            previous_loop_index = previous_loop_keys.index(shared_entry['key'])
-            current_loop_index = current_loop_keys.index(shared_entry['key'])
+            first_shared_loop_index = first_loop_keys.index(first_shared_key)
         except ValueError:
             return None
 
-        reference_loop = list(_group_loops(previous_group)[previous_loop_index])
-        if not reference_loop:
+        first_base_loop_index = next(
+            (
+                loop_index
+                for loop_index in range(len(first_loop_keys))
+                if loop_index != first_shared_loop_index
+            ),
+            None,
+        )
+        if first_base_loop_index is None:
             return None
 
-        shared_loops.append(shared_entry['loop'])
-        anchor_homes.append(reference_loop[0].co.copy())
-
-        anchored[current_candidate_index] = _phase_align_group_to_reference(
-            candidates[current_candidate_index],
-            current_loop_index,
-            reference_loop,
-        )
-        current_loop = list(_group_loops(anchored[current_candidate_index])[current_loop_index])
-        reversed_loop = _reverse_loop_with_fixed_start(current_loop)
-        forward_score = _pair_distance_score(reference_loop, current_loop)
-        reverse_score = _pair_distance_score(reference_loop, reversed_loop)
-        corner_directions.append(
-            'reversed'
-            if reverse_score is not None and (
-                forward_score is None or reverse_score < forward_score
+        if master_reference_loop is None:
+            base_anchor_home = _choose_anchor_home_for_loop(
+                _group_loops(first_candidate)[first_base_loop_index],
+                obj,
             )
-            else 'forward'
-        )
+            if base_anchor_home is None:
+                return None
+            anchored[first_candidate_index] = _anchor_group_to_split_loop(
+                first_candidate,
+                first_base_loop_index,
+                {'anchor_home': base_anchor_home},
+            )
+            master_reference_loop = list(
+                _group_loops(anchored[first_candidate_index])[first_base_loop_index]
+            )
+        else:
+            anchored[first_candidate_index] = _phase_align_group_to_reference(
+                first_candidate,
+                first_base_loop_index,
+                master_reference_loop,
+            )
+
+        for shared_entry, previous_candidate_index, current_candidate_index in zip(
+            ordered_entries,
+            ordered_candidates,
+            ordered_candidates[1:],
+        ):
+            previous_group = anchored[previous_candidate_index]
+            previous_loop_keys = _candidate_loop_keys(candidates[previous_candidate_index])
+            current_loop_keys = _candidate_loop_keys(candidates[current_candidate_index])
+
+            try:
+                previous_loop_index = previous_loop_keys.index(shared_entry['key'])
+                current_loop_index = current_loop_keys.index(shared_entry['key'])
+            except ValueError:
+                return None
+
+            reference_loop = list(_group_loops(previous_group)[previous_loop_index])
+            if not reference_loop:
+                return None
+
+            shared_loops.append(shared_entry['loop'])
+            anchor_homes.append(reference_loop[0].co.copy())
+
+            anchored[current_candidate_index] = _phase_align_group_to_reference(
+                candidates[current_candidate_index],
+                current_loop_index,
+                reference_loop,
+            )
+            current_loop = list(_group_loops(anchored[current_candidate_index])[current_loop_index])
+            reversed_loop = _reverse_loop_with_fixed_start(current_loop)
+            forward_score = _pair_distance_score(reference_loop, current_loop)
+            reverse_score = _pair_distance_score(reference_loop, reversed_loop)
+            corner_directions.append(
+                'reversed'
+                if reverse_score is not None and (
+                    forward_score is None or reverse_score < forward_score
+                )
+                else 'forward'
+            )
+
+    if not shared_loops:
+        return None
 
     return {
         'shared_loops': shared_loops,
@@ -1270,37 +1470,43 @@ def _build_open_path_anchor_plan(candidates, obj):
 
 
 def _anchor_open_path_groups(groups, split_infos):
-    ordered_groups, ordered_edges = _ordered_open_path_groups(groups, split_infos)
-    if not ordered_groups or not ordered_edges:
+    components = _ordered_open_path_group_components(groups, split_infos)
+    if not components:
         return [
             _anchor_group_rings(group_data, split_infos)
             for group_data in groups
         ]
 
     anchored = {}
-    first_group_index = ordered_groups[0]
-    first_edge = ordered_edges[0]
-    first_loop_index = first_edge['loop_a'] if first_edge['group_a'] == first_group_index else first_edge['loop_b']
-    anchored[first_group_index] = _anchor_group_to_split_loop(
-        groups[first_group_index],
-        first_loop_index,
-        split_infos[first_edge['split_index']],
-    )
+    for component in components:
+        ordered_groups = component['ordered_groups']
+        ordered_edges = component['ordered_edges']
+        if not ordered_groups or not ordered_edges:
+            continue
 
-    for edge, current_group_index, previous_group_index in zip(
-        ordered_edges,
-        ordered_groups[1:],
-        ordered_groups,
-    ):
-        previous_group = anchored[previous_group_index]
-        previous_loop_index = edge['loop_a'] if edge['group_a'] == previous_group_index else edge['loop_b']
-        current_loop_index = edge['loop_a'] if edge['group_a'] == current_group_index else edge['loop_b']
-        reference_loop = list(_group_loops(previous_group)[previous_loop_index])
-        anchored[current_group_index] = _phase_align_group_to_reference(
-            groups[current_group_index],
-            current_loop_index,
-            reference_loop,
+        first_group_index = ordered_groups[0]
+        first_edge = ordered_edges[0]
+        first_loop_index = first_edge['loop_a'] if first_edge['group_a'] == first_group_index else first_edge['loop_b']
+        anchored[first_group_index] = _anchor_group_to_split_loop(
+            groups[first_group_index],
+            first_loop_index,
+            split_infos[first_edge['split_index']],
         )
+
+        for edge, current_group_index, previous_group_index in zip(
+            ordered_edges,
+            ordered_groups[1:],
+            ordered_groups,
+        ):
+            previous_group = anchored[previous_group_index]
+            previous_loop_index = edge['loop_a'] if edge['group_a'] == previous_group_index else edge['loop_b']
+            current_loop_index = edge['loop_a'] if edge['group_a'] == current_group_index else edge['loop_b']
+            reference_loop = list(_group_loops(previous_group)[previous_loop_index])
+            anchored[current_group_index] = _phase_align_group_to_reference(
+                groups[current_group_index],
+                current_loop_index,
+                reference_loop,
+            )
 
     return [
         anchored.get(group_index, groups[group_index])
@@ -1486,13 +1692,13 @@ def _weld_open_path_corner_rings(bm, split_infos, corner_directions):
         return 0, []
 
     groups = _anchor_open_path_groups(groups, split_infos)
-    ordered_groups, ordered_edges = _ordered_open_path_groups(groups, split_infos)
-    if (
-        not ordered_groups
-        or not ordered_edges
-        or len(ordered_edges) != len(split_infos)
-        or len(corner_directions) != len(split_infos)
-    ):
+    components = _ordered_open_path_group_components(groups, split_infos)
+    ordered_edges = [
+        edge
+        for component in components
+        for edge in component['ordered_edges']
+    ]
+    if not ordered_edges or len(ordered_edges) != len(split_infos) or len(corner_directions) != len(split_infos):
         return _weld_live_corner_rings(bm, split_infos)
 
     targetmap = {}
