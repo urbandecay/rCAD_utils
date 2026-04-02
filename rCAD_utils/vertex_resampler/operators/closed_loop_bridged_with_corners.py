@@ -894,6 +894,224 @@ def _pair_distance_score(loop_a, loop_b):
     )
 
 
+def _updated_group_with_loops(group_data, loops, is_closed):
+    forced_seam_verts = [
+        {loop_item[0]} if loop_item else set()
+        for loop_item in loops
+    ]
+    if isinstance(group_data, dict):
+        updated = dict(group_data)
+    else:
+        updated = {}
+    updated['rings'] = (loops, is_closed)
+    updated['use_seams'] = True
+    updated['migrate_seams'] = False
+    updated['forced_seam_verts'] = forced_seam_verts
+    return updated
+
+
+def _anchor_group_to_split_loop(group_data, loop_index, split_info):
+    loops, is_closed = group_data['rings'] if isinstance(group_data, dict) else group_data
+    if not is_closed or not loops or loop_index < 0 or loop_index >= len(loops):
+        return group_data
+
+    anchor_index = _anchor_index_for_loop(loops[loop_index], split_info['anchor_home'])
+    if anchor_index is None:
+        return group_data
+
+    rotated_loops = [
+        _rotate_loop(list(loop_item), anchor_index)
+        for loop_item in loops
+    ]
+    return _updated_group_with_loops(group_data, rotated_loops, is_closed)
+
+
+def _phase_align_group_to_reference(group_data, loop_index, reference_loop):
+    loops, is_closed = group_data['rings'] if isinstance(group_data, dict) else group_data
+    if (
+        not is_closed
+        or not loops
+        or loop_index < 0
+        or loop_index >= len(loops)
+        or not reference_loop
+        or len(loops[loop_index]) != len(reference_loop)
+    ):
+        return group_data
+
+    best = None
+    for start_index in range(len(loops[loop_index])):
+        rotated_target = _rotate_loop(list(loops[loop_index]), start_index)
+        forward_score = _pair_distance_score(rotated_target, reference_loop)
+        reversed_target = _reverse_loop_with_fixed_start(rotated_target)
+        reverse_score = _pair_distance_score(reversed_target, reference_loop)
+
+        candidates = []
+        if forward_score is not None:
+            candidates.append((forward_score, False))
+        if reverse_score is not None:
+            candidates.append((reverse_score, True))
+        if not candidates:
+            continue
+
+        score, reverse_group = min(candidates, key=lambda item: item[0])
+        candidate = (score, start_index, reverse_group)
+        if best is None or candidate < best:
+            best = candidate
+
+    if best is None:
+        return group_data
+
+    _score, start_index, reverse_group = best
+    rotated_loops = [
+        _rotate_loop(list(loop_item), start_index)
+        for loop_item in loops
+    ]
+    if reverse_group:
+        rotated_loops = [
+            _reverse_loop_with_fixed_start(loop_item)
+            for loop_item in rotated_loops
+        ]
+    return _updated_group_with_loops(group_data, rotated_loops, is_closed)
+
+
+def _group_centroid(group_data):
+    centroids = [
+        centroid
+        for centroid in (_loop_centroid(loop) for loop in _group_loops(group_data))
+        if centroid is not None
+    ]
+    if not centroids:
+        return None
+    total = centroids[0].copy()
+    for centroid in centroids[1:]:
+        total += centroid
+    return total / len(centroids)
+
+
+def _group_sort_key(group_data):
+    centroid = _group_centroid(group_data)
+    if centroid is None:
+        return (float("inf"), float("inf"), float("inf"))
+    return (centroid.x, centroid.y, centroid.z)
+
+
+def _open_path_group_edges(groups, split_infos):
+    edges = []
+    for split_index, split_info in enumerate(split_infos):
+        matches = _corner_group_matches(groups, split_info)
+        if len(matches) < 2:
+            continue
+        matches = sorted(
+            matches,
+            key=lambda item: (
+                item['matched_positions'],
+                item['ring_size'],
+                -item['group_index'],
+                -item['loop_index'],
+            ),
+            reverse=True,
+        )
+        first = matches[0]
+        second = next(
+            (item for item in matches[1:] if item['group_index'] != first['group_index']),
+            None,
+        )
+        if second is None:
+            continue
+        edges.append({
+            'split_index': split_index,
+            'group_a': first['group_index'] - 1,
+            'loop_a': first['loop_index'] - 1,
+            'group_b': second['group_index'] - 1,
+            'loop_b': second['loop_index'] - 1,
+        })
+    return edges
+
+
+def _ordered_open_path_groups(groups, split_infos):
+    edges = _open_path_group_edges(groups, split_infos)
+    if not edges:
+        return None, None
+
+    adjacency = {index: [] for index in range(len(groups))}
+    for edge in edges:
+        adjacency[edge['group_a']].append((edge['group_b'], edge))
+        adjacency[edge['group_b']].append((edge['group_a'], edge))
+
+    endpoints = [
+        group_index for group_index, neighbors in adjacency.items()
+        if len(neighbors) == 1
+    ]
+    if len(endpoints) != 2:
+        return None, None
+
+    start_group = min(endpoints, key=lambda index: _group_sort_key(groups[index]))
+    ordered_groups = [start_group]
+    ordered_edges = []
+    previous_group = None
+    current_group = start_group
+
+    while True:
+        next_step = next(
+            (
+                (neighbor_group, edge)
+                for neighbor_group, edge in adjacency.get(current_group, [])
+                if neighbor_group != previous_group
+            ),
+            None,
+        )
+        if next_step is None:
+            break
+        neighbor_group, edge = next_step
+        ordered_edges.append(edge)
+        ordered_groups.append(neighbor_group)
+        previous_group = current_group
+        current_group = neighbor_group
+
+    if len(ordered_groups) != len(groups):
+        return None, None
+    return ordered_groups, ordered_edges
+
+
+def _anchor_open_path_groups(groups, split_infos):
+    ordered_groups, ordered_edges = _ordered_open_path_groups(groups, split_infos)
+    if not ordered_groups or not ordered_edges:
+        return [
+            _anchor_group_rings(group_data, split_infos)
+            for group_data in groups
+        ]
+
+    anchored = {}
+    first_group_index = ordered_groups[0]
+    first_edge = ordered_edges[0]
+    first_loop_index = first_edge['loop_a'] if first_edge['group_a'] == first_group_index else first_edge['loop_b']
+    anchored[first_group_index] = _anchor_group_to_split_loop(
+        groups[first_group_index],
+        first_loop_index,
+        split_infos[first_edge['split_index']],
+    )
+
+    for edge, current_group_index, previous_group_index in zip(
+        ordered_edges,
+        ordered_groups[1:],
+        ordered_groups,
+    ):
+        previous_group = anchored[previous_group_index]
+        previous_loop_index = edge['loop_a'] if edge['group_a'] == previous_group_index else edge['loop_b']
+        current_loop_index = edge['loop_a'] if edge['group_a'] == current_group_index else edge['loop_b']
+        reference_loop = list(_group_loops(previous_group)[previous_loop_index])
+        anchored[current_group_index] = _phase_align_group_to_reference(
+            groups[current_group_index],
+            current_loop_index,
+            reference_loop,
+        )
+
+    return [
+        anchored.get(group_index, groups[group_index])
+        for group_index in range(len(groups))
+    ]
+
+
 def _anchor_group_rings(group_data, split_infos):
     loops, is_closed = group_data['rings'] if isinstance(group_data, dict) else group_data
     if not is_closed or not loops:
@@ -933,19 +1151,7 @@ def _anchor_group_rings(group_data, split_infos):
             for loop_item in loops
         ]
 
-    forced_seam_verts = [
-        {loop_item[0]} if loop_item else set()
-        for loop_item in rotated_loops
-    ]
-    if isinstance(group_data, dict):
-        updated = dict(group_data)
-    else:
-        updated = {}
-    updated['rings'] = (rotated_loops, is_closed)
-    updated['use_seams'] = True
-    updated['migrate_seams'] = False
-    updated['forced_seam_verts'] = forced_seam_verts
-    return updated
+    return _updated_group_with_loops(group_data, rotated_loops, is_closed)
 
 
 def _targetmap_from_split_clusters(split_infos):
@@ -1141,10 +1347,7 @@ def _execute_open_path(bm, obj, direction, report, selected_faces, candidates):
 
         fresh_data = {
             **fresh_data,
-            'groups': [
-                _anchor_group_rings(group_data, split_infos)
-                for group_data in fresh_data['groups']
-            ],
+            'groups': _anchor_open_path_groups(fresh_data['groups'], split_infos),
         }
         result = closed_loop_bridged.execute(
             bm,
