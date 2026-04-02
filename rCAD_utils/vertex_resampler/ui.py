@@ -73,6 +73,8 @@ class RCAD_PT_VertexResampler(Panel):
         op_plus = row.operator("rcad.resample_curve", text="Add Verts (+)")
         op_plus.direction = 1
 
+        col.operator("rcad.clear_anchor_overlay", text="Clear Overlay", icon='X')
+
 
 classes = (
     RCAD_OT_SetResamplerMode,

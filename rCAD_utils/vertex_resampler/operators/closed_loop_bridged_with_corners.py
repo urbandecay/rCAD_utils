@@ -772,6 +772,13 @@ def _choose_anchor_homes(shared_loops, obj):
     return anchor_homes
 
 
+def _candidate_loop_keys(candidate):
+    loop_keys = candidate.get('loop_keys')
+    if loop_keys is None:
+        loop_keys = [_loop_key(loop) for loop in candidate['rings'][0]]
+    return loop_keys
+
+
 def _loop_edges(loop):
     edges = []
     count = len(loop)
@@ -995,6 +1002,80 @@ def _group_sort_key(group_data):
     return (centroid.x, centroid.y, centroid.z)
 
 
+def _ordered_open_path_candidates(candidates):
+    shared_entries = _shared_loop_entries(candidates)
+    if not shared_entries:
+        return None, None
+
+    entry_by_key = {
+        entry['key']: entry
+        for entry in shared_entries
+    }
+    candidate_to_keys = {index: [] for index in range(len(candidates))}
+    for entry in shared_entries:
+        for candidate_index in entry['candidate_indices']:
+            candidate_to_keys.setdefault(candidate_index, []).append(entry['key'])
+
+    endpoints = [
+        candidate_index
+        for candidate_index, keys in candidate_to_keys.items()
+        if len(keys) == 1
+    ]
+    if len(endpoints) != 2:
+        return None, None
+
+    def _candidate_key(candidate_index):
+        return _group_sort_key({
+            'rings': candidates[candidate_index]['rings'],
+        })
+
+    current_candidate = min(endpoints, key=_candidate_key)
+    ordered_candidates = [current_candidate]
+    ordered_entries = []
+    previous_key = None
+
+    while True:
+        next_key = next(
+            (
+                key for key in candidate_to_keys.get(current_candidate, [])
+                if key != previous_key
+            ),
+            None,
+        )
+        if next_key is None:
+            break
+
+        entry = entry_by_key.get(next_key)
+        if entry is None:
+            return None, None
+
+        ordered_entries.append(entry)
+        next_candidate = next(
+            (
+                candidate_index
+                for candidate_index in entry['candidate_indices']
+                if candidate_index != current_candidate
+            ),
+            None,
+        )
+        if next_candidate is None:
+            return None, None
+
+        ordered_candidates.append(next_candidate)
+        previous_key = next_key
+        current_candidate = next_candidate
+
+        if len(ordered_candidates) > len(candidates):
+            return None, None
+
+    if len(ordered_candidates) != len(candidates):
+        return None, None
+    if len(ordered_entries) != max(len(candidates) - 1, 0):
+        return None, None
+
+    return ordered_candidates, ordered_entries
+
+
 def _open_path_group_edges(groups, split_infos):
     edges = []
     for split_index, split_info in enumerate(split_infos):
@@ -1071,6 +1152,121 @@ def _ordered_open_path_groups(groups, split_infos):
     if len(ordered_groups) != len(groups):
         return None, None
     return ordered_groups, ordered_edges
+
+
+def _choose_anchor_home_for_loop(loop, obj):
+    positions = _loop_positions(loop)
+    if not positions:
+        return None
+
+    stored_homes = load_seam_homes(obj)
+    avg_edge_len = _ring_avg_edge_length(positions)
+    match_limit = max(avg_edge_len * 0.75, 1.0e-6)
+
+    best = None
+    for position in positions:
+        for home_index, home in enumerate(stored_homes):
+            dist = (position - home).length
+            candidate = (dist, home_index, position)
+            if best is None or candidate < best:
+                best = candidate
+
+    if best is not None and best[0] <= match_limit:
+        return best[2].copy()
+
+    anchor = positions[0].copy()
+    stored_homes.append(anchor.copy())
+    save_seam_homes(obj, stored_homes)
+    return anchor
+
+
+def _build_open_path_anchor_plan(candidates, obj):
+    ordered_candidates, ordered_entries = _ordered_open_path_candidates(candidates)
+    if not ordered_candidates or not ordered_entries:
+        return None
+
+    anchored = {}
+    first_candidate_index = ordered_candidates[0]
+    first_candidate = candidates[first_candidate_index]
+    first_loop_keys = _candidate_loop_keys(first_candidate)
+    first_shared_key = ordered_entries[0]['key']
+    try:
+        first_shared_loop_index = first_loop_keys.index(first_shared_key)
+    except ValueError:
+        return None
+
+    first_base_loop_index = next(
+        (
+            loop_index
+            for loop_index in range(len(first_loop_keys))
+            if loop_index != first_shared_loop_index
+        ),
+        None,
+    )
+    if first_base_loop_index is None:
+        return None
+
+    base_anchor_home = _choose_anchor_home_for_loop(
+        _group_loops(first_candidate)[first_base_loop_index],
+        obj,
+    )
+    if base_anchor_home is None:
+        return None
+
+    anchored[first_candidate_index] = _anchor_group_to_split_loop(
+        first_candidate,
+        first_base_loop_index,
+        {'anchor_home': base_anchor_home},
+    )
+
+    shared_loops = []
+    anchor_homes = []
+    corner_directions = []
+
+    for shared_entry, previous_candidate_index, current_candidate_index in zip(
+        ordered_entries,
+        ordered_candidates,
+        ordered_candidates[1:],
+    ):
+        previous_group = anchored[previous_candidate_index]
+        previous_loop_keys = _candidate_loop_keys(candidates[previous_candidate_index])
+        current_loop_keys = _candidate_loop_keys(candidates[current_candidate_index])
+
+        try:
+            previous_loop_index = previous_loop_keys.index(shared_entry['key'])
+            current_loop_index = current_loop_keys.index(shared_entry['key'])
+        except ValueError:
+            return None
+
+        reference_loop = list(_group_loops(previous_group)[previous_loop_index])
+        if not reference_loop:
+            return None
+
+        shared_loops.append(shared_entry['loop'])
+        anchor_homes.append(reference_loop[0].co.copy())
+
+        anchored[current_candidate_index] = _phase_align_group_to_reference(
+            candidates[current_candidate_index],
+            current_loop_index,
+            reference_loop,
+        )
+        current_loop = list(_group_loops(anchored[current_candidate_index])[current_loop_index])
+        reversed_loop = _reverse_loop_with_fixed_start(current_loop)
+        forward_score = _pair_distance_score(reference_loop, current_loop)
+        reverse_score = _pair_distance_score(reference_loop, reversed_loop)
+        corner_directions.append(
+            'reversed'
+            if reverse_score is not None and (
+                forward_score is None or reverse_score < forward_score
+            )
+            else 'forward'
+        )
+
+    return {
+        'shared_loops': shared_loops,
+        'anchor_homes': anchor_homes,
+        'corner_directions': corner_directions,
+    }
 
 
 def _anchor_open_path_groups(groups, split_infos):
@@ -1283,6 +1479,90 @@ def _weld_live_corner_rings(bm, split_infos):
     return len(targetmap), diagnostics
 
 
+def _weld_open_path_corner_rings(bm, split_infos, corner_directions):
+    live_data = closed_loop_bridged.detect(bm)
+    groups = live_data.get('groups') if live_data else []
+    if not groups:
+        return 0, []
+
+    groups = _anchor_open_path_groups(groups, split_infos)
+    ordered_groups, ordered_edges = _ordered_open_path_groups(groups, split_infos)
+    if (
+        not ordered_groups
+        or not ordered_edges
+        or len(ordered_edges) != len(split_infos)
+        or len(corner_directions) != len(split_infos)
+    ):
+        return _weld_live_corner_rings(bm, split_infos)
+
+    targetmap = {}
+    diagnostics = []
+
+    for corner_index, (edge, split_info, direction) in enumerate(
+        zip(ordered_edges, split_infos, corner_directions),
+        start=1,
+    ):
+        loop_a = list(_group_loops(groups[edge['group_a']])[edge['loop_a']])
+        loop_b = list(_group_loops(groups[edge['group_b']])[edge['loop_b']])
+        if len(loop_a) != len(loop_b):
+            diagnostics.append({
+                'corner_index': corner_index,
+                'status': 'size_mismatch',
+            })
+            continue
+
+        anchor_home = split_info['anchor_home']
+        anchor_index_a = _anchor_index_for_loop(loop_a, anchor_home)
+        anchor_index_b = _anchor_index_for_loop(loop_b, anchor_home)
+        if anchor_index_a is None or anchor_index_b is None:
+            diagnostics.append({
+                'corner_index': corner_index,
+                'status': 'missing_anchor',
+            })
+            continue
+
+        loop_a = _rotate_loop(loop_a, anchor_index_a)
+        loop_b = _rotate_loop(loop_b, anchor_index_b)
+        if direction == 'reversed':
+            loop_b = _reverse_loop_with_fixed_start(loop_b)
+
+        pair_count = 0
+        for vert_a, vert_b in zip(loop_a, loop_b):
+            if (
+                not getattr(vert_a, "is_valid", False)
+                or not getattr(vert_b, "is_valid", False)
+                or vert_a is vert_b
+            ):
+                continue
+            targetmap[vert_b] = vert_a
+            pair_count += 1
+
+        diagnostics.append({
+            'corner_index': corner_index,
+            'status': 'paired',
+            'pair_count': pair_count,
+            'ring_size': len(loop_a),
+            'direction': direction,
+        })
+
+    if not targetmap:
+        return 0, diagnostics
+
+    try:
+        bmesh.ops.weld_verts(
+            bm,
+            targetmap=targetmap,
+        )
+    except Exception:
+        return 0, diagnostics
+
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    bm.normal_update()
+    return len(targetmap), diagnostics
+
+
 def detect(bm):
     _set_last_detect_reason(None)
     face_corner_data = _detect_face_corner_groups(bm)
@@ -1309,7 +1589,8 @@ def detect(bm):
 
 def _execute_open_path(bm, obj, direction, report, selected_faces, candidates):
     path_label = 'open'
-    shared_loops = _shared_ring_loops(candidates)
+    anchor_plan = _build_open_path_anchor_plan(candidates, obj)
+    shared_loops = anchor_plan['shared_loops'] if anchor_plan else _shared_ring_loops(candidates)
     if not shared_loops:
         data = closed_loop_bridged.detect(bm)
         if data is None:
@@ -1331,7 +1612,11 @@ def _execute_open_path(bm, obj, direction, report, selected_faces, candidates):
             report({'INFO'}, f"CLBWC exec finished: path={path_label}.")
         return result
 
-    anchor_homes = _choose_anchor_homes(shared_loops, obj)
+    anchor_homes = (
+        anchor_plan['anchor_homes']
+        if anchor_plan is not None
+        else _choose_anchor_homes(shared_loops, obj)
+    )
     split_infos = _split_shared_corner_rings(bm, selected_faces, shared_loops, anchor_homes)
     if not split_infos:
         if report is not None:
@@ -1348,6 +1633,7 @@ def _execute_open_path(bm, obj, direction, report, selected_faces, candidates):
         fresh_data = {
             **fresh_data,
             'groups': _anchor_open_path_groups(fresh_data['groups'], split_infos),
+            'skip_phase_normalization': True,
         }
         result = closed_loop_bridged.execute(
             bm,
@@ -1357,7 +1643,14 @@ def _execute_open_path(bm, obj, direction, report, selected_faces, candidates):
             data=fresh_data,
         )
     finally:
-        merged, _live_weld_diagnostics = _weld_live_corner_rings(bm, split_infos)
+        if anchor_plan is not None:
+            merged, _live_weld_diagnostics = _weld_open_path_corner_rings(
+                bm,
+                split_infos,
+                anchor_plan['corner_directions'],
+            )
+        else:
+            merged, _live_weld_diagnostics = _weld_live_corner_rings(bm, split_infos)
         if merged == 0:
             fallback_targetmap = _targetmap_from_split_clusters(split_infos)
             if fallback_targetmap:

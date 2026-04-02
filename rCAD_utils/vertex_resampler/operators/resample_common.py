@@ -2,6 +2,7 @@
 
 import bmesh
 
+from .. import anchor_overlay
 from ..debug import debug_log, mesh_stats, pair_ref, ring_group_ref
 from ..math_engine import CatmullRomSpline
 from ..ring_analyzer import analyze_rings
@@ -58,6 +59,27 @@ def _normalize_forced_seam_verts(ring_group, forced_seam_verts):
         })
 
     return normalized
+
+
+def _capture_anchor_overlay_points(obj, ring_group):
+    if obj is None:
+        return
+
+    points = []
+    matrix_world = obj.matrix_world
+    for ring_info in ring_group.rings:
+        seam_verts = sorted(
+            (
+                vert for vert in ring_info.seam_verts
+                if _vert_is_usable(vert)
+            ),
+            key=lambda vert: vert.index,
+        )
+        for vert in seam_verts:
+            points.append(matrix_world @ vert.co.copy())
+
+    if points:
+        anchor_overlay.add_points(points)
 
 
 def _sanitize_chain_verts(verts, closed):
@@ -477,6 +499,7 @@ def execute_aligned_loops_logic(
             face.select = True
 
     bmesh.update_edit_mesh(obj.data)
+    _capture_anchor_overlay_points(obj, ring_group)
     if report is not None:
         _report(
             report,

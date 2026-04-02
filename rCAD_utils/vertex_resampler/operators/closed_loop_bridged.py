@@ -462,10 +462,16 @@ def execute(bm, obj, direction, report=None, data=None):
             f"Closed loop bridge exec: groups={len(data['groups'])}, direction={direction}.",
         )
 
-    data = {
-        **data,
-        'groups': _normalize_group_anchor_phase(data['groups']),
-    }
+    if data.get('skip_phase_normalization'):
+        data = {
+            **data,
+            'groups': list(data['groups']),
+        }
+    else:
+        data = {
+            **data,
+            'groups': _normalize_group_anchor_phase(data['groups']),
+        }
 
     finished_groups = 0
     for group_index, group_data in enumerate(data['groups'], start=1):
