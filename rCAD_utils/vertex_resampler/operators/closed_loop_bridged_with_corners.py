@@ -8,11 +8,20 @@ from ..debug import face_ref, face_refs, loop_ref
 from ..seam_manager import load_seam_homes, save_seam_homes
 
 _LAST_DETECT_REASON = None
+_POSITION_TOLERANCE = 1.0e-9
 
 
 def _set_last_detect_reason(reason):
     global _LAST_DETECT_REASON
     _LAST_DETECT_REASON = reason
+
+
+def _position_key(vec, tolerance):
+    return (
+        round(vec.x / tolerance),
+        round(vec.y / tolerance),
+        round(vec.z / tolerance),
+    )
 
 
 def _group_loops(group_data):
@@ -173,44 +182,90 @@ def _all_face_ring_candidates(face_component):
         diagnostics['reason'] = "fewer than 3 quad faces"
         return [], diagnostics
 
-    candidates = []
-    seen = set()
-
+    adjacency = {}
     for face in sorted(quad_faces, key=lambda item: item.index):
+        ordered_edges = _ordered_face_edges(face)
+        if ordered_edges is None:
+            continue
         for bit in (0, 1):
-            strip_faces, reason = _candidate_strip_faces(face, bit, quad_faces)
-            attempt = {
-                'start_face': face_ref(face),
-                'bit': bit,
-                'reason': reason or 'candidate built',
-            }
-            if not strip_faces:
-                diagnostics['attempts'].append(attempt)
-                continue
+            node = (face, bit)
+            adjacency.setdefault(node, set())
+            for edge in (ordered_edges[bit], ordered_edges[(bit + 2) % 4]):
+                neighbor = _quad_face_neighbor(face, edge, quad_faces)
+                if neighbor is None:
+                    continue
+                neighbor_bit = _edge_orientation_bit(neighbor, edge)
+                if neighbor_bit is None:
+                    continue
+                adjacency[node].add((neighbor, neighbor_bit))
 
-            key = frozenset(strip_faces)
-            if key in seen:
-                attempt['reason'] = "duplicate strip candidate"
-                diagnostics['attempts'].append(attempt)
-                continue
-            seen.add(key)
+    candidates = []
+    visited = set()
 
-            rings_data = closed_loop_bridged._rings_from_component(strip_faces)
-            if rings_data is None:
-                attempt['reason'] = "rings_from_component rejected candidate"
-                attempt['strip_faces'] = face_refs(strip_faces)
-                diagnostics['attempts'].append(attempt)
-                continue
-
-            attempt['reason'] = "accepted candidate"
-            attempt['strip_faces'] = face_refs(strip_faces)
-            attempt['loops'] = [loop_ref(loop) for loop in rings_data[0]]
+    for start_node in sorted(
+        adjacency.keys(),
+        key=lambda item: (item[0].index, item[1]),
+    ):
+        attempt = {
+            'start_face': face_ref(start_node[0]),
+            'bit': start_node[1],
+            'reason': 'candidate built',
+        }
+        if start_node in visited:
+            attempt['reason'] = "duplicate strip candidate"
             diagnostics['attempts'].append(attempt)
-            candidates.append({
-                'strip_faces': strip_faces,
-                'rings': rings_data,
-                'extra_faces': set(face_component) - strip_faces,
-            })
+            continue
+
+        stack = [start_node]
+        component_nodes = set()
+        while stack:
+            node = stack.pop()
+            if node in visited:
+                continue
+            visited.add(node)
+            component_nodes.add(node)
+            for neighbor in adjacency.get(node, ()):
+                if neighbor not in visited:
+                    stack.append(neighbor)
+
+        strip_faces = {face for face, _bit in component_nodes}
+        if len(strip_faces) < 3:
+            attempt['reason'] = "fewer than 3 strip faces"
+            diagnostics['attempts'].append(attempt)
+            continue
+        if len(strip_faces) != len(component_nodes):
+            attempt['reason'] = "orientation component contains duplicate faces"
+            diagnostics['attempts'].append(attempt)
+            continue
+
+        valid = True
+        for node in component_nodes:
+            distinct_neighbors = len(adjacency.get(node, set()) & component_nodes)
+            if distinct_neighbors != 2:
+                valid = False
+                break
+        if not valid:
+            attempt['reason'] = "component is not a closed strip"
+            diagnostics['attempts'].append(attempt)
+            continue
+
+        rings_data = closed_loop_bridged._rings_from_component(strip_faces)
+        if rings_data is None:
+            attempt['reason'] = "rings_from_component rejected candidate"
+            attempt['strip_faces'] = face_refs(strip_faces)
+            diagnostics['attempts'].append(attempt)
+            continue
+
+        attempt['reason'] = "accepted candidate"
+        attempt['strip_faces'] = face_refs(strip_faces)
+        attempt['loops'] = [loop_ref(loop) for loop in rings_data[0]]
+        diagnostics['attempts'].append(attempt)
+        candidates.append({
+            'strip_faces': strip_faces,
+            'rings': rings_data,
+            'extra_faces': set(face_component) - strip_faces,
+            'loop_keys': [_loop_key(loop) for loop in rings_data[0]],
+        })
 
     if not candidates:
         diagnostics['reason'] = "no valid strip candidates"
@@ -317,19 +372,7 @@ def _ring_avg_edge_length(positions):
 
 
 def _shared_ring_loops(candidates):
-    loop_map = {}
-    for candidate in candidates:
-        for loop in candidate['rings'][0]:
-            key = _loop_key(loop)
-            if len(key) != len(loop):
-                continue
-            loop_map.setdefault(key, []).append(loop)
-
-    shared_loops = []
-    for loops in loop_map.values():
-        if len(loops) >= 2:
-            shared_loops.append(loops[0])
-    return shared_loops
+    return [entry['loop'] for entry in _shared_loop_entries(candidates)]
 
 
 def _selection_has_open_path_endpoints(selected_faces):
@@ -389,8 +432,11 @@ def _path_detection_summary(selected_faces):
 def _shared_loop_entries(candidates):
     loop_map = {}
     for candidate_index, candidate in enumerate(candidates):
-        for loop in candidate['rings'][0]:
-            key = _loop_key(loop)
+        loops = candidate['rings'][0]
+        loop_keys = candidate.get('loop_keys')
+        if loop_keys is None:
+            loop_keys = [_loop_key(loop) for loop in loops]
+        for loop, key in zip(loops, loop_keys):
             if len(key) != len(loop):
                 continue
             entry = loop_map.setdefault(
@@ -777,13 +823,17 @@ def _split_shared_corner_rings(bm, selected_faces, shared_loops, anchor_homes):
     _restore_face_selection(selected_faces)
     bm.select_flush_mode()
     bm.normal_update()
-    tol = 1.0e-9
+    vert_lookup = {}
+    for vert in bm.verts:
+        if not getattr(vert, "is_valid", False):
+            continue
+        vert_lookup.setdefault(_position_key(vert.co, _POSITION_TOLERANCE), []).append(vert)
     for loop, anchor_home in zip(shared_loops, anchor_homes):
         clusters = []
         for position in _loop_positions(loop):
             cluster = [
-                vert for vert in bm.verts
-                if vert.is_valid and (vert.co - position).length <= tol
+                vert for vert in vert_lookup.get(_position_key(position, _POSITION_TOLERANCE), [])
+                if vert.is_valid and (vert.co - position).length <= _POSITION_TOLERANCE
             ]
             if len(cluster) >= 2:
                 clusters.append({
