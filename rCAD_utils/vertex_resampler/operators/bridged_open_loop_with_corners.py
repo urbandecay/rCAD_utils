@@ -20,6 +20,14 @@ def _groups_are_open(groups):
     return bool(groups) and all(not rings_data[1] for rings_data in groups)
 
 
+def _position_key(vec, tolerance):
+    return (
+        round(vec.x / tolerance),
+        round(vec.y / tolerance),
+        round(vec.z / tolerance),
+    )
+
+
 def _debug_step(step, **details):
     print(f"[vertex_resampler:open_corner_split] {step}")
     for key, value in details.items():
@@ -70,22 +78,30 @@ def _live_faces_from_indices(bm, face_indices):
     }
 
 
-def _live_faces_from_positions(bm, positions, tolerance=_FACE_POSITION_TOLERANCE):
-    live_faces = set()
-    remaining = list(positions)
-    if not remaining:
-        return live_faces
-
+def _build_face_position_lookup(bm, tolerance=_FACE_POSITION_TOLERANCE):
+    lookup = {}
     for face in bm.faces:
         if not getattr(face, "is_valid", False):
             continue
         face_position = _face_position(face)
         if face_position is None:
             continue
-        for position in list(remaining):
-            if (face_position - position).length <= tolerance:
+        lookup.setdefault(_position_key(face_position, tolerance), []).append((face_position, face))
+    return lookup
+
+
+def _live_faces_from_positions(bm, positions, tolerance=_FACE_POSITION_TOLERANCE, lookup=None):
+    live_faces = set()
+    if not positions:
+        return live_faces
+
+    if lookup is None:
+        lookup = _build_face_position_lookup(bm, tolerance=tolerance)
+
+    for position in positions:
+        for candidate_position, face in lookup.get(_position_key(position, tolerance), []):
+            if (candidate_position - position).length <= tolerance:
                 live_faces.add(face)
-                remaining.remove(position)
                 break
 
     return live_faces
@@ -707,7 +723,16 @@ def _all_seam_records(bm):
     return filtered_records, _face_positions(all_shaft_faces)
 
 
-def _split_infos_from_boundary_components(bm, boundary_components):
+def _build_vert_position_lookup(bm, tolerance=_POSITION_TOLERANCE):
+    lookup = {}
+    for vert in bm.verts:
+        if not getattr(vert, "is_valid", False):
+            continue
+        lookup.setdefault(_position_key(vert.co, tolerance), []).append(vert)
+    return lookup
+
+
+def _split_infos_from_boundary_components(bm, boundary_components, vert_lookup=None):
     split_infos = []
     for component in boundary_components:
         boundary_edges = component.get('boundary_edges', set())
@@ -718,7 +743,7 @@ def _split_infos_from_boundary_components(bm, boundary_components):
         positions = [vert.co.copy() for vert in chain]
         clusters = []
         for position in positions:
-            cluster = _verts_at_position(bm, position)
+            cluster = _verts_at_position(bm, position, lookup=vert_lookup)
             if len(cluster) >= 2:
                 clusters.append({
                     'position': position.copy(),
@@ -910,7 +935,8 @@ def _split_seam_records(bm, seam_records):
     _separate_stuck_boundary_tips(bm, boundary_components)
     bm.select_flush_mode()
     bm.normal_update()
-    return _split_infos_from_boundary_components(bm, boundary_components)
+    vert_lookup = _build_vert_position_lookup(bm)
+    return _split_infos_from_boundary_components(bm, boundary_components, vert_lookup=vert_lookup)
 
 
 def _split_single_seam_record(bm, seam_record, seam_index=None):
@@ -949,12 +975,16 @@ def _split_single_seam_record(bm, seam_record, seam_index=None):
     _separate_stuck_boundary_tips(bm, [boundary_component], seam_index=seam_index)
     bm.select_flush_mode()
     bm.normal_update()
-    return _split_infos_from_boundary_components(bm, [boundary_component])
+    vert_lookup = _build_vert_position_lookup(bm)
+    return _split_infos_from_boundary_components(bm, [boundary_component], vert_lookup=vert_lookup)
 
 
-def _verts_at_position(bm, position, tolerance=_POSITION_TOLERANCE):
+def _verts_at_position(bm, position, tolerance=_POSITION_TOLERANCE, lookup=None):
+    if lookup is None:
+        lookup = _build_vert_position_lookup(bm, tolerance=tolerance)
+
     return [
-        vert for vert in bm.verts
+        vert for vert in lookup.get(_position_key(position, tolerance), [])
         if getattr(vert, "is_valid", False)
         and (vert.co - position).length <= tolerance
     ]
@@ -986,9 +1016,10 @@ def _weld_boundary_positions(bm, positions):
     if not positions:
         return 0
 
+    vert_lookup = _build_vert_position_lookup(bm)
     targetmap = {}
     for position in positions:
-        live_verts = _verts_at_position(bm, position)
+        live_verts = _verts_at_position(bm, position, lookup=vert_lookup)
         if len(live_verts) < 2:
             continue
         target = live_verts[0]
@@ -1188,10 +1219,11 @@ def _targetmap_from_split_clusters(split_infos):
 
 
 def _targetmap_from_live_split_positions(bm, split_infos):
+    vert_lookup = _build_vert_position_lookup(bm)
     targetmap = {}
     for split_info in split_infos:
         for cluster in split_info['clusters']:
-            live_verts = _verts_at_position(bm, cluster['position'])
+            live_verts = _verts_at_position(bm, cluster['position'], lookup=vert_lookup)
             if len(live_verts) < 2:
                 continue
             target = live_verts[0]
@@ -1293,7 +1325,8 @@ def execute(bm, obj, direction, report=None, data=None):
     )
 
     # --- Select only shaft faces and detect open loops per component ---
-    shaft_faces = _live_faces_from_positions(bm, shaft_face_positions)
+    face_lookup = _build_face_position_lookup(bm)
+    shaft_faces = _live_faces_from_positions(bm, shaft_face_positions, lookup=face_lookup)
     _debug_step("shaft faces", count=len(shaft_faces))
     _select_only_faces(bm, shaft_faces)
     fresh_data = detect_open_strip_selection(bm)
@@ -1359,11 +1392,12 @@ def execute(bm, obj, direction, report=None, data=None):
                 except Exception:
                     pass
         current_shaft_faces = _selected_faces(bm)
-        live_corner_faces = _live_faces_from_positions(bm, corner_face_positions)
+        face_lookup = _build_face_position_lookup(bm)
+        live_corner_faces = _live_faces_from_positions(bm, corner_face_positions, lookup=face_lookup)
 
         restored_seed_faces = set(current_shaft_faces) | set(live_corner_faces)
         if not restored_seed_faces:
-            restored_seed_faces = _live_faces_from_positions(bm, original_face_positions)
+            restored_seed_faces = _live_faces_from_positions(bm, original_face_positions, lookup=face_lookup)
         if not restored_seed_faces:
             restored_seed_faces = _live_faces_from_indices(bm, original_face_indices)
 
