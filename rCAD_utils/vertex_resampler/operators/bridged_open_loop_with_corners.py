@@ -142,28 +142,37 @@ def _connected_quad_faces(start_faces):
 
 
 def _edge_components(edges):
-    remaining = {
+    live_edges = {
         edge for edge in edges
         if edge is not None and getattr(edge, "is_valid", False)
     }
+    if not live_edges:
+        return []
+
+    vert_to_edges = {}
+    for edge in live_edges:
+        vert_a, vert_b = edge.verts
+        vert_to_edges.setdefault(vert_a, set()).add(edge)
+        vert_to_edges.setdefault(vert_b, set()).add(edge)
+
     components = []
-    while remaining:
-        edge = next(iter(remaining))
+    visited = set()
+    for edge in live_edges:
+        if edge in visited:
+            continue
         stack = [edge]
         component = set()
-        remaining.remove(edge)
 
         while stack:
             current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
             component.add(current)
-            current_verts = set(current.verts)
-            neighbors = [
-                other for other in list(remaining)
-                if current_verts.intersection(other.verts)
-            ]
-            for other in neighbors:
-                remaining.remove(other)
-                stack.append(other)
+            for vert in current.verts:
+                for neighbor in vert_to_edges.get(vert, ()):
+                    if neighbor not in visited:
+                        stack.append(neighbor)
 
         components.append(component)
 
