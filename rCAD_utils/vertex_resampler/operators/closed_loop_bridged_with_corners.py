@@ -1469,6 +1469,130 @@ def _build_open_path_anchor_plan(candidates, obj):
     }
 
 
+def _build_closed_path_anchor_plan(candidates, synthetic_split_info):
+    components = _ordered_open_path_candidate_components(candidates)
+    if len(components) != 1:
+        return None
+
+    component = components[0]
+    ordered_candidates = component['ordered_candidates']
+    ordered_entries = component['ordered_entries']
+    if not ordered_candidates or not ordered_entries:
+        return None
+
+    anchored = {}
+    shared_loops = []
+    anchor_homes = []
+    corner_directions = []
+
+    first_candidate_index = ordered_candidates[0]
+    last_candidate_index = ordered_candidates[-1]
+    first_candidate = candidates[first_candidate_index]
+    last_candidate = candidates[last_candidate_index]
+    first_loop_keys = _candidate_loop_keys(first_candidate)
+    last_loop_keys = _candidate_loop_keys(last_candidate)
+
+    first_shared_key = ordered_entries[0]['key']
+    last_shared_key = ordered_entries[-1]['key']
+
+    first_synthetic_loop_index = next(
+        (
+            loop_index
+            for loop_index in range(len(first_loop_keys))
+            if loop_index != first_loop_keys.index(first_shared_key)
+        ),
+        None,
+    )
+    last_synthetic_loop_index = next(
+        (
+            loop_index
+            for loop_index in range(len(last_loop_keys))
+            if loop_index != last_loop_keys.index(last_shared_key)
+        ),
+        None,
+    )
+    if first_synthetic_loop_index is None or last_synthetic_loop_index is None:
+        return None
+
+    anchored[first_candidate_index] = _anchor_group_to_split_loop(
+        first_candidate,
+        first_synthetic_loop_index,
+        synthetic_split_info,
+    )
+
+    for shared_entry, previous_candidate_index, current_candidate_index in zip(
+        ordered_entries,
+        ordered_candidates,
+        ordered_candidates[1:],
+    ):
+        previous_group = anchored[previous_candidate_index]
+        previous_loop_keys = _candidate_loop_keys(candidates[previous_candidate_index])
+        current_loop_keys = _candidate_loop_keys(candidates[current_candidate_index])
+
+        try:
+            previous_loop_index = previous_loop_keys.index(shared_entry['key'])
+            current_loop_index = current_loop_keys.index(shared_entry['key'])
+        except ValueError:
+            return None
+
+        reference_loop = list(_group_loops(previous_group)[previous_loop_index])
+        if not reference_loop:
+            return None
+
+        shared_loops.append(shared_entry['loop'])
+        anchor_homes.append(reference_loop[0].co.copy())
+
+        anchored[current_candidate_index] = _phase_align_group_to_reference(
+            candidates[current_candidate_index],
+            current_loop_index,
+            reference_loop,
+        )
+        current_loop = list(_group_loops(anchored[current_candidate_index])[current_loop_index])
+        reversed_loop = _reverse_loop_with_fixed_start(current_loop)
+        forward_score = _pair_distance_score(reference_loop, current_loop)
+        reverse_score = _pair_distance_score(reference_loop, reversed_loop)
+        corner_directions.append(
+            'reversed'
+            if reverse_score is not None and (
+                forward_score is None or reverse_score < forward_score
+            )
+            else 'forward'
+        )
+
+    first_seam_loop = list(_group_loops(anchored[first_candidate_index])[first_synthetic_loop_index])
+    last_group = anchored.get(last_candidate_index)
+    if last_group is None:
+        return None
+    last_seam_loop = list(_group_loops(last_group)[last_synthetic_loop_index])
+    if not first_seam_loop or not last_seam_loop or len(first_seam_loop) != len(last_seam_loop):
+        return None
+
+    anchor_index_a = _anchor_index_for_loop(first_seam_loop, synthetic_split_info['anchor_home'])
+    anchor_index_b = _anchor_index_for_loop(last_seam_loop, synthetic_split_info['anchor_home'])
+    if anchor_index_a is None or anchor_index_b is None:
+        return None
+
+    first_seam_loop = _rotate_loop(first_seam_loop, anchor_index_a)
+    last_seam_loop = _rotate_loop(last_seam_loop, anchor_index_b)
+    reversed_last = _reverse_loop_with_fixed_start(last_seam_loop)
+    forward_score = _pair_distance_score(first_seam_loop, last_seam_loop)
+    reverse_score = _pair_distance_score(first_seam_loop, reversed_last)
+    synthetic_direction = (
+        'reversed'
+        if reverse_score is not None and (
+            forward_score is None or reverse_score < forward_score
+        )
+        else 'forward'
+    )
+
+    return {
+        'shared_loops': shared_loops,
+        'anchor_homes': anchor_homes,
+        'corner_directions': corner_directions,
+        'synthetic_direction': synthetic_direction,
+    }
+
+
 def _anchor_open_path_groups(groups, split_infos):
     components = _ordered_open_path_group_components(groups, split_infos)
     if not components:
@@ -1769,6 +1893,97 @@ def _weld_open_path_corner_rings(bm, split_infos, corner_directions):
     return len(targetmap), diagnostics
 
 
+def _endpoint_synthetic_loop_index(group_data, shared_loop_index):
+    loops = _group_loops(group_data)
+    for loop_index in range(len(loops)):
+        if loop_index != shared_loop_index:
+            return loop_index
+    return None
+
+
+def _weld_closed_path_synthetic_seam(bm, synthetic_split_info, split_infos, synthetic_direction):
+    live_data = closed_loop_bridged.detect(bm)
+    groups = live_data.get('groups') if live_data else []
+    if not groups:
+        return 0, [{'corner_index': 1, 'status': 'no_live_groups'}]
+
+    groups = _anchor_open_path_groups(groups, split_infos)
+    components = _ordered_open_path_group_components(groups, split_infos)
+    if len(components) != 1:
+        merged, diagnostics = _weld_live_corner_rings(bm, [synthetic_split_info])
+        return merged, diagnostics
+
+    component = components[0]
+    ordered_groups = component['ordered_groups']
+    ordered_edges = component['ordered_edges']
+    if not ordered_groups or not ordered_edges:
+        merged, diagnostics = _weld_live_corner_rings(bm, [synthetic_split_info])
+        return merged, diagnostics
+
+    first_group_index = ordered_groups[0]
+    last_group_index = ordered_groups[-1]
+    first_edge = ordered_edges[0]
+    last_edge = ordered_edges[-1]
+    first_shared_loop_index = first_edge['loop_a'] if first_edge['group_a'] == first_group_index else first_edge['loop_b']
+    last_shared_loop_index = last_edge['loop_a'] if last_edge['group_a'] == last_group_index else last_edge['loop_b']
+    first_synthetic_loop_index = _endpoint_synthetic_loop_index(groups[first_group_index], first_shared_loop_index)
+    last_synthetic_loop_index = _endpoint_synthetic_loop_index(groups[last_group_index], last_shared_loop_index)
+    if first_synthetic_loop_index is None or last_synthetic_loop_index is None:
+        merged, diagnostics = _weld_live_corner_rings(bm, [synthetic_split_info])
+        return merged, diagnostics
+
+    loop_a = list(_group_loops(groups[first_group_index])[first_synthetic_loop_index])
+    loop_b = list(_group_loops(groups[last_group_index])[last_synthetic_loop_index])
+    if not loop_a or not loop_b or len(loop_a) != len(loop_b):
+        return 0, [{'corner_index': 1, 'status': 'size_mismatch'}]
+
+    anchor_home = synthetic_split_info['anchor_home']
+    anchor_index_a = _anchor_index_for_loop(loop_a, anchor_home)
+    anchor_index_b = _anchor_index_for_loop(loop_b, anchor_home)
+    if anchor_index_a is None or anchor_index_b is None:
+        return 0, [{'corner_index': 1, 'status': 'missing_anchor'}]
+
+    loop_a = _rotate_loop(loop_a, anchor_index_a)
+    loop_b = _rotate_loop(loop_b, anchor_index_b)
+    if synthetic_direction == 'reversed':
+        loop_b = _reverse_loop_with_fixed_start(loop_b)
+
+    targetmap = {}
+    pair_count = 0
+    for vert_a, vert_b in zip(loop_a, loop_b):
+        if (
+            not getattr(vert_a, "is_valid", False)
+            or not getattr(vert_b, "is_valid", False)
+            or vert_a is vert_b
+        ):
+            continue
+        targetmap[vert_b] = vert_a
+        pair_count += 1
+
+    if not targetmap:
+        return 0, [{'corner_index': 1, 'status': 'no_pairs'}]
+
+    try:
+        bmesh.ops.weld_verts(
+            bm,
+            targetmap=targetmap,
+        )
+    except Exception:
+        return 0, [{'corner_index': 1, 'status': 'weld_failed'}]
+
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    bm.normal_update()
+    return len(targetmap), [{
+        'corner_index': 1,
+        'status': 'paired',
+        'pair_count': pair_count,
+        'ring_size': len(loop_a),
+        'direction': synthetic_direction,
+    }]
+
+
 def detect(bm):
     _set_last_detect_reason(None)
     face_corner_data = _detect_face_corner_groups(bm)
@@ -1944,9 +2159,14 @@ def _execute_closed_path(bm, obj, direction, report, selected_faces, candidates)
         bmesh.update_edit_mesh(obj.data)
         return {'CANCELLED'}
 
-    anchor_homes = _choose_anchor_homes(shared_loops, obj)
-    split_infos = _split_shared_corner_rings(bm, selected_faces, shared_loops, anchor_homes)
-    if not split_infos:
+    anchor_plan = _build_closed_path_anchor_plan(candidates, synthetic_split_infos[0])
+    anchor_homes = (
+        anchor_plan['anchor_homes']
+        if anchor_plan is not None
+        else _choose_anchor_homes(shared_loops, obj)
+    )
+    real_split_infos = _split_shared_corner_rings(bm, selected_faces, shared_loops, anchor_homes)
+    if not real_split_infos:
         if report is not None:
             report({'ERROR'}, f"CLBWC exec failed: path={path_label}, could not split shared corner rings after synthetic seam.")
         merged, _live_weld_diagnostics = _weld_live_corner_rings(bm, synthetic_split_infos)
@@ -1966,8 +2186,6 @@ def _execute_closed_path(bm, obj, direction, report, selected_faces, candidates)
                     pass
         return {'CANCELLED'}
 
-    split_infos = synthetic_split_infos + split_infos
-
     try:
         fresh_data = closed_loop_bridged.detect(bm)
         if not fresh_data or not fresh_data.get('groups'):
@@ -1977,10 +2195,15 @@ def _execute_closed_path(bm, obj, direction, report, selected_faces, candidates)
 
         fresh_data = {
             **fresh_data,
-            'groups': [
-                _anchor_group_rings(group_data, split_infos)
-                for group_data in fresh_data['groups']
-            ],
+            'groups': (
+                _anchor_open_path_groups(fresh_data['groups'], real_split_infos)
+                if anchor_plan is not None
+                else [
+                    _anchor_group_rings(group_data, synthetic_split_infos + real_split_infos)
+                    for group_data in fresh_data['groups']
+                ]
+            ),
+            'skip_phase_normalization': bool(anchor_plan is not None),
         }
         result = closed_loop_bridged.execute(
             bm,
@@ -1990,9 +2213,24 @@ def _execute_closed_path(bm, obj, direction, report, selected_faces, candidates)
             data=fresh_data,
         )
     finally:
-        merged, _live_weld_diagnostics = _weld_live_corner_rings(bm, split_infos)
+        merged = 0
+        if anchor_plan is not None:
+            real_merged, _live_weld_diagnostics = _weld_open_path_corner_rings(
+                bm,
+                real_split_infos,
+                anchor_plan['corner_directions'],
+            )
+            synthetic_merged, _synthetic_weld_diagnostics = _weld_closed_path_synthetic_seam(
+                bm,
+                synthetic_split_infos[0],
+                real_split_infos,
+                anchor_plan['synthetic_direction'],
+            )
+            merged = real_merged + synthetic_merged
+        else:
+            merged, _live_weld_diagnostics = _weld_live_corner_rings(bm, synthetic_split_infos + real_split_infos)
         if merged == 0:
-            fallback_targetmap = _targetmap_from_split_clusters(split_infos)
+            fallback_targetmap = _targetmap_from_split_clusters(synthetic_split_infos + real_split_infos)
             if fallback_targetmap:
                 try:
                     bmesh.ops.weld_verts(
