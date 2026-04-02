@@ -268,32 +268,79 @@ def _open_face_strip_candidates(face_component):
         face for face in face_component
         if len(face.verts) == 4
     }
-    candidates = []
-    seen = set()
+    if len(quad_faces) < 2:
+        return []
 
+    adjacency = {}
     for face in sorted(quad_faces, key=lambda item: item.index):
+        ordered_edges = _ordered_face_edges(face)
+        if ordered_edges is None:
+            continue
         for bit in (0, 1):
-            strip_faces = _open_candidate_strip_faces(face, bit, quad_faces)
-            if not strip_faces:
-                continue
+            node = (face, bit)
+            adjacency.setdefault(node, set())
+            for edge in (ordered_edges[bit], ordered_edges[(bit + 2) % 4]):
+                neighbor = _quad_face_neighbor(face, edge, quad_faces)
+                if neighbor is None:
+                    continue
+                neighbor_bit = _edge_orientation_bit(neighbor, edge)
+                if neighbor_bit is None:
+                    continue
+                adjacency[node].add((neighbor, neighbor_bit))
 
-            key = frozenset(strip_faces)
-            if key in seen:
-                continue
-            seen.add(key)
+    candidates = []
+    visited = set()
 
-            rings_data = _detect_open_strip_component(
-                _faces_to_component_verts(strip_faces)
-            )
-            if rings_data is None:
-                continue
+    for start_node in sorted(
+        adjacency.keys(),
+        key=lambda item: (item[0].index, item[1]),
+    ):
+        if start_node in visited:
+            continue
 
-            candidates.append({
-                'strip_faces': set(strip_faces),
-                'rings': rings_data,
-                'extra_faces': set(face_component) - set(strip_faces),
-                'face_count': len(strip_faces),
-            })
+        stack = [start_node]
+        component_nodes = set()
+        while stack:
+            node = stack.pop()
+            if node in visited:
+                continue
+            visited.add(node)
+            component_nodes.add(node)
+            for neighbor in adjacency.get(node, ()):
+                if neighbor not in visited:
+                    stack.append(neighbor)
+
+        strip_faces = {face for face, _bit in component_nodes}
+        if len(strip_faces) < 2:
+            continue
+        if len(strip_faces) != len(component_nodes):
+            continue
+
+        endpoint_count = 0
+        valid = True
+        for node in component_nodes:
+            distinct_neighbors = len(adjacency.get(node, set()) & component_nodes)
+            if distinct_neighbors not in {1, 2}:
+                valid = False
+                break
+            if distinct_neighbors == 1:
+                endpoint_count += 1
+
+        if not valid or endpoint_count != 2:
+            continue
+
+        rings_data = _detect_open_strip_component(
+            _faces_to_component_verts(strip_faces)
+        )
+        if rings_data is None:
+            continue
+
+        candidates.append({
+            'strip_faces': set(strip_faces),
+            'rings': rings_data,
+            'extra_faces': set(face_component) - set(strip_faces),
+            'face_count': len(strip_faces),
+        })
 
     return sorted(
         candidates,
