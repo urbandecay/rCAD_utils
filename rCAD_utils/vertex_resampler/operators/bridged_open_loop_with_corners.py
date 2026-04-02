@@ -344,11 +344,26 @@ def _open_face_strip_candidates(face_component):
         if rings_data is None:
             continue
 
+        extra_faces = set(face_component) - set(strip_faces)
+        boundary_edges = _shaft_corner_boundary_edges(strip_faces, extra_faces)
+        raw_boundary_components = _boundary_path_components(boundary_edges)
+        boundary_components = []
+        for boundary_component in raw_boundary_components:
+            chain = _ordered_chain_verts(boundary_component)
+            key = _canonical_chain_key(chain)
+            if key is None or not _is_corner_boundary_chain(chain):
+                continue
+            boundary_components.append({
+                'key': key,
+                'edges': set(boundary_component),
+            })
+
         candidates.append({
             'strip_faces': set(strip_faces),
             'rings': rings_data,
-            'extra_faces': set(face_component) - set(strip_faces),
+            'extra_faces': extra_faces,
             'face_count': len(strip_faces),
+            'boundary_components': boundary_components,
         })
 
     return sorted(
@@ -708,14 +723,7 @@ def _all_seam_records(bm):
             if not shaft_faces or not corner_faces:
                 continue
 
-            boundary_edges = _shaft_corner_boundary_edges(shaft_faces, corner_faces)
-            boundary_components = _boundary_path_components(boundary_edges)
-            candidate_key = tuple(
-                sorted(
-                    face.index for face in shaft_faces
-                    if face is not None and getattr(face, "is_valid", False)
-                )
-            )
+            boundary_components = candidate.get('boundary_components', [])
             _debug_step(
                 "candidate seams",
                 component_face_count=len(face_component),
@@ -725,10 +733,7 @@ def _all_seam_records(bm):
                 seam_count=len(boundary_components),
             )
             for boundary_component in boundary_components:
-                chain = _ordered_chain_verts(boundary_component)
-                key = _canonical_chain_key(chain)
-                if key is None or not _is_corner_boundary_chain(chain):
-                    continue
+                key = boundary_component['key']
                 record = seam_entries.setdefault(
                     key,
                     {
@@ -737,13 +742,13 @@ def _all_seam_records(bm):
                         'candidate_data': {},
                     },
                 )
-                record['boundary_edges'].update(boundary_component)
+                record['boundary_edges'].update(boundary_component['edges'])
                 record['candidate_ids'].add(candidate_index)
                 record['candidate_data'][candidate_index] = {
                     'shaft_faces': set(shaft_faces),
                     'corner_faces': set(corner_faces),
-                        'face_count': len(shaft_faces),
-                    }
+                    'face_count': len(shaft_faces),
+                }
         _debug_step(
             "candidate chain",
             component_face_count=len(face_component),
