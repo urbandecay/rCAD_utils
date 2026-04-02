@@ -13,6 +13,7 @@ from .open_strip_common import (
 from .resample_common import execute_aligned_loops_logic
 
 _POSITION_TOLERANCE = 1.0e-6
+_FACE_POSITION_TOLERANCE = 1.0e-5
 
 
 def _groups_are_open(groups):
@@ -41,12 +42,53 @@ def _face_indices(faces):
     }
 
 
+def _face_position(face):
+    if face is None or not getattr(face, "is_valid", False):
+        return None
+    count = len(face.verts)
+    if count == 0:
+        return None
+    center = face.verts[0].co.copy()
+    for vert in face.verts[1:]:
+        center += vert.co
+    center /= count
+    return center
+
+
+def _face_positions(faces):
+    return [
+        position for position in (_face_position(face) for face in faces)
+        if position is not None
+    ]
+
+
 def _live_faces_from_indices(bm, face_indices):
     index_set = set(face_indices)
     return {
         face for face in bm.faces
         if getattr(face, "is_valid", False) and face.index in index_set
     }
+
+
+def _live_faces_from_positions(bm, positions, tolerance=_FACE_POSITION_TOLERANCE):
+    live_faces = set()
+    remaining = list(positions)
+    if not remaining:
+        return live_faces
+
+    for face in bm.faces:
+        if not getattr(face, "is_valid", False):
+            continue
+        face_position = _face_position(face)
+        if face_position is None:
+            continue
+        for position in list(remaining):
+            if (face_position - position).length <= tolerance:
+                live_faces.add(face)
+                remaining.remove(position)
+                break
+
+    return live_faces
 
 
 def _selected_faces(bm):
@@ -543,7 +585,7 @@ def _all_seam_records(bm):
         return []
 
     seam_records = {}
-    shaft_face_indices = set()
+    all_shaft_faces = set()
     for face_component in _face_components(selected_faces):
         candidates = _open_face_strip_candidates(face_component)
         if not candidates:
@@ -556,18 +598,33 @@ def _all_seam_records(bm):
             candidate for candidate in candidates
             if candidate['face_count'] >= keep_threshold
         ]
+        chosen_candidates = []
+        occupied_faces = set()
+        for candidate in candidates:
+            strip_faces = {
+                face for face in candidate.get('strip_faces', set())
+                if face is not None and getattr(face, "is_valid", False)
+            }
+            if not strip_faces or strip_faces & occupied_faces:
+                continue
+            chosen_candidates.append(candidate)
+            occupied_faces.update(strip_faces)
+
         _debug_step(
             "candidate filter",
             component_face_count=len(face_component),
             max_face_count=max_face_count,
             threshold=keep_threshold,
-            kept=len(candidates),
+            kept=len(chosen_candidates),
         )
-        for candidate in candidates:
-            shaft_face_indices.update(_face_indices(candidate.get('strip_faces', set())))
+        for candidate in chosen_candidates:
+            all_shaft_faces.update({
+                face for face in candidate.get('strip_faces', set())
+                if face is not None and getattr(face, "is_valid", False)
+            })
 
         seam_entries = {}
-        for candidate_index, candidate in enumerate(candidates, start=1):
+        for candidate_index, candidate in enumerate(chosen_candidates, start=1):
             shaft_faces = {
                 face for face in candidate.get('strip_faces', set())
                 if face is not None and getattr(face, "is_valid", False)
@@ -618,7 +675,7 @@ def _all_seam_records(bm):
         _debug_step(
             "candidate chain",
             component_face_count=len(face_component),
-            path=[candidate_index for candidate_index in range(1, len(candidates) + 1)],
+            path=[candidate_index for candidate_index in range(1, len(chosen_candidates) + 1)],
         )
 
         for seam_key, seam_entry in seam_entries.items():
@@ -647,7 +704,7 @@ def _all_seam_records(bm):
             item['key'],
         )
     )
-    return filtered_records, shaft_face_indices
+    return filtered_records, _face_positions(all_shaft_faces)
 
 
 def _split_infos_from_boundary_components(bm, boundary_components):
@@ -1192,8 +1249,10 @@ def execute(bm, obj, direction, report=None, data=None):
     if not data:
         return {'CANCELLED'}
 
-    original_face_indices = _face_indices(_selected_faces(bm))
-    seam_records, shaft_face_indices = _all_seam_records(bm)
+    original_faces = _selected_faces(bm)
+    original_face_indices = _face_indices(original_faces)
+    original_face_positions = _face_positions(original_faces)
+    seam_records, shaft_face_positions = _all_seam_records(bm)
     if not seam_records:
         if report is not None:
             report({'ERROR'}, "Could not find open bridge corner seam edges.")
@@ -1201,6 +1260,9 @@ def execute(bm, obj, direction, report=None, data=None):
 
     # --- Pre-split bookkeeping ---
     boundary_positions = _boundary_positions_from_records(seam_records)
+    corner_face_positions = []
+    for record in seam_records:
+        corner_face_positions.extend(_face_positions(record.get('corner_faces', set())))
 
     # --- Split seams ---
     total_split_seams = 0
@@ -1231,19 +1293,20 @@ def execute(bm, obj, direction, report=None, data=None):
     )
 
     # --- Select only shaft faces and detect open loops per component ---
-    shaft_faces = {
-        face for face in bm.faces
-        if getattr(face, "is_valid", False) and face.index in shaft_face_indices
-    }
+    shaft_faces = _live_faces_from_positions(bm, shaft_face_positions)
     _debug_step("shaft faces", count=len(shaft_faces))
     _select_only_faces(bm, shaft_faces)
-
-    open_groups = []
-    for face_component in _face_components(shaft_faces):
-        component_verts = _faces_to_component_verts(face_component)
-        rings_data = _detect_open_strip_component(component_verts)
-        if rings_data is not None and not rings_data[1]:
-            open_groups.append(rings_data)
+    fresh_data = detect_open_strip_selection(bm)
+    if (
+        fresh_data is None
+        or not _groups_are_open(fresh_data.get('groups', []))
+        or fresh_data.get('has_extra_selected_faces')
+        or fresh_data.get('has_outside_side_faces')
+    ):
+        open_groups = []
+    else:
+        open_groups = list(fresh_data['groups'])
+    _debug_step("post-split filter", raw_count=len(open_groups), kept=len(open_groups))
 
     if not open_groups:
         _debug_step("post-split detection failed")
@@ -1295,9 +1358,19 @@ def execute(bm, obj, direction, report=None, data=None):
                     bm.normal_update()
                 except Exception:
                     pass
-        restored_faces = _connected_quad_faces(_selected_faces(bm))
+        current_shaft_faces = _selected_faces(bm)
+        live_corner_faces = _live_faces_from_positions(bm, corner_face_positions)
+
+        restored_seed_faces = set(current_shaft_faces) | set(live_corner_faces)
+        if not restored_seed_faces:
+            restored_seed_faces = _live_faces_from_positions(bm, original_face_positions)
+        if not restored_seed_faces:
+            restored_seed_faces = _live_faces_from_indices(bm, original_face_indices)
+
+        restored_faces = _connected_quad_faces(restored_seed_faces)
         if not restored_faces:
-            restored_faces = _live_faces_from_indices(bm, original_face_indices)
+            restored_faces = restored_seed_faces
+
         if restored_faces:
             _select_only_faces(bm, restored_faces)
             bm.select_flush_mode()
