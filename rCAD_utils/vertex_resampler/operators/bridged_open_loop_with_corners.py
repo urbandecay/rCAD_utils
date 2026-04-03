@@ -8,6 +8,8 @@ from .open_strip_common import (
     _faces_to_component_verts,
     _detect_open_strip_component,
     _strip_length_metrics,
+    _component_span_metrics,
+    _strip_candidate_sort_key,
     _selected_face_set,
     detect_open_strip_selection,
 )
@@ -366,16 +368,12 @@ def _open_face_strip_candidates(face_component):
             'face_count': len(strip_faces),
             'boundary_components': boundary_components,
             **_strip_length_metrics(rings_data),
+            **_component_span_metrics(face_component, rings_data),
         })
 
     return sorted(
         candidates,
-        key=lambda item: (
-            item['path_cross_ratio'],
-            item['path_length'],
-            -item['cross_length'],
-            -len(item['extra_faces']),
-        ),
+        key=_strip_candidate_sort_key,
         reverse=True,
     )
 
@@ -679,15 +677,9 @@ def _all_seam_records(bm):
     for face_component in _face_components(selected_faces):
         candidates = _open_face_strip_candidates(face_component)
         if not candidates:
-            _debug_step("candidate filter", component_face_count=len(face_component), kept=0, threshold=0)
+            _debug_step("candidate filter", component_face_count=len(face_component), kept=0)
             continue
 
-        max_face_count = max(candidate['face_count'] for candidate in candidates)
-        keep_threshold = max(4, max_face_count - 1)
-        candidates = [
-            candidate for candidate in candidates
-            if candidate['face_count'] >= keep_threshold
-        ]
         chosen_candidates = []
         occupied_faces = set()
         for candidate in candidates:
@@ -703,8 +695,6 @@ def _all_seam_records(bm):
         _debug_step(
             "candidate filter",
             component_face_count=len(face_component),
-            max_face_count=max_face_count,
-            threshold=keep_threshold,
             kept=len(chosen_candidates),
         )
         for candidate in chosen_candidates:
@@ -750,7 +740,7 @@ def _all_seam_records(bm):
                 record['candidate_data'][candidate_index] = {
                     'shaft_faces': set(shaft_faces),
                     'corner_faces': set(corner_faces),
-                    'face_count': len(shaft_faces),
+                    'sort_key': _strip_candidate_sort_key(candidate),
                 }
         _debug_step(
             "candidate chain",
@@ -758,29 +748,39 @@ def _all_seam_records(bm):
             path=[candidate_index for candidate_index in range(1, len(chosen_candidates) + 1)],
         )
 
+        component_strong_records = {}
+        component_fallback_records = {}
         for seam_key, seam_entry in seam_entries.items():
-            if len(seam_entry['candidate_ids']) < 2:
-                continue
-
             representative_id = max(
                 seam_entry['candidate_ids'],
-                key=lambda candidate_id: seam_entry['candidate_data'][candidate_id]['face_count'],
+                key=lambda candidate_id: seam_entry['candidate_data'][candidate_id]['sort_key'],
             )
             representative = seam_entry['candidate_data'][representative_id]
-            seam_records[seam_key] = {
+            record = {
                 'key': seam_key,
                 'boundary_edges': set(seam_entry['boundary_edges']),
                 'shaft_faces': set(representative['shaft_faces']),
                 'corner_faces': set(representative['corner_faces']),
                 'support': len(seam_entry['candidate_ids']),
-                'shaft_face_count': representative['face_count'],
+                'shaft_face_count': len(representative['shaft_faces']),
+                'sort_key': representative['sort_key'],
             }
+            if record['support'] >= 2:
+                component_strong_records[seam_key] = record
+            else:
+                component_fallback_records[seam_key] = record
+
+        chosen_component_records = (
+            component_strong_records
+            if component_strong_records else component_fallback_records
+        )
+        seam_records.update(chosen_component_records)
 
     filtered_records = sorted(
         seam_records.values(),
         key=lambda item: (
             -item['support'],
-            -item['shaft_face_count'],
+            tuple(-value if isinstance(value, (int, float)) else value for value in item.get('sort_key', ())),
             item['key'],
         )
     )
@@ -1320,6 +1320,71 @@ def _anchor_open_group_endpoints(rings_data):
     }
 
 
+def _seam_records_from_components(components):
+    seam_records = {}
+    all_shaft_faces = set()
+
+    for component in components or []:
+        component_faces = {
+            face for face in component.get('component_faces', set())
+            if face is not None and getattr(face, "is_valid", False)
+        }
+        shaft_faces = {
+            face for face in component.get('shaft_faces', set())
+            if face is not None and getattr(face, "is_valid", False)
+        }
+        corner_faces = {
+            face for face in component.get('extra_faces', set())
+            if face is not None and getattr(face, "is_valid", False)
+        }
+        group = component.get('group')
+
+        if not shaft_faces:
+            continue
+
+        all_shaft_faces.update(shaft_faces)
+
+        if not corner_faces or group is None:
+            continue
+
+        candidate_metrics = {
+            **_strip_length_metrics(group),
+            **_component_span_metrics(component_faces or shaft_faces, group),
+            'extra_faces': corner_faces,
+        }
+        sort_key = _strip_candidate_sort_key(candidate_metrics)
+        boundary_edges = _shaft_corner_boundary_edges(shaft_faces, corner_faces)
+
+        for boundary_component in _boundary_path_components(boundary_edges):
+            chain = _ordered_chain_verts(boundary_component)
+            key = _canonical_chain_key(chain)
+            if key is None or not _is_corner_boundary_chain(chain):
+                continue
+
+            existing = seam_records.get(key)
+            record = {
+                'key': key,
+                'boundary_edges': set(boundary_component),
+                'shaft_faces': set(shaft_faces),
+                'corner_faces': set(corner_faces),
+                'support': 1,
+                'shaft_face_count': len(shaft_faces),
+                'sort_key': sort_key,
+            }
+            if existing is None or record['sort_key'] > existing.get('sort_key', ()):
+                seam_records[key] = record
+
+    filtered_records = sorted(
+        seam_records.values(),
+        key=lambda item: (
+            -item['support'],
+            tuple(-value if isinstance(value, (int, float)) else value for value in item.get('sort_key', ())),
+            item['key'],
+        )
+    )
+    return filtered_records, _face_positions(all_shaft_faces)
+
+
 def detect(bm):
     data = detect_open_strip_selection(bm)
     if data is None:
@@ -1349,6 +1414,10 @@ def execute(bm, obj, direction, report=None, data=None):
     original_face_indices = _face_indices(original_faces)
     original_face_positions = _face_positions(original_faces)
     seam_records, shaft_face_positions = _all_seam_records(bm)
+    if not seam_records:
+        seam_records, shaft_face_positions = _seam_records_from_components(
+            data.get('components', []) if isinstance(data, dict) else []
+        )
     if not seam_records:
         if report is not None:
             report({'ERROR'}, "Could not find open bridge corner seam edges.")

@@ -3,6 +3,9 @@
 from .bridge_utils import get_bridged_chain
 
 
+_VECTOR_TOLERANCE = 1.0e-6
+
+
 def _edge_between(vert_a, vert_b):
     for edge in vert_a.link_edges:
         if edge.other_vert(vert_a) is vert_b:
@@ -51,6 +54,117 @@ def _strip_length_metrics(strip_group):
         'cross_length': cross_length,
         'path_cross_ratio': path_cross_ratio,
     }
+
+
+def _aligned_average_axis(vectors):
+    accumulator = None
+    reference = None
+
+    for vec in vectors:
+        if vec.length <= _VECTOR_TOLERANCE:
+            continue
+
+        current = vec.copy()
+        if reference is None:
+            reference = current.normalized()
+        elif current.dot(reference) < 0.0:
+            current.negate()
+
+        accumulator = current if accumulator is None else (accumulator + current)
+
+    if accumulator is None or accumulator.length <= _VECTOR_TOLERANCE:
+        return None
+    return accumulator.normalized()
+
+
+def _span_metrics_from_verts(component_verts, strip_group):
+    loops, is_closed = strip_group
+    component_verts = {
+        vert for vert in component_verts
+        if getattr(vert, "is_valid", False)
+    }
+    if not component_verts:
+        return {
+            'component_path_span': 0.0,
+            'component_cross_span': 0.0,
+            'component_path_cross_ratio': 0.0,
+        }
+
+    path_vectors = []
+    for loop in loops:
+        if len(loop) < 2:
+            continue
+        pairs = list(zip(loop, loop[1:]))
+        if is_closed:
+            pairs.append((loop[-1], loop[0]))
+        for vert_a, vert_b in pairs:
+            path_vectors.append(vert_b.co - vert_a.co)
+
+    cross_vectors = []
+    if len(loops) >= 2:
+        pair_count = min(len(loop) for loop in loops)
+        for index in range(pair_count):
+            ring_positions = [loop[index].co for loop in loops]
+            for pos_a, pos_b in zip(ring_positions, ring_positions[1:]):
+                cross_vectors.append(pos_b - pos_a)
+
+    path_axis = _aligned_average_axis(path_vectors)
+    cross_axis = _aligned_average_axis(cross_vectors)
+    if path_axis is None or cross_axis is None:
+        return {
+            'component_path_span': 0.0,
+            'component_cross_span': 0.0,
+            'component_path_cross_ratio': 0.0,
+        }
+
+    # Keep the cross axis perpendicular enough to the path axis to measure width
+    # across the whole face component instead of letting skew collapse the span.
+    orthogonal_cross = cross_axis - (path_axis * cross_axis.dot(path_axis))
+    if orthogonal_cross.length > _VECTOR_TOLERANCE:
+        cross_axis = orthogonal_cross.normalized()
+
+    path_projections = [vert.co.dot(path_axis) for vert in component_verts]
+    cross_projections = [vert.co.dot(cross_axis) for vert in component_verts]
+    path_span = max(path_projections) - min(path_projections)
+    cross_span = max(cross_projections) - min(cross_projections)
+    path_cross_ratio = (
+        path_span / cross_span
+        if cross_span > _VECTOR_TOLERANCE else float('inf')
+    )
+
+    return {
+        'component_path_span': path_span,
+        'component_cross_span': cross_span,
+        'component_path_cross_ratio': path_cross_ratio,
+    }
+
+
+def _component_span_metrics(face_component, strip_group):
+    component_verts = {
+        vert
+        for face in face_component
+        for vert in face.verts
+        if getattr(vert, "is_valid", False)
+    }
+    return _span_metrics_from_verts(component_verts, strip_group)
+
+
+def _sortable_metric(value):
+    if value == float('inf'):
+        return float('inf')
+    return round(value, 6)
+
+
+def _strip_candidate_sort_key(candidate):
+    return (
+        _sortable_metric(candidate.get('component_path_span', 0.0)),
+        _sortable_metric(candidate.get('component_path_cross_ratio', 0.0)),
+        -_sortable_metric(candidate.get('component_cross_span', 0.0)),
+        _sortable_metric(candidate['path_length']),
+        _sortable_metric(candidate['path_cross_ratio']),
+        -_sortable_metric(candidate['cross_length']),
+        -len(candidate.get('extra_faces', ())),
+    )
 
 
 def _selected_face_set(bm, sel_set):
@@ -250,12 +364,12 @@ def _detect_open_strip_component(component):
                 continue
 
             candidate_pair = ([chain_a, aligned_b], False)
-            metrics = _strip_length_metrics(candidate_pair)
-            score = (
-                metrics['path_cross_ratio'],
-                metrics['path_length'],
-                -metrics['cross_length'],
-            )
+            metrics = {
+                **_strip_length_metrics(candidate_pair),
+                **_span_metrics_from_verts(component_set, candidate_pair),
+                'extra_faces': (),
+            }
+            score = _strip_candidate_sort_key(metrics)
 
             if best_score is None or score > best_score:
                 best_score = score
@@ -435,6 +549,7 @@ def _strip_candidates(face_component):
                 'face_count': len(shaft_faces),
                 'loop_size': len(strip_group[0][0]),
                 **_strip_length_metrics(strip_group),
+                **_component_span_metrics(face_component, strip_group),
             })
 
     return candidates
@@ -452,12 +567,7 @@ def _choose_strip_candidate(candidates):
 
     chosen = max(
         pool,
-        key=lambda candidate: (
-            candidate['path_cross_ratio'],
-            candidate['path_length'],
-            -candidate['cross_length'],
-            -len(candidate['extra_faces']),
-        ),
+        key=_strip_candidate_sort_key,
     )
     if exact_candidates:
         return chosen, "picked exact candidate with best geometric path/cross ratio"
