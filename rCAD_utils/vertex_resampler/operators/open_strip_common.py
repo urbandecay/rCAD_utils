@@ -36,18 +36,25 @@ def _strip_length_metrics(strip_group):
             'path_cross_ratio': 0.0,
         }
 
-    path_lengths = [_loop_path_length(loop, is_closed) for loop in loops if len(loop) >= 2]
-    path_length = sum(path_lengths) / len(path_lengths) if path_lengths else 0.0
+    along_loop_lengths = [_loop_path_length(loop, is_closed) for loop in loops if len(loop) >= 2]
+    along_loop_length = sum(along_loop_lengths) / len(along_loop_lengths) if along_loop_lengths else 0.0
 
-    cross_distances = []
+    between_loop_distances = []
     if len(loops) >= 2:
         pair_count = min(len(loop) for loop in loops)
         for index in range(pair_count):
             ring_positions = [loop[index].co for loop in loops]
             for pos_a, pos_b in zip(ring_positions, ring_positions[1:]):
-                cross_distances.append((pos_a - pos_b).length)
+                between_loop_distances.append((pos_a - pos_b).length)
 
-    cross_length = sum(cross_distances) / len(cross_distances) if cross_distances else 0.0
+    between_loop_length = (
+        sum(between_loop_distances) / len(between_loop_distances)
+        if between_loop_distances else 0.0
+    )
+    # The working bridge interpretation treats the between-loop direction as
+    # the editable path and the along-loop direction as the cross section.
+    path_length = between_loop_length
+    cross_length = along_loop_length
     path_cross_ratio = (path_length / cross_length) if cross_length > 1.0e-12 else float('inf')
     return {
         'path_length': path_length,
@@ -90,7 +97,7 @@ def _span_metrics_from_verts(component_verts, strip_group):
             'component_path_cross_ratio': 0.0,
         }
 
-    path_vectors = []
+    along_loop_vectors = []
     for loop in loops:
         if len(loop) < 2:
             continue
@@ -98,35 +105,39 @@ def _span_metrics_from_verts(component_verts, strip_group):
         if is_closed:
             pairs.append((loop[-1], loop[0]))
         for vert_a, vert_b in pairs:
-            path_vectors.append(vert_b.co - vert_a.co)
+            along_loop_vectors.append(vert_b.co - vert_a.co)
 
-    cross_vectors = []
+    between_loop_vectors = []
     if len(loops) >= 2:
         pair_count = min(len(loop) for loop in loops)
         for index in range(pair_count):
             ring_positions = [loop[index].co for loop in loops]
             for pos_a, pos_b in zip(ring_positions, ring_positions[1:]):
-                cross_vectors.append(pos_b - pos_a)
+                between_loop_vectors.append(pos_b - pos_a)
 
-    path_axis = _aligned_average_axis(path_vectors)
-    cross_axis = _aligned_average_axis(cross_vectors)
-    if path_axis is None or cross_axis is None:
+    along_loop_axis = _aligned_average_axis(along_loop_vectors)
+    between_loop_axis = _aligned_average_axis(between_loop_vectors)
+    if along_loop_axis is None or between_loop_axis is None:
         return {
             'component_path_span': 0.0,
             'component_cross_span': 0.0,
             'component_path_cross_ratio': 0.0,
         }
 
-    # Keep the cross axis perpendicular enough to the path axis to measure width
+    # Keep the between-loop axis perpendicular enough to the along-loop axis.
     # across the whole face component instead of letting skew collapse the span.
-    orthogonal_cross = cross_axis - (path_axis * cross_axis.dot(path_axis))
+    orthogonal_cross = between_loop_axis - (
+        along_loop_axis * between_loop_axis.dot(along_loop_axis)
+    )
     if orthogonal_cross.length > _VECTOR_TOLERANCE:
-        cross_axis = orthogonal_cross.normalized()
+        between_loop_axis = orthogonal_cross.normalized()
 
-    path_projections = [vert.co.dot(path_axis) for vert in component_verts]
-    cross_projections = [vert.co.dot(cross_axis) for vert in component_verts]
-    path_span = max(path_projections) - min(path_projections)
-    cross_span = max(cross_projections) - min(cross_projections)
+    along_loop_projections = [vert.co.dot(along_loop_axis) for vert in component_verts]
+    between_loop_projections = [vert.co.dot(between_loop_axis) for vert in component_verts]
+    along_loop_span = max(along_loop_projections) - min(along_loop_projections)
+    between_loop_span = max(between_loop_projections) - min(between_loop_projections)
+    path_span = between_loop_span
+    cross_span = along_loop_span
     path_cross_ratio = (
         path_span / cross_span
         if cross_span > _VECTOR_TOLERANCE else float('inf')
@@ -157,12 +168,12 @@ def _sortable_metric(value):
 
 def _strip_candidate_sort_key(candidate):
     return (
-        _sortable_metric(candidate.get('component_path_span', 0.0)),
-        _sortable_metric(candidate.get('component_path_cross_ratio', 0.0)),
         -_sortable_metric(candidate.get('component_cross_span', 0.0)),
-        _sortable_metric(candidate['path_length']),
-        _sortable_metric(candidate['path_cross_ratio']),
+        _sortable_metric(candidate.get('component_path_cross_ratio', 0.0)),
+        _sortable_metric(candidate.get('component_path_span', 0.0)),
         -_sortable_metric(candidate['cross_length']),
+        _sortable_metric(candidate['path_cross_ratio']),
+        _sortable_metric(candidate['path_length']),
         -len(candidate.get('extra_faces', ())),
     )
 
