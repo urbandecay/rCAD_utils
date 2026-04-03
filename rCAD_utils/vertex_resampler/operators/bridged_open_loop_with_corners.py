@@ -7,6 +7,7 @@ from .open_strip_common import (
     _face_components,
     _faces_to_component_verts,
     _detect_open_strip_component,
+    _strip_length_metrics,
     _selected_face_set,
     detect_open_strip_selection,
 )
@@ -364,14 +365,16 @@ def _open_face_strip_candidates(face_component):
             'extra_faces': extra_faces,
             'face_count': len(strip_faces),
             'boundary_components': boundary_components,
+            **_strip_length_metrics(rings_data),
         })
 
     return sorted(
         candidates,
         key=lambda item: (
-            item['face_count'],
+            item['path_cross_ratio'],
+            item['path_length'],
+            -item['cross_length'],
             -len(item['extra_faces']),
-            len(item['rings'][0][0]),
         ),
         reverse=True,
     )

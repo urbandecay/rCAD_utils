@@ -11,6 +11,8 @@ _POINT_HANDLER = None
 _TEXT_HANDLER = None
 _ACTIVE_POINTS = []
 _PENDING_POINTS = []
+_ACTIVE_SEGMENTS = []
+_PENDING_SEGMENTS = []
 
 
 def _tag_redraw():
@@ -55,20 +57,31 @@ def _remove_handlers():
 
 
 def _draw_points():
-    if not _ACTIVE_POINTS:
+    if not _ACTIVE_POINTS and not _ACTIVE_SEGMENTS:
         return
 
-    coords = [item['co'] for item in _ACTIVE_POINTS]
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
-    batch = batch_for_shader(shader, 'POINTS', {"pos": coords})
 
     gpu.state.blend_set('ALPHA')
     gpu.state.depth_test_set('NONE')
-    gpu.state.point_size_set(10.0)
-    shader.bind()
-    shader.uniform_float("color", (1.0, 0.35, 0.1, 0.95))
-    batch.draw(shader)
-    gpu.state.point_size_set(1.0)
+    if _ACTIVE_SEGMENTS:
+        coords = []
+        for item in _ACTIVE_SEGMENTS:
+            coords.extend((item['a'], item['b']))
+        batch = batch_for_shader(shader, 'LINES', {"pos": coords})
+        gpu.state.line_width_set(2.0)
+        shader.bind()
+        shader.uniform_float("color", (0.1, 1.0, 1.0, 0.9))
+        batch.draw(shader)
+        gpu.state.line_width_set(1.0)
+    if _ACTIVE_POINTS:
+        coords = [item['co'] for item in _ACTIVE_POINTS]
+        batch = batch_for_shader(shader, 'POINTS', {"pos": coords})
+        gpu.state.point_size_set(10.0)
+        shader.bind()
+        shader.uniform_float("color", (1.0, 0.35, 0.1, 0.95))
+        batch.draw(shader)
+        gpu.state.point_size_set(1.0)
     gpu.state.depth_test_set('LESS_EQUAL')
     gpu.state.blend_set('NONE')
 
@@ -97,6 +110,7 @@ def _draw_labels():
 
 def begin_capture():
     _PENDING_POINTS.clear()
+    _PENDING_SEGMENTS.clear()
 
 
 def add_points(points, label_prefix="A"):
@@ -108,10 +122,20 @@ def add_points(points, label_prefix="A"):
         })
 
 
+def add_segments(segments):
+    for point_a, point_b in segments:
+        _PENDING_SEGMENTS.append({
+            'a': point_a,
+            'b': point_b,
+        })
+
+
 def end_capture():
     _ACTIVE_POINTS[:] = list(_PENDING_POINTS)
+    _ACTIVE_SEGMENTS[:] = list(_PENDING_SEGMENTS)
     _PENDING_POINTS.clear()
-    if _ACTIVE_POINTS:
+    _PENDING_SEGMENTS.clear()
+    if _ACTIVE_POINTS or _ACTIVE_SEGMENTS:
         _ensure_handlers()
     else:
         _remove_handlers()
@@ -120,7 +144,9 @@ def end_capture():
 
 def clear_overlay():
     _PENDING_POINTS.clear()
+    _PENDING_SEGMENTS.clear()
     _ACTIVE_POINTS.clear()
+    _ACTIVE_SEGMENTS.clear()
     _remove_handlers()
     _tag_redraw()
 

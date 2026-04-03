@@ -10,6 +10,49 @@ def _edge_between(vert_a, vert_b):
     return None
 
 
+def _loop_path_length(loop, is_closed):
+    if len(loop) < 2:
+        return 0.0
+
+    pairs = list(zip(loop, loop[1:]))
+    if is_closed:
+        pairs.append((loop[-1], loop[0]))
+
+    return sum(
+        (vert_a.co - vert_b.co).length
+        for vert_a, vert_b in pairs
+    )
+
+
+def _strip_length_metrics(strip_group):
+    loops, is_closed = strip_group
+    if not loops:
+        return {
+            'path_length': 0.0,
+            'cross_length': 0.0,
+            'path_cross_ratio': 0.0,
+        }
+
+    path_lengths = [_loop_path_length(loop, is_closed) for loop in loops if len(loop) >= 2]
+    path_length = sum(path_lengths) / len(path_lengths) if path_lengths else 0.0
+
+    cross_distances = []
+    if len(loops) >= 2:
+        pair_count = min(len(loop) for loop in loops)
+        for index in range(pair_count):
+            ring_positions = [loop[index].co for loop in loops]
+            for pos_a, pos_b in zip(ring_positions, ring_positions[1:]):
+                cross_distances.append((pos_a - pos_b).length)
+
+    cross_length = sum(cross_distances) / len(cross_distances) if cross_distances else 0.0
+    path_cross_ratio = (path_length / cross_length) if cross_length > 1.0e-12 else float('inf')
+    return {
+        'path_length': path_length,
+        'cross_length': cross_length,
+        'path_cross_ratio': path_cross_ratio,
+    }
+
+
 def _selected_face_set(bm, sel_set):
     return {
         face for face in bm.faces
@@ -180,7 +223,7 @@ def _detect_open_strip_component(component):
         candidate_cut_edges = boundary_edges
 
     best_pair = None
-    best_length = -1.0
+    best_score = None
 
     for index, edge_a in enumerate(candidate_cut_edges):
         verts_a = set(edge_a.verts)
@@ -206,14 +249,17 @@ def _detect_open_strip_component(component):
             if len(boundary_edges) != 2 * len(chain_a):
                 continue
 
-            total_length = 0.0
-            for idx in range(len(chain_a) - 1):
-                total_length += (chain_a[idx].co - chain_a[idx + 1].co).length
-                total_length += (aligned_b[idx].co - aligned_b[idx + 1].co).length
+            candidate_pair = ([chain_a, aligned_b], False)
+            metrics = _strip_length_metrics(candidate_pair)
+            score = (
+                metrics['path_cross_ratio'],
+                metrics['path_length'],
+                -metrics['cross_length'],
+            )
 
-            if total_length > best_length:
-                best_length = total_length
-                best_pair = ([chain_a, aligned_b], False)
+            if best_score is None or score > best_score:
+                best_score = score
+                best_pair = candidate_pair
 
     return best_pair
 
@@ -388,6 +434,7 @@ def _strip_candidates(face_component):
                 'outside_side_faces': outside_side_faces,
                 'face_count': len(shaft_faces),
                 'loop_size': len(strip_group[0][0]),
+                **_strip_length_metrics(strip_group),
             })
 
     return candidates
@@ -406,14 +453,15 @@ def _choose_strip_candidate(candidates):
     chosen = max(
         pool,
         key=lambda candidate: (
-            candidate['face_count'],
+            candidate['path_cross_ratio'],
+            candidate['path_length'],
+            -candidate['cross_length'],
             -len(candidate['extra_faces']),
-            candidate['loop_size'],
         ),
     )
     if exact_candidates:
-        return chosen, "picked exact candidate with no extra faces"
-    return chosen, "no exact candidate; picked longest candidate with fewest extra faces"
+        return chosen, "picked exact candidate with best geometric path/cross ratio"
+    return chosen, "no exact candidate; picked best geometric path/cross ratio"
 
 
 def _group_vert_set(group):

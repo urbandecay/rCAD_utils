@@ -82,6 +82,57 @@ def _capture_anchor_overlay_points(obj, ring_group):
         anchor_overlay.add_points(points)
 
 
+def _capture_cross_section_overlay(obj, ring_group):
+    if obj is None or len(ring_group.rings) < 2:
+        return
+
+    matrix_world = obj.matrix_world
+    between_ring_segments = []
+    between_ring_lengths = []
+    for ring_a, ring_b in zip(ring_group.rings, ring_group.rings[1:]):
+        pair_count = min(len(ring_a.verts), len(ring_b.verts))
+        for index in range(pair_count):
+            vert_a = ring_a.verts[index]
+            vert_b = ring_b.verts[index]
+            if not (_vert_is_usable(vert_a) and _vert_is_usable(vert_b)):
+                continue
+            between_ring_segments.append((
+                matrix_world @ vert_a.co.copy(),
+                matrix_world @ vert_b.co.copy(),
+            ))
+            between_ring_lengths.append((vert_a.co - vert_b.co).length)
+
+    along_loop_segments = []
+    along_loop_lengths = []
+    for ring_info in ring_group.rings:
+        verts = ring_info.verts
+        if len(verts) < 2:
+            continue
+        for index in range(len(verts) - 1):
+            vert_a = verts[index]
+            vert_b = verts[index + 1]
+            if not (_vert_is_usable(vert_a) and _vert_is_usable(vert_b)):
+                continue
+            along_loop_segments.append((
+                matrix_world @ vert_a.co.copy(),
+                matrix_world @ vert_b.co.copy(),
+            ))
+            along_loop_lengths.append((vert_a.co - vert_b.co).length)
+
+    between_avg = (
+        sum(between_ring_lengths) / len(between_ring_lengths)
+        if between_ring_lengths else float('inf')
+    )
+    along_avg = (
+        sum(along_loop_lengths) / len(along_loop_lengths)
+        if along_loop_lengths else float('inf')
+    )
+
+    segments = between_ring_segments if between_avg <= along_avg else along_loop_segments
+    if segments:
+        anchor_overlay.add_segments(segments)
+
+
 def _sanitize_chain_verts(verts, closed):
     valid_verts = [v for v in verts if v.is_valid]
     if len(valid_verts) < 2:
@@ -500,6 +551,7 @@ def execute_aligned_loops_logic(
 
     bmesh.update_edit_mesh(obj.data)
     _capture_anchor_overlay_points(obj, ring_group)
+    _capture_cross_section_overlay(obj, ring_group)
     if report is not None:
         _report(
             report,
