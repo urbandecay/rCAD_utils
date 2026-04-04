@@ -1381,21 +1381,9 @@ def execute(bm, obj, direction, report=None, data=None):
         corner_face_positions.extend(_face_positions(record.get('corner_faces', set())))
 
     # --- Split seams ---
-    total_split_seams = 0
-    split_infos = []
-    for seam_index, seam_record in enumerate(seam_records, start=1):
-        _debug_step(
-            "seam split begin",
-            seam_index=seam_index,
-            support=seam_record['support'],
-            boundary_edge_count=len(seam_record['boundary_edges']),
-        )
-        seam_split_infos = _split_single_seam_record(bm, seam_record, seam_index=seam_index)
-        if seam_split_infos:
-            total_split_seams += 1
-            split_infos.extend(seam_split_infos)
-            continue
-        _debug_step("seam split failed", seam_index=seam_index)
+    _debug_step("seam split batch begin", seam_record_count=len(seam_records))
+    split_infos = _split_seam_records(bm, seam_records)
+    total_split_seams = len(split_infos)
 
     if total_split_seams == 0:
         if report is not None:
