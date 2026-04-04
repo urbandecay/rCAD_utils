@@ -146,6 +146,13 @@ def _live_bmesh_items(items):
     }
 
 
+def _sort_key_desc(sort_key):
+    return tuple(
+        -value if isinstance(value, (int, float)) else value
+        for value in sort_key
+    )
+
+
 def _connected_quad_faces(start_faces):
     live_start_faces = {
         face for face in start_faces
@@ -390,7 +397,7 @@ def _open_face_strip_candidates(face_component):
                 'edges': set(boundary_component),
             })
 
-        candidates.append({
+        candidate = {
             'strip_faces': set(strip_faces),
             'rings': rings_data,
             'extra_faces': extra_faces,
@@ -398,11 +405,13 @@ def _open_face_strip_candidates(face_component):
             'boundary_components': boundary_components,
             **_strip_length_metrics(rings_data),
             **_component_span_metrics(face_component, rings_data),
-        })
+        }
+        candidate['sort_key'] = _strip_candidate_sort_key(candidate)
+        candidates.append(candidate)
 
     return sorted(
         candidates,
-        key=_strip_candidate_sort_key,
+        key=lambda item: item['sort_key'],
         reverse=True,
     )
 
@@ -717,6 +726,7 @@ def _all_seam_records(bm):
                 'strip_faces': strip_faces,
                 'extra_faces': _live_bmesh_items(candidate.get('extra_faces', set())),
             }
+            normalized_candidate['sort_key'] = candidate.get('sort_key', _strip_candidate_sort_key(normalized_candidate))
             chosen_candidates.append(normalized_candidate)
             occupied_faces.update(strip_faces)
 
@@ -759,7 +769,7 @@ def _all_seam_records(bm):
                 record['candidate_data'][candidate_index] = {
                     'shaft_faces': set(shaft_faces),
                     'corner_faces': set(corner_faces),
-                    'sort_key': _strip_candidate_sort_key(candidate),
+                    'sort_key': candidate.get('sort_key', ()),
                 }
         _debug_step(
             "candidate chain",
@@ -799,7 +809,7 @@ def _all_seam_records(bm):
         seam_records.values(),
         key=lambda item: (
             -item['support'],
-            tuple(-value if isinstance(value, (int, float)) else value for value in item.get('sort_key', ())),
+            _sort_key_desc(item.get('sort_key', ())),
             item['key'],
         )
     )
