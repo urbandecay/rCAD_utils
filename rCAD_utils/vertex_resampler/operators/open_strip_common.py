@@ -264,6 +264,146 @@ def _order_path_from_edges(edges):
     return ordered if len(ordered) == len(adjacency) else None
 
 
+def _order_cycle_from_edges(edges):
+    live_edges = list(edges)
+    if not live_edges:
+        return None
+
+    adjacency = {}
+    for edge in live_edges:
+        vert_a, vert_b = edge.verts
+        adjacency.setdefault(vert_a, []).append(edge)
+        adjacency.setdefault(vert_b, []).append(edge)
+
+    if any(len(linked_edges) != 2 for linked_edges in adjacency.values()):
+        return None
+
+    start_edge = min(live_edges, key=lambda item: item.index)
+    start_vert = min(start_edge.verts, key=lambda item: item.index)
+    current_vert = start_edge.other_vert(start_vert)
+    ordered_edges = [start_edge]
+    ordered_verts = [start_vert, current_vert]
+    visited_edges = {start_edge}
+
+    while len(visited_edges) < len(live_edges):
+        next_edges = [
+            edge for edge in adjacency.get(current_vert, [])
+            if edge not in visited_edges
+        ]
+        if len(next_edges) != 1:
+            return None
+
+        next_edge = next_edges[0]
+        visited_edges.add(next_edge)
+        ordered_edges.append(next_edge)
+        current_vert = next_edge.other_vert(current_vert)
+        if len(visited_edges) < len(live_edges):
+            ordered_verts.append(current_vert)
+
+    if current_vert is not start_vert or len(ordered_verts) != len(live_edges):
+        return None
+
+    return ordered_verts, ordered_edges
+
+
+def _cycle_chain_between(ordered_verts, start_edge_index, end_edge_index):
+    count = len(ordered_verts)
+    if count == 0:
+        return None
+
+    ordered = []
+    index = (start_edge_index + 1) % count
+    while True:
+        ordered.append(ordered_verts[index])
+        if index == end_edge_index:
+            break
+        index = (index + 1) % count
+        if len(ordered) > count:
+            return None
+
+    return ordered
+
+
+def _candidate_pair_metrics(component_set, chain_a, aligned_b):
+    if len(chain_a) != len(aligned_b) or len(chain_a) < 2:
+        return None
+
+    candidate_pair = ([chain_a, aligned_b], False)
+    metrics = {
+        **_strip_length_metrics(candidate_pair),
+        **_span_metrics_from_verts(component_set, candidate_pair),
+        'extra_faces': (),
+    }
+    return candidate_pair, _strip_candidate_sort_key(metrics)
+
+
+def _fast_detect_open_strip_component(
+    component_set,
+    component_edges,
+    boundary_edges,
+    candidate_cut_edges,
+    edge_map,
+):
+    ordered_cycle = _order_cycle_from_edges(boundary_edges)
+    if ordered_cycle is None:
+        return None
+
+    ordered_verts, ordered_boundary_edges = ordered_cycle
+    boundary_edge_count = len(ordered_boundary_edges)
+    if boundary_edge_count < 4 or boundary_edge_count % 2 != 0:
+        return None
+
+    half_turn = boundary_edge_count // 2
+    cut_edge_to_index = {
+        edge: index for index, edge in enumerate(ordered_boundary_edges)
+    }
+    candidate_cut_set = set(candidate_cut_edges)
+
+    best_pair = None
+    best_score = None
+    seen_pairs = set()
+
+    for edge in candidate_cut_edges:
+        start_index = cut_edge_to_index.get(edge)
+        if start_index is None:
+            continue
+        opposite_index = (start_index + half_turn) % boundary_edge_count
+        opposite_edge = ordered_boundary_edges[opposite_index]
+        if opposite_edge not in candidate_cut_set:
+            continue
+
+        pair_key = tuple(sorted((edge.index, opposite_edge.index)))
+        if pair_key in seen_pairs:
+            continue
+        seen_pairs.add(pair_key)
+
+        chain_a = _cycle_chain_between(ordered_verts, start_index, opposite_index)
+        chain_b = _cycle_chain_between(ordered_verts, opposite_index, start_index)
+        if chain_a is None or chain_b is None:
+            continue
+
+        aligned_b = _align_chain_pair(chain_a, chain_b, edge_map)
+        if aligned_b is None:
+            continue
+
+        expected_edge_count = (2 * (len(chain_a) - 1)) + len(chain_a)
+        if len(component_edges) != expected_edge_count:
+            continue
+        if boundary_edge_count != 2 * len(chain_a):
+            continue
+
+        pair_data = _candidate_pair_metrics(component_set, chain_a, aligned_b)
+        if pair_data is None:
+            continue
+
+        candidate_pair, score = pair_data
+        if best_score is None or score > best_score:
+            best_score = score
+            best_pair = candidate_pair
+
+    return best_pair
+
+
 def _split_boundary_chains(boundary_edges, cut_edges):
     cut_set = set(cut_edges)
     remaining = [edge for edge in boundary_edges if edge not in cut_set]
@@ -347,6 +487,16 @@ def _detect_open_strip_component(component):
     if len(candidate_cut_edges) < 2:
         candidate_cut_edges = boundary_edges
 
+    fast_pair = _fast_detect_open_strip_component(
+        component_set,
+        component_edges,
+        boundary_edges,
+        candidate_cut_edges,
+        edge_map,
+    )
+    if fast_pair is not None:
+        return fast_pair
+
     best_pair = None
     best_score = None
 
@@ -374,13 +524,10 @@ def _detect_open_strip_component(component):
             if len(boundary_edges) != 2 * len(chain_a):
                 continue
 
-            candidate_pair = ([chain_a, aligned_b], False)
-            metrics = {
-                **_strip_length_metrics(candidate_pair),
-                **_span_metrics_from_verts(component_set, candidate_pair),
-                'extra_faces': (),
-            }
-            score = _strip_candidate_sort_key(metrics)
+            pair_data = _candidate_pair_metrics(component_set, chain_a, aligned_b)
+            if pair_data is None:
+                continue
+            candidate_pair, score = pair_data
 
             if best_score is None or score > best_score:
                 best_score = score
