@@ -848,6 +848,15 @@ def _tip_neighbor_edge(edge, tip_position, neighbor_position):
 
 def _separate_stuck_boundary_tips(bm, boundary_components, seam_index=None):
     changed = False
+    vert_lookup = _build_vert_position_lookup(bm)
+    lookup_dirty = False
+
+    def _live_verts(position):
+        nonlocal vert_lookup, lookup_dirty
+        if lookup_dirty:
+            vert_lookup = _build_vert_position_lookup(bm)
+            lookup_dirty = False
+        return _verts_at_position(bm, position, lookup=vert_lookup)
 
     for component_index, component in enumerate(boundary_components, start=1):
         boundary_edges = component.get('boundary_edges', set())
@@ -865,7 +874,7 @@ def _separate_stuck_boundary_tips(bm, boundary_components, seam_index=None):
         )
 
         for tip_position, neighbor_position in tip_specs:
-            live_tip_verts = _verts_at_position(bm, tip_position)
+            live_tip_verts = _live_verts(tip_position)
             _debug_step(
                 "tip inspect",
                 seam_index=seam_index,
@@ -892,6 +901,7 @@ def _separate_stuck_boundary_tips(bm, boundary_components, seam_index=None):
                 continue
 
             separated = bmesh.utils.vert_separate(tip_vert, seam_edges)
+            lookup_dirty = True
             _debug_step(
                 "tip vert separate",
                 seam_index=seam_index,
@@ -902,7 +912,7 @@ def _separate_stuck_boundary_tips(bm, boundary_components, seam_index=None):
                 changed = True
                 continue
 
-            live_tip_verts = _verts_at_position(bm, tip_position)
+            live_tip_verts = _live_verts(tip_position)
             if len(live_tip_verts) != 1:
                 continue
 
@@ -921,17 +931,18 @@ def _separate_stuck_boundary_tips(bm, boundary_components, seam_index=None):
                 loop_count=len(candidate_loops),
             )
             for loop in candidate_loops:
-                live_tip_verts = _verts_at_position(bm, tip_position)
+                live_tip_verts = _live_verts(tip_position)
                 if len(live_tip_verts) > 1:
                     break
                 try:
                     bmesh.utils.loop_separate(loop)
+                    lookup_dirty = True
                     _debug_step(
                         "tip loop separated",
                         seam_index=seam_index,
                         component_index=component_index,
                         face_index=getattr(loop.face, "index", None),
-                        live_tip_count=len(_verts_at_position(bm, tip_position)),
+                        live_tip_count=len(_live_verts(tip_position)),
                     )
                     changed = True
                 except Exception:
