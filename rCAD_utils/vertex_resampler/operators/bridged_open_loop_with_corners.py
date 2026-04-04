@@ -1419,24 +1419,10 @@ def execute(bm, obj, direction, report=None, data=None):
     _debug_step("shaft faces", count=len(shaft_faces))
     _select_only_faces(bm, shaft_faces)
     open_groups = _open_groups_from_shaft_faces(shaft_faces)
-    used_full_redetect = False
-    if not open_groups:
-        fresh_data = detect_open_strip_selection(bm)
-        used_full_redetect = True
-        if (
-            fresh_data is None
-            or not _groups_are_open(fresh_data.get('groups', []))
-            or fresh_data.get('has_extra_selected_faces')
-            or fresh_data.get('has_outside_side_faces')
-        ):
-            open_groups = []
-        else:
-            open_groups = list(fresh_data['groups'])
     _debug_step(
         "post-split filter",
         raw_count=len(open_groups),
         kept=len(open_groups),
-        used_full_redetect=used_full_redetect,
     )
 
     if not open_groups:

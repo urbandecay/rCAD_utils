@@ -234,36 +234,6 @@ def _fully_selected_faces(edge, sel_set):
     )
 
 
-def _order_path_from_edges(edges):
-    adjacency = {}
-    for edge in edges:
-        v1, v2 = edge.verts
-        adjacency.setdefault(v1, []).append(v2)
-        adjacency.setdefault(v2, []).append(v1)
-
-    endpoints = [vert for vert, neighbors in adjacency.items() if len(neighbors) == 1]
-    if len(endpoints) != 2:
-        return None
-
-    ordered = [endpoints[0]]
-    visited = {endpoints[0]}
-    current = endpoints[0]
-
-    while len(ordered) < len(adjacency):
-        next_vert = None
-        for neighbor in adjacency[current]:
-            if neighbor not in visited:
-                next_vert = neighbor
-                break
-        if next_vert is None:
-            break
-        ordered.append(next_vert)
-        visited.add(next_vert)
-        current = next_vert
-
-    return ordered if len(ordered) == len(adjacency) else None
-
-
 def _order_cycle_from_edges(edges):
     live_edges = list(edges)
     if not live_edges:
@@ -404,40 +374,6 @@ def _fast_detect_open_strip_component(
     return best_pair
 
 
-def _split_boundary_chains(boundary_edges, cut_edges):
-    cut_set = set(cut_edges)
-    remaining = [edge for edge in boundary_edges if edge not in cut_set]
-    if not remaining:
-        return None
-
-    visited = set()
-    chains = []
-    for edge in remaining:
-        if edge in visited:
-            continue
-        stack = [edge]
-        component_edges = []
-        visited.add(edge)
-
-        while stack:
-            current = stack.pop()
-            component_edges.append(current)
-            current_verts = set(current.verts)
-            for other in remaining:
-                if other in visited:
-                    continue
-                if current_verts.intersection(other.verts):
-                    visited.add(other)
-                    stack.append(other)
-
-        ordered = _order_path_from_edges(component_edges)
-        if ordered is None:
-            return None
-        chains.append(ordered)
-
-    return chains if len(chains) == 2 else None
-
-
 def _edge_lookup(edges):
     return {frozenset(edge.verts): edge for edge in edges}
 
@@ -494,46 +430,7 @@ def _detect_open_strip_component(component):
         candidate_cut_edges,
         edge_map,
     )
-    if fast_pair is not None:
-        return fast_pair
-
-    best_pair = None
-    best_score = None
-
-    for index, edge_a in enumerate(candidate_cut_edges):
-        verts_a = set(edge_a.verts)
-        for edge_b in candidate_cut_edges[index + 1:]:
-            if verts_a.intersection(edge_b.verts):
-                continue
-
-            chains = _split_boundary_chains(boundary_edges, (edge_a, edge_b))
-            if chains is None:
-                continue
-
-            chain_a, chain_b = chains
-            if len(chain_a) != len(chain_b) or len(chain_a) < 2:
-                continue
-
-            aligned_b = _align_chain_pair(chain_a, chain_b, edge_map)
-            if aligned_b is None:
-                continue
-
-            expected_edge_count = (2 * (len(chain_a) - 1)) + len(chain_a)
-            if len(component_edges) != expected_edge_count:
-                continue
-            if len(boundary_edges) != 2 * len(chain_a):
-                continue
-
-            pair_data = _candidate_pair_metrics(component_set, chain_a, aligned_b)
-            if pair_data is None:
-                continue
-            candidate_pair, score = pair_data
-
-            if best_score is None or score > best_score:
-                best_score = score
-                best_pair = candidate_pair
-
-    return best_pair
+    return fast_pair
 
 
 def _selected_face_neighbors(face, selected_faces):
