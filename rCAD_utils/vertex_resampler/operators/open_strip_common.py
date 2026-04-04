@@ -9,9 +9,7 @@ _LAST_DETECT_REASON = None
 
 
 def _trace_detect(message, **details):
-    print(f"[vertex_resampler:open_strip_detect] {message}")
-    for key, value in details.items():
-        print(f"  {key}: {value}")
+    return
 
 
 def _set_last_detect_reason(reason):
