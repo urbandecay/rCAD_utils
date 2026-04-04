@@ -216,6 +216,38 @@ def _selected_component_edges(component):
     return list(edges)
 
 
+def _selected_vert_components(selected_verts):
+    if not selected_verts:
+        return []
+
+    selected_set = set(selected_verts)
+    visited = set()
+    components = []
+
+    for vert in sorted(selected_verts, key=lambda item: item.index):
+        if vert in visited:
+            continue
+
+        stack = [vert]
+        component = []
+        visited.add(vert)
+
+        while stack:
+            current = stack.pop()
+            component.append(current)
+            for edge in current.link_edges:
+                other = edge.other_vert(current)
+                if other not in selected_set or other in visited:
+                    continue
+                visited.add(other)
+                stack.append(other)
+
+        if component:
+            components.append(component)
+
+    return components
+
+
 def _selected_components(bm):
     selected_verts = [vert for vert in bm.verts if vert.select]
     visited = set()
@@ -777,9 +809,6 @@ def _terminal_subset_range(group, selected_verts):
 
         start_index = selected_indices[0]
         end_index = selected_indices[-1]
-        expected = list(range(start_index, end_index + 1))
-        if selected_indices != expected:
-            return None
 
         return loop_index, start_index, end_index
 
@@ -804,6 +833,31 @@ def _trim_group_to_terminal_subset(group, selected_verts):
 
 
 def _detect_open_strip_from_endpoint_seed(selected_verts):
+    components = _selected_vert_components(selected_verts)
+    if len(components) > 1:
+        _trace_detect(
+            "Splitting endpoint-seed detection into independent selected components.",
+            component_count=len(components),
+            component_sizes=[len(component) for component in components],
+        )
+
+        groups = []
+        for component in components:
+            component_data = _detect_open_strip_from_endpoint_seed(set(component))
+            if component_data is None:
+                return None
+            groups.extend(component_data.get('groups', []))
+
+        if not groups:
+            return None
+
+        return {
+            'groups': groups,
+            'components': [],
+            'has_extra_selected_faces': False,
+            'has_outside_side_faces': False,
+        }
+
     _trace_detect(
         "Trying endpoint-seed bridge expansion.",
         selected_vert_count=len(selected_verts),
@@ -834,7 +888,7 @@ def _detect_open_strip_from_endpoint_seed(selected_verts):
         if trimmed_group is None:
             loops, _is_closed = direct_group
             _trace_detect(
-                "Endpoint seed direct-face detect rejected: selection is not a contiguous subset of either terminal loop.",
+                "Endpoint seed direct-face detect rejected: selection does not lie on a single terminal loop.",
                 selected_verts=[vert_ref(vert) for vert in sorted(selected_verts, key=lambda item: item.index)],
                 first_loop=loop_ref(loops[0]) if loops else [],
                 last_loop=loop_ref(loops[-1]) if loops else [],
