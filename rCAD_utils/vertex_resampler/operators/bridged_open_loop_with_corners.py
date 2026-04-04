@@ -37,15 +37,6 @@ def _debug_step(step, **details):
         print(f"  {key}: {value}")
 
 
-def _split_positions_from_edges(edges):
-    positions = []
-    for edge in edges:
-        if not getattr(edge, "is_valid", False):
-            continue
-        positions.append(tuple(vert.co.copy() for vert in edge.verts))
-    return positions
-
-
 def _face_indices(faces):
     return {
         face.index for face in faces
@@ -197,44 +188,6 @@ def _connected_quad_faces(start_faces):
     return visited
 
 
-def _edge_components(edges):
-    live_edges = {
-        edge for edge in edges
-        if edge is not None and getattr(edge, "is_valid", False)
-    }
-    if not live_edges:
-        return []
-
-    vert_to_edges = {}
-    for edge in live_edges:
-        vert_a, vert_b = edge.verts
-        vert_to_edges.setdefault(vert_a, set()).add(edge)
-        vert_to_edges.setdefault(vert_b, set()).add(edge)
-
-    components = []
-    visited = set()
-    for edge in live_edges:
-        if edge in visited:
-            continue
-        stack = [edge]
-        component = set()
-
-        while stack:
-            current = stack.pop()
-            if current in visited:
-                continue
-            visited.add(current)
-            component.add(current)
-            for vert in current.verts:
-                for neighbor in vert_to_edges.get(vert, ()):
-                    if neighbor not in visited:
-                        stack.append(neighbor)
-
-        components.append(component)
-
-    return components
-
-
 def _ordered_face_edges(face):
     loops = list(face.loops)
     if len(loops) != 4:
@@ -265,67 +218,6 @@ def _edge_orientation_bit(face, edge):
         return None
 
     return edge_index % 2
-
-
-def _open_candidate_strip_faces(start_face, start_bit, selected_faces):
-    oriented_faces = {start_face: start_bit}
-    stack = [start_face]
-
-    while stack:
-        current = stack.pop()
-        ordered_edges = _ordered_face_edges(current)
-        if ordered_edges is None:
-            return None
-
-        bit = oriented_faces[current]
-        chosen_edges = (
-            ordered_edges[bit],
-            ordered_edges[(bit + 2) % 4],
-        )
-
-        for edge in chosen_edges:
-            neighbor = _quad_face_neighbor(current, edge, selected_faces)
-            if neighbor is None:
-                continue
-
-            neighbor_bit = _edge_orientation_bit(neighbor, edge)
-            if neighbor_bit is None:
-                return None
-
-            existing_bit = oriented_faces.get(neighbor)
-            if existing_bit is None:
-                oriented_faces[neighbor] = neighbor_bit
-                stack.append(neighbor)
-                continue
-            if existing_bit != neighbor_bit:
-                return None
-
-    subset = set(oriented_faces)
-    if len(subset) < 2:
-        return None
-
-    endpoint_faces = 0
-    for face, bit in oriented_faces.items():
-        ordered_edges = _ordered_face_edges(face)
-        if ordered_edges is None:
-            return None
-
-        neighbors = []
-        for edge in (ordered_edges[bit], ordered_edges[(bit + 2) % 4]):
-            neighbor = _quad_face_neighbor(face, edge, subset)
-            if neighbor is not None:
-                neighbors.append(neighbor)
-
-        distinct_neighbors = len(set(neighbors))
-        if distinct_neighbors not in {1, 2}:
-            return None
-        if distinct_neighbors == 1:
-            endpoint_faces += 1
-
-    if endpoint_faces != 2:
-        return None
-
-    return subset
 
 
 def _open_face_strip_candidates(face_component):
@@ -688,22 +580,6 @@ def _select_only_edges(bm, selected_edges):
                 vert.select = True
 
 
-def _select_only_cross_section(bm, seam_record):
-    boundary_edges = _live_bmesh_items(seam_record.get('boundary_edges', set()))
-    _select_only_edges(bm, boundary_edges)
-
-
-def _subtract_live_faces(face_set, removed_faces):
-    removed = {
-        face for face in removed_faces
-        if face is not None and getattr(face, "is_valid", False)
-    }
-    return {
-        face for face in face_set
-        if face is not None and getattr(face, "is_valid", False) and face not in removed
-    }
-
-
 def _canonical_chain_key(chain):
     ids = tuple(
         vert.index for vert in chain
@@ -882,16 +758,6 @@ def _group_loops(group_data):
     return list(group_data[0])
 
 
-def _tip_neighbor_edge(edge, tip_position, neighbor_position):
-    if not getattr(edge, "is_valid", False):
-        return False
-    vert_a, vert_b = edge.verts
-    return (
-        (_same_position(vert_a.co, tip_position) and _same_position(vert_b.co, neighbor_position))
-        or (_same_position(vert_b.co, tip_position) and _same_position(vert_a.co, neighbor_position))
-    )
-
-
 def _separate_stuck_boundary_tips(bm, boundary_components, seam_index=None):
     changed = False
     vert_lookup = _build_vert_position_lookup(bm)
@@ -1049,37 +915,6 @@ def _split_seam_records(bm, seam_records):
     bm.normal_update()
     vert_lookup = _build_vert_position_lookup(bm)
     return _split_infos_from_boundary_components(bm, boundary_components, vert_lookup=vert_lookup)
-
-
-def _split_single_seam_record(bm, seam_record, seam_index=None):
-    boundary_edges = _live_bmesh_items(seam_record.get('boundary_edges', set()))
-    shaft_faces = _live_bmesh_items(seam_record.get('shaft_faces', set()))
-    corner_faces = _live_bmesh_items(seam_record.get('corner_faces', set()))
-    if not boundary_edges or not shaft_faces or not corner_faces:
-        return False
-
-    split_edges = set(boundary_edges)
-    split_edges.update(_tip_shaft_rail_edges(boundary_edges, shaft_faces, corner_faces))
-    interface_chain_verts = _split_control_verts(boundary_edges)
-    boundary_component = {
-        'boundary_edges': set(boundary_edges),
-        'corner_faces': set(corner_faces),
-    }
-
-    bmesh.ops.split_edges(
-        bm,
-        edges=list(split_edges),
-        verts=list(interface_chain_verts),
-        use_verts=bool(interface_chain_verts),
-    )
-    bm.verts.ensure_lookup_table()
-    bm.edges.ensure_lookup_table()
-    bm.faces.ensure_lookup_table()
-    _separate_stuck_boundary_tips(bm, [boundary_component], seam_index=seam_index)
-    bm.select_flush_mode()
-    bm.normal_update()
-    vert_lookup = _build_vert_position_lookup(bm)
-    return _split_infos_from_boundary_components(bm, [boundary_component], vert_lookup=vert_lookup)
 
 
 def _verts_at_position(bm, position, tolerance=_POSITION_TOLERANCE, lookup=None):
