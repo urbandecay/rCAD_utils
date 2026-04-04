@@ -1087,11 +1087,12 @@ def _boundary_positions_from_records(seam_records):
     return positions
 
 
-def _weld_boundary_positions(bm, positions):
+def _weld_boundary_positions(bm, positions, vert_lookup=None):
     if not positions:
         return 0
 
-    vert_lookup = _build_vert_position_lookup(bm)
+    if vert_lookup is None:
+        vert_lookup = _build_vert_position_lookup(bm)
     targetmap = {}
     for position in positions:
         live_verts = _verts_at_position(bm, position, lookup=vert_lookup)
@@ -1293,8 +1294,9 @@ def _targetmap_from_split_clusters(split_infos):
     return targetmap
 
 
-def _targetmap_from_live_split_positions(bm, split_infos):
-    vert_lookup = _build_vert_position_lookup(bm)
+def _targetmap_from_live_split_positions(bm, split_infos, vert_lookup=None):
+    if vert_lookup is None:
+        vert_lookup = _build_vert_position_lookup(bm)
     targetmap = {}
     for split_info in split_infos:
         for cluster in split_info['clusters']:
@@ -1450,10 +1452,12 @@ def execute(bm, obj, direction, report=None, data=None):
             result = {'FINISHED'}
     finally:
         welded = _weld_live_open_loops(bm, split_infos)
+        vert_lookup = None
         if welded == 0:
-            welded = _weld_boundary_positions(bm, boundary_positions)
+            vert_lookup = _build_vert_position_lookup(bm)
+            welded = _weld_boundary_positions(bm, boundary_positions, vert_lookup=vert_lookup)
         if welded == 0:
-            targetmap = _targetmap_from_live_split_positions(bm, split_infos)
+            targetmap = _targetmap_from_live_split_positions(bm, split_infos, vert_lookup=vert_lookup)
             if not targetmap:
                 targetmap = _targetmap_from_split_clusters(split_infos)
             if targetmap:
