@@ -2,6 +2,7 @@
 
 from .open_strip_common import detect_open_strip_selection
 from .resample_common import execute_aligned_loops_logic
+from ..debug import debug_log
 
 
 def _selected_face_set(bm, sel_set):
@@ -293,20 +294,25 @@ def _legacy_corner_detect(bm):
 
 
 def detect(bm):
-    print("[vertex_resampler:dispatch] checking Corner")
+    debug_log("corner_detect", "Checking corner detector.")
     data = detect_open_strip_selection(bm)
     if data is None:
-        print("[vertex_resampler:dispatch] Corner rejected by shared detector")
+        debug_log("corner_detect", "Corner rejected by shared detector.")
         return None
 
     if data['has_extra_selected_faces'] or data['has_outside_side_faces']:
-        print("[vertex_resampler:dispatch] Corner matched via shared detector")
+        debug_log(
+            "corner_detect",
+            "Corner matched via shared detector.",
+            has_extra_selected_faces=data['has_extra_selected_faces'],
+            has_outside_side_faces=data['has_outside_side_faces'],
+        )
         return {
             'groups': data['groups'],
             'mode_label': 'Corner',
         }
 
-    print("[vertex_resampler:dispatch] Corner rejected by shared detector")
+    debug_log("corner_detect", "Corner rejected by shared detector flags.")
     return None
 
 

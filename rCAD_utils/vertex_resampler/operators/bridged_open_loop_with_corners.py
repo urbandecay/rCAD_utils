@@ -3,6 +3,7 @@
 import bmesh
 
 from . import bridged_open_loop
+from ..debug import debug_log
 from .open_strip_common import (
     _face_components,
     _faces_to_component_verts,
@@ -32,9 +33,7 @@ def _position_key(vec, tolerance):
 
 
 def _debug_step(step, **details):
-    print(f"[vertex_resampler:open_corner_split] {step}")
-    for key, value in details.items():
-        print(f"  {key}: {value}")
+    debug_log("open_corner_split", step, **details)
 
 
 def _face_indices(faces):
