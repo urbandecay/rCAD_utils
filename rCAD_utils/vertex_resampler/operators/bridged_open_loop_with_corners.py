@@ -139,6 +139,23 @@ def _selected_faces(bm):
     }
 
 
+def _open_groups_from_shaft_faces(shaft_faces):
+    live_shaft_faces = _live_bmesh_items(shaft_faces)
+    if not live_shaft_faces:
+        return []
+
+    open_groups = []
+    for face_component in _face_components(live_shaft_faces):
+        rings_data = _detect_open_strip_component(
+            _faces_to_component_verts(face_component)
+        )
+        if rings_data is None or rings_data[1]:
+            return []
+        open_groups.append(rings_data)
+
+    return open_groups
+
+
 def _live_bmesh_items(items):
     return {
         item for item in items
@@ -1401,17 +1418,26 @@ def execute(bm, obj, direction, report=None, data=None):
     shaft_faces = _live_faces_from_positions(bm, shaft_face_positions, lookup=face_lookup)
     _debug_step("shaft faces", count=len(shaft_faces))
     _select_only_faces(bm, shaft_faces)
-    fresh_data = detect_open_strip_selection(bm)
-    if (
-        fresh_data is None
-        or not _groups_are_open(fresh_data.get('groups', []))
-        or fresh_data.get('has_extra_selected_faces')
-        or fresh_data.get('has_outside_side_faces')
-    ):
-        open_groups = []
-    else:
-        open_groups = list(fresh_data['groups'])
-    _debug_step("post-split filter", raw_count=len(open_groups), kept=len(open_groups))
+    open_groups = _open_groups_from_shaft_faces(shaft_faces)
+    used_full_redetect = False
+    if not open_groups:
+        fresh_data = detect_open_strip_selection(bm)
+        used_full_redetect = True
+        if (
+            fresh_data is None
+            or not _groups_are_open(fresh_data.get('groups', []))
+            or fresh_data.get('has_extra_selected_faces')
+            or fresh_data.get('has_outside_side_faces')
+        ):
+            open_groups = []
+        else:
+            open_groups = list(fresh_data['groups'])
+    _debug_step(
+        "post-split filter",
+        raw_count=len(open_groups),
+        kept=len(open_groups),
+        used_full_redetect=used_full_redetect,
+    )
 
     if not open_groups:
         _debug_step("post-split detection failed")
