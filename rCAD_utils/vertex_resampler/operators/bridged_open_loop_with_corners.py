@@ -139,6 +139,13 @@ def _selected_faces(bm):
     }
 
 
+def _live_bmesh_items(items):
+    return {
+        item for item in items
+        if item is not None and getattr(item, "is_valid", False)
+    }
+
+
 def _connected_quad_faces(start_faces):
     live_start_faces = {
         face for face in start_faces
@@ -656,10 +663,7 @@ def _select_only_edges(bm, selected_edges):
 
 
 def _select_only_cross_section(bm, seam_record):
-    boundary_edges = {
-        edge for edge in seam_record.get('boundary_edges', set())
-        if edge is not None and getattr(edge, "is_valid", False)
-    }
+    boundary_edges = _live_bmesh_items(seam_record.get('boundary_edges', set()))
     _select_only_edges(bm, boundary_edges)
 
 
@@ -705,13 +709,15 @@ def _all_seam_records(bm):
         chosen_candidates = []
         occupied_faces = set()
         for candidate in candidates:
-            strip_faces = {
-                face for face in candidate.get('strip_faces', set())
-                if face is not None and getattr(face, "is_valid", False)
-            }
+            strip_faces = _live_bmesh_items(candidate.get('strip_faces', set()))
             if not strip_faces or strip_faces & occupied_faces:
                 continue
-            chosen_candidates.append(candidate)
+            normalized_candidate = {
+                **candidate,
+                'strip_faces': strip_faces,
+                'extra_faces': _live_bmesh_items(candidate.get('extra_faces', set())),
+            }
+            chosen_candidates.append(normalized_candidate)
             occupied_faces.update(strip_faces)
 
         _debug_step(
@@ -720,21 +726,12 @@ def _all_seam_records(bm):
             kept=len(chosen_candidates),
         )
         for candidate in chosen_candidates:
-            all_shaft_faces.update({
-                face for face in candidate.get('strip_faces', set())
-                if face is not None and getattr(face, "is_valid", False)
-            })
+            all_shaft_faces.update(candidate.get('strip_faces', set()))
 
         seam_entries = {}
         for candidate_index, candidate in enumerate(chosen_candidates, start=1):
-            shaft_faces = {
-                face for face in candidate.get('strip_faces', set())
-                if face is not None and getattr(face, "is_valid", False)
-            }
-            corner_faces = {
-                face for face in candidate.get('extra_faces', set())
-                if face is not None and getattr(face, "is_valid", False)
-            }
+            shaft_faces = candidate.get('strip_faces', set())
+            corner_faces = candidate.get('extra_faces', set())
             if not shaft_faces or not corner_faces:
                 continue
 
@@ -994,18 +991,9 @@ def _split_seam_records(bm, seam_records):
     interface_chain_verts = set()
     split_edges = set()
     for record in seam_records:
-        boundary_edges = {
-            edge for edge in record.get('boundary_edges', set())
-            if edge is not None and getattr(edge, "is_valid", False)
-        }
-        shaft_faces = {
-            face for face in record.get('shaft_faces', set())
-            if face is not None and getattr(face, "is_valid", False)
-        }
-        corner_faces = {
-            face for face in record.get('corner_faces', set())
-            if face is not None and getattr(face, "is_valid", False)
-        }
+        boundary_edges = _live_bmesh_items(record.get('boundary_edges', set()))
+        shaft_faces = _live_bmesh_items(record.get('shaft_faces', set()))
+        corner_faces = _live_bmesh_items(record.get('corner_faces', set()))
         if not boundary_edges or not shaft_faces or not corner_faces:
             continue
 
@@ -1037,18 +1025,9 @@ def _split_seam_records(bm, seam_records):
 
 
 def _split_single_seam_record(bm, seam_record, seam_index=None):
-    boundary_edges = {
-        edge for edge in seam_record.get('boundary_edges', set())
-        if edge is not None and getattr(edge, "is_valid", False)
-    }
-    shaft_faces = {
-        face for face in seam_record.get('shaft_faces', set())
-        if face is not None and getattr(face, "is_valid", False)
-    }
-    corner_faces = {
-        face for face in seam_record.get('corner_faces', set())
-        if face is not None and getattr(face, "is_valid", False)
-    }
+    boundary_edges = _live_bmesh_items(seam_record.get('boundary_edges', set()))
+    shaft_faces = _live_bmesh_items(seam_record.get('shaft_faces', set()))
+    corner_faces = _live_bmesh_items(seam_record.get('corner_faces', set()))
     if not boundary_edges or not shaft_faces or not corner_faces:
         return False
 
@@ -1091,10 +1070,7 @@ def _boundary_positions_from_records(seam_records):
     positions = []
     seen = set()
     for record in seam_records:
-        boundary_edges = {
-            edge for edge in record.get('boundary_edges', set())
-            if edge is not None and getattr(edge, "is_valid", False)
-        }
+        boundary_edges = _live_bmesh_items(record.get('boundary_edges', set()))
         if not boundary_edges:
             continue
         chain = _ordered_chain_verts(boundary_edges)
