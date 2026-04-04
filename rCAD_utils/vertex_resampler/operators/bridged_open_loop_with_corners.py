@@ -93,7 +93,25 @@ def _build_face_position_lookup(bm, tolerance=_FACE_POSITION_TOLERANCE):
     return lookup
 
 
-def _live_faces_from_positions(bm, positions, tolerance=_FACE_POSITION_TOLERANCE, lookup=None):
+def _cached_face_match(position, tolerance, lookup, match_cache=None):
+    cache_key = None
+    if match_cache is not None:
+        cache_key = (position.x, position.y, position.z)
+        if cache_key in match_cache:
+            return match_cache[cache_key]
+
+    matched_face = None
+    for candidate_position, face in lookup.get(_position_key(position, tolerance), []):
+        if (candidate_position - position).length <= tolerance:
+            matched_face = face
+            break
+
+    if match_cache is not None:
+        match_cache[cache_key] = matched_face
+    return matched_face
+
+
+def _live_faces_from_positions(bm, positions, tolerance=_FACE_POSITION_TOLERANCE, lookup=None, match_cache=None):
     live_faces = set()
     if not positions:
         return live_faces
@@ -102,10 +120,14 @@ def _live_faces_from_positions(bm, positions, tolerance=_FACE_POSITION_TOLERANCE
         lookup = _build_face_position_lookup(bm, tolerance=tolerance)
 
     for position in positions:
-        for candidate_position, face in lookup.get(_position_key(position, tolerance), []):
-            if (candidate_position - position).length <= tolerance:
-                live_faces.add(face)
-                break
+        matched_face = _cached_face_match(
+            position,
+            tolerance,
+            lookup,
+            match_cache=match_cache,
+        )
+        if matched_face is not None:
+            live_faces.add(matched_face)
 
     return live_faces
 
@@ -1471,11 +1493,22 @@ def execute(bm, obj, direction, report=None, data=None):
                     pass
         current_shaft_faces = _selected_faces(bm)
         face_lookup = _build_face_position_lookup(bm)
-        live_corner_faces = _live_faces_from_positions(bm, corner_face_positions, lookup=face_lookup)
+        face_match_cache = {}
+        live_corner_faces = _live_faces_from_positions(
+            bm,
+            corner_face_positions,
+            lookup=face_lookup,
+            match_cache=face_match_cache,
+        )
 
         restored_seed_faces = set(current_shaft_faces) | set(live_corner_faces)
         if not restored_seed_faces:
-            restored_seed_faces = _live_faces_from_positions(bm, original_face_positions, lookup=face_lookup)
+            restored_seed_faces = _live_faces_from_positions(
+                bm,
+                original_face_positions,
+                lookup=face_lookup,
+                match_cache=face_match_cache,
+            )
         if not restored_seed_faces:
             restored_seed_faces = _live_faces_from_indices(bm, original_face_indices)
 
