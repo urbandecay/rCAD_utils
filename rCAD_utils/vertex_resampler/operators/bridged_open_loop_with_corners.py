@@ -2538,6 +2538,48 @@ def _world_loop_segments(obj, loop, is_closed=False):
     return segments
 
 
+def _chain_edges(loop, is_closed=False):
+    edges = []
+    pair_iter = zip(loop, loop[1:])
+    for vert_a, vert_b in pair_iter:
+        if not (
+            getattr(vert_a, "is_valid", False)
+            and getattr(vert_b, "is_valid", False)
+        ):
+            return None
+        edge = next(
+            (
+                item for item in vert_a.link_edges
+                if getattr(item, "is_valid", False) and item.other_vert(vert_a) is vert_b
+            ),
+            None,
+        )
+        if edge is None:
+            return None
+        edges.append(edge)
+
+    if is_closed and len(loop) > 2:
+        vert_a = loop[-1]
+        vert_b = loop[0]
+        if not (
+            getattr(vert_a, "is_valid", False)
+            and getattr(vert_b, "is_valid", False)
+        ):
+            return None
+        edge = next(
+            (
+                item for item in vert_a.link_edges
+                if getattr(item, "is_valid", False) and item.other_vert(vert_a) is vert_b
+            ),
+            None,
+        )
+        if edge is None:
+            return None
+        edges.append(edge)
+
+    return edges
+
+
 def _sharp_corner_indices(points, threshold_degrees=45.0, is_closed=False):
     if len(points) < 3:
         return []
@@ -2792,11 +2834,34 @@ def execute(bm, obj, direction, report=None, data=None):
         collected_section_indices=collected_section_indices,
     )
 
+    split_edges = set()
+    for section in corner_sections:
+        chain_edges = _chain_edges(section, is_closed=False)
+        if not chain_edges:
+            continue
+        split_edges.update(chain_edges)
+
+    if split_edges:
+        bmesh.ops.split_edges(bm, edges=list(split_edges))
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+        bm.select_flush_mode()
+        bm.normal_update()
+        bmesh.update_edit_mesh(obj.data)
+
     if report is not None:
-        report(
-            {'INFO'},
-            "Open loop bridge with corners detector only: "
-            f"ends={len(end_sections)}, corners={len(corner_sections)}.",
-        )
+        if split_edges:
+            report(
+                {'INFO'},
+                "Open loop bridge with corners split corner sections: "
+                f"corners={len(corner_sections)}, edges={len(split_edges)}.",
+            )
+        else:
+            report(
+                {'INFO'},
+                "Open loop bridge with corners detector only: "
+                f"ends={len(end_sections)}, corners={len(corner_sections)}.",
+            )
 
     return {'FINISHED'}
