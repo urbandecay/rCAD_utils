@@ -42,9 +42,23 @@ def _debug_step(step, **details):
 
 
 def _trace_corner(message, **details):
+    return
+
+
+def _trace_focus(message, **details):
     print(f"[vertex_resampler:open_corner_detect] {message}")
     for key, value in details.items():
         print(f"  {key}: {value}")
+
+
+def _group_debug_key(group):
+    loops = group[0] if group else []
+    keys = []
+    for loop in loops:
+        loop_key = _loop_key(loop)
+        if loop_key is not None:
+            keys.append(loop_key)
+    return tuple(keys)
 
 
 def _safe_normalized(vec):
@@ -112,6 +126,48 @@ def _selected_seed_loop(bm):
         )
         return None
     return loop
+
+
+def _selected_seed_loops(bm):
+    seed_loop = _selected_seed_loop(bm)
+    if seed_loop is not None:
+        return [seed_loop]
+
+    selected_components = _selected_vert_components(_selected_verts(bm))
+    if not selected_components:
+        return []
+
+    seed_loops = []
+    for component_index, component in enumerate(selected_components, start=1):
+        loop = _order_open_chain_component(component)
+        if loop is None:
+            _trace_focus(
+                "Selected seed loop failed.",
+                component_index=component_index,
+                reason="could not order component into an open chain",
+                component_size=len(component),
+            )
+            return None
+
+        if len(loop) < 2 or not _is_ordered_open_chain(loop):
+            _trace_focus(
+                "Selected seed loop failed.",
+                component_index=component_index,
+                reason="ordered component was not a valid open chain",
+                component_size=len(component),
+                loop_size=len(loop),
+            )
+            return None
+
+        seed_loops.append(loop)
+
+    if len(seed_loops) > 1:
+        _trace_focus(
+            "Selected seed loops built.",
+            component_count=len(seed_loops),
+            component_sizes=[len(loop) for loop in seed_loops],
+        )
+    return seed_loops
 
 
 def _face_indices(faces):
@@ -1128,17 +1184,30 @@ def _slice_loop_for_partial_range(loop, partial_range):
 def _detect_corner_any_cross_section_seed(bm):
     selected_components = _selected_vert_components(_selected_verts(bm))
     if not selected_components:
-        _trace_corner("Cross-section seed detect rejected: no selected components.")
+        _trace_focus("Cross-section input missing.")
         return None
+
+    _trace_focus(
+        "Cross-section input.",
+        component_count=len(selected_components),
+        component_sizes=[len(component) for component in selected_components],
+    )
 
     matched_groups = []
     partial_ranges = []
+    group_keys = []
     for component_index, component in enumerate(selected_components, start=1):
         component_set = {
             vert for vert in component
             if getattr(vert, "is_valid", False)
         }
         if len(component_set) < 2:
+            _trace_focus(
+                "Selected cross section skipped.",
+                component_index=component_index,
+                reason="component too small",
+                component_size=len(component_set),
+            )
             continue
 
         start_faces = {
@@ -1148,30 +1217,56 @@ def _detect_corner_any_cross_section_seed(bm):
             if getattr(face, "is_valid", False) and len(face.verts) == 4
         }
         if not start_faces:
-            _trace_corner(
-                "Cross-section seed detect rejected.",
+            _trace_focus(
+                "Selected cross section match failed.",
                 component_index=component_index,
                 reason="no adjacent quad faces",
+                component_size=len(component_set),
             )
             return None
 
         face_component = _connected_quad_faces(start_faces)
         if len(face_component) < 2:
-            _trace_corner(
-                "Cross-section seed detect rejected.",
+            _trace_focus(
+                "Selected cross section match failed.",
                 component_index=component_index,
                 reason="connected quad component too small",
+                component_size=len(component_set),
+                start_face_count=len(start_faces),
                 face_count=len(face_component),
             )
             return None
 
+        candidates = _open_face_strip_candidates(face_component)
+        _trace_focus(
+            "Selected cross section candidate scan.",
+            component_index=component_index,
+            component_size=len(component_set),
+            start_face_count=len(start_faces),
+            component_face_count=len(face_component),
+            candidate_count=len(candidates),
+            candidate_loop_counts=[len(candidate['rings'][0]) for candidate in candidates],
+            candidate_loop_sizes=[
+                len(candidate['rings'][0][0]) if candidate['rings'][0] else 0
+                for candidate in candidates
+            ],
+        )
+
         matched_candidate = None
         matched_score = None
         fallback_candidate = None
-        for candidate in _open_face_strip_candidates(face_component):
+        for candidate_index, candidate in enumerate(candidates, start=1):
             if fallback_candidate is None:
                 fallback_candidate = candidate
             candidate_score = _selected_verts_match_any_loop(candidate['rings'], component_set)
+            _trace_focus(
+                "Selected cross section candidate result.",
+                component_index=component_index,
+                candidate_index=candidate_index,
+                loop_count=len(candidate['rings'][0]),
+                loop_size=len(candidate['rings'][0][0]) if candidate['rings'][0] else 0,
+                match_score=candidate_score,
+            )
             if candidate_score is None:
                 continue
             if matched_score is None or candidate_score > matched_score:
@@ -1181,17 +1276,23 @@ def _detect_corner_any_cross_section_seed(bm):
         if matched_candidate is None:
             matched_candidate = fallback_candidate
             if matched_candidate is None:
-                _trace_corner(
-                    "Cross-section seed detect rejected.",
+                _trace_focus(
+                    "Selected cross section match failed.",
                     component_index=component_index,
                     reason="no bridge candidates in connected quad component",
+                    component_size=len(component_set),
+                    start_face_count=len(start_faces),
                     component_face_count=len(face_component),
+                    candidate_count=0,
                 )
                 return None
-            _trace_corner(
-                "Cross-section seed detect fell back to best bridge candidate in component.",
+            _trace_focus(
+                "Selected cross section route fallback.",
                 component_index=component_index,
+                reason="no candidate loop overlapped the selected verts",
+                component_size=len(component_set),
                 component_face_count=len(face_component),
+                candidate_count=len(candidates),
             )
 
         matched_groups.append(matched_candidate['rings'])
@@ -1200,23 +1301,30 @@ def _detect_corner_any_cross_section_seed(bm):
             component,
         )
         partial_ranges.append(partial_range)
-        _trace_corner(
-            "Cross-section seed detect matched component.",
+        group_key = _group_debug_key(matched_candidate['rings'])
+        group_keys.append(group_key)
+        _trace_focus(
+            "Selected cross section matched route.",
             component_index=component_index,
+            component_size=len(component_set),
             component_face_count=len(face_component),
             loop_count=len(matched_candidate['rings'][0]),
             loop_size=len(matched_candidate['rings'][0][0]) if matched_candidate['rings'][0] else 0,
             match_score=matched_score,
             partial_range=partial_range,
+            group_key=group_key,
         )
 
     if not matched_groups:
-        _trace_corner("Cross-section seed detect rejected: no matching groups found.")
+        _trace_focus("Cross-section input failed to match any route.")
         return None
 
-    _trace_corner(
-        "Cross-section seed detect matched.",
+    duplicate_route_count = len(group_keys) - len(set(group_keys))
+    _trace_focus(
+        "Cross-section routes matched.",
         group_count=len(matched_groups),
+        duplicate_route_count=duplicate_route_count,
+        group_keys=group_keys,
     )
     return {
         'groups': matched_groups,
@@ -2417,6 +2525,12 @@ def _detected_cross_sections(groups, partial_ranges=None):
     all_sections = []
     collected_section_indices = []
 
+    _trace_focus(
+        "Preview build started.",
+        group_count=len(groups or []),
+        partial_range_count=len(partial_ranges or []),
+    )
+
     for group_index, group in enumerate(groups or [], start=1):
         loops, is_closed = group
         if is_closed or not loops:
@@ -2436,14 +2550,16 @@ def _detected_cross_sections(groups, partial_ranges=None):
         if partial_ranges and len(partial_ranges) >= group_index:
             partial_range = partial_ranges[group_index - 1]
 
-        _trace_corner(
-            "Detected control indices on open group.",
+        _trace_focus(
+            "Preview group analysis.",
             group_index=group_index,
             loop_count=len(loops),
+            loop_size=len(loops[0]) if loops and loops[0] else 0,
             end_indices=sorted(end_indices),
             raw_corner_indices=raw_corner_indices,
             corner_indices=corner_indices,
             partial_range=partial_range,
+            group_key=_group_debug_key(group),
         )
 
         for index in sorted(end_indices):
@@ -2462,12 +2578,13 @@ def _detected_cross_sections(groups, partial_ranges=None):
             'section_indices': group_section_indices,
         })
 
-        _trace_corner(
-            "Collected sections on open group.",
+        _trace_focus(
+            "Preview group output.",
             group_index=group_index,
             collected_section_indices=group_section_indices,
             collected_section_count=len(group_section_indices),
-            partial_range=partial_range,
+            end_section_count=len(sorted(end_indices)),
+            corner_section_count=len(corner_indices),
         )
 
     return end_sections, corner_sections, all_sections, collected_section_indices
@@ -2511,44 +2628,49 @@ def _capture_detected_cross_sections(obj, end_sections, corner_sections, all_sec
         anchor_overlay.add_segments(segments)
 
 def detect(bm):
-    _trace_corner("Starting cornered open-loop detect.")
-    seed_loop = _selected_seed_loop(bm)
-    if seed_loop is not None:
-        seed_group = _expand_open_bridge_from_seed_loop(seed_loop)
-        if seed_group is not None:
-            _trace_corner(
-                "Matched bridge route from selected cross section.",
-                loop_count=len(seed_group[0]),
-                seed_size=len(seed_loop),
-            )
-            return {
-                'groups': [seed_group],
-                'components': [],
-                'mode_label': 'Bridged open loop with corners',
-                'detector_only': True,
-                'partial_ranges': [{
-                    'loop_index': 0,
-                    'start_index': 0,
-                    'end_index': len(seed_loop) - 1,
-                    'score': (len(seed_loop), 1.0, 1.0, 0.0, 0),
-                }],
-            }
+    _trace_focus("Detect started.")
+    seed_loops = _selected_seed_loops(bm)
+    if seed_loops:
+        groups = []
+        partial_ranges = []
+        for component_index, seed_loop in enumerate(seed_loops, start=1):
+            seed_group = _expand_open_bridge_from_seed_loop(seed_loop)
+            if seed_group is None:
+                _trace_focus(
+                    "Selected seed expansion failed.",
+                    component_index=component_index,
+                    seed_size=len(seed_loop),
+                )
+                return None
+            groups.append(seed_group)
+            partial_ranges.append({
+                'loop_index': 0,
+                'start_index': 0,
+                'end_index': len(seed_loop) - 1,
+                'score': (len(seed_loop), 1.0, 1.0, 0.0, 0),
+            })
 
-    cross_section_seed = _detect_corner_any_cross_section_seed(bm)
-    if cross_section_seed is not None:
-        _trace_corner(
-            "Matched bridge route from selected cross section component.",
-            group_count=len(cross_section_seed.get('groups', [])),
+        _trace_focus(
+            "Detect path chosen: selected seed loops.",
+            group_count=len(groups),
+            seed_sizes=[len(seed_loop) for seed_loop in seed_loops],
+            loop_counts=[len(group[0]) for group in groups],
         )
-        return _attach_partial_ranges(bm, cross_section_seed)
+        return {
+            'groups': groups,
+            'components': [],
+            'mode_label': 'Bridged open loop with corners',
+            'detector_only': True,
+            'partial_ranges': partial_ranges,
+        }
 
     data = detect_open_strip_selection(bm)
     if data is not None and _groups_are_open(data['groups']):
         selected_verts = _selected_verts(bm)
         seed_group = _find_group_from_seed_loop(data['groups'], selected_verts)
         if seed_group is not None:
-            _trace_corner(
-                "Matched selected cross section inside open-group route.",
+            _trace_focus(
+                "Detect path chosen: matched selected cross section inside open groups.",
                 group_count=len(data.get('groups', [])),
             )
             return _attach_partial_ranges(bm, {
@@ -2558,8 +2680,8 @@ def detect(bm):
                 'detector_only': True,
             })
 
-        _trace_corner(
-            "Matched open groups for corner cross-section scan.",
+        _trace_focus(
+            "Detect path chosen: generic open-group scan.",
             group_count=len(data.get('groups', [])),
             loop_counts=[len(group[0]) for group in data.get('groups', [])],
             loop_sizes=[
@@ -2574,7 +2696,7 @@ def detect(bm):
             'detector_only': True,
         })
 
-    _trace_corner("Cornered open-loop detect failed.")
+    _trace_focus("Detect failed.")
     return None
 
 
@@ -2582,7 +2704,7 @@ def execute(bm, obj, direction, report=None, data=None):
     if data is None:
         data = detect(bm)
     if not data:
-        _trace_corner("Detector-only execute cancelled: detect returned no data.")
+        _trace_focus("Execute cancelled: detect returned no data.")
         return {'CANCELLED'}
 
     end_sections, corner_sections, all_sections, collected_section_indices = _detected_cross_sections(
@@ -2591,8 +2713,8 @@ def execute(bm, obj, direction, report=None, data=None):
     )
     _capture_detected_cross_sections(obj, end_sections, corner_sections, all_sections=all_sections)
 
-    _trace_corner(
-        "Detector-only execute summary.",
+    _trace_focus(
+        "Preview build finished.",
         end_cross_section_count=len(end_sections),
         corner_cross_section_count=len(corner_sections),
         propagated_cross_section_count=len(all_sections),
