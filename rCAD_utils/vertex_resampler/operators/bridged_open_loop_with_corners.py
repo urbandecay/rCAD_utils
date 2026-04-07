@@ -1811,7 +1811,7 @@ def _next_partial_bridge_loop(current_loop, previous_loop=None):
     return aligned
 
 
-def _walk_open_bridge_side(seed_loop, first_loop, visited_keys, seed_key=None):
+def _walk_bridge_side(seed_loop, first_loop, visited_keys, seed_key=None, close_on_seed=False):
     if first_loop is None:
         return None
     if not first_loop:
@@ -1829,7 +1829,7 @@ def _walk_open_bridge_side(seed_loop, first_loop, visited_keys, seed_key=None):
         if not current_key:
             return None
         if current_key in visited_keys:
-            if seed_key is not None and current_key == seed_key:
+            if close_on_seed and seed_key is not None and current_key == seed_key:
                 _trace_corner(
                     "Partial-walk side closed back on seed.",
                     walked_loop_count=len(walked),
@@ -1855,7 +1855,7 @@ def _walk_open_bridge_side(seed_loop, first_loop, visited_keys, seed_key=None):
     }
 
 
-def _expand_open_bridge_from_seed_loop(seed_loop):
+def _expand_bridge_from_seed_loop(seed_loop, close_on_seed=False):
     if seed_loop is None or len(seed_loop) < 2:
         _trace_corner(
             "Seed expansion rejected.",
@@ -1886,7 +1886,13 @@ def _expand_open_bridge_from_seed_loop(seed_loop):
     first_side = adjacent_loops[0] if adjacent_loops else []
     second_side = adjacent_loops[1] if len(adjacent_loops) > 1 else []
 
-    left_result = _walk_open_bridge_side(seed_loop, first_side, visited_keys, seed_key=seed_key)
+    left_result = _walk_bridge_side(
+        seed_loop,
+        first_side,
+        visited_keys,
+        seed_key=seed_key,
+        close_on_seed=close_on_seed,
+    )
     if left_result is None:
         _trace_corner(
             "Seed expansion rejected.",
@@ -1907,7 +1913,13 @@ def _expand_open_bridge_from_seed_loop(seed_loop):
         )
         return (expanded_loops, True)
 
-    right_result = _walk_open_bridge_side(seed_loop, second_side, visited_keys, seed_key=seed_key)
+    right_result = _walk_bridge_side(
+        seed_loop,
+        second_side,
+        visited_keys,
+        seed_key=seed_key,
+        close_on_seed=close_on_seed,
+    )
     if right_result is None:
         _trace_corner(
             "Seed expansion rejected.",
@@ -1938,6 +1950,14 @@ def _expand_open_bridge_from_seed_loop(seed_loop):
         expanded_loop_count=len(expanded_loops),
     )
     return (expanded_loops, False)
+
+
+def _expand_open_bridge_from_seed_loop(seed_loop):
+    return _expand_bridge_from_seed_loop(seed_loop, close_on_seed=False)
+
+
+def _expand_closed_bridge_from_seed_loop(seed_loop):
+    return _expand_bridge_from_seed_loop(seed_loop, close_on_seed=True)
 
 
 def _find_group_from_seed_loop(groups, selected_verts):
@@ -2684,6 +2704,8 @@ def detect(bm):
         partial_ranges = []
         for component_index, seed_loop in enumerate(seed_loops, start=1):
             seed_group = _expand_open_bridge_from_seed_loop(seed_loop)
+            if seed_group is None:
+                seed_group = _expand_closed_bridge_from_seed_loop(seed_loop)
             if seed_group is None:
                 _trace_focus(
                     "Selected seed expansion failed.",
