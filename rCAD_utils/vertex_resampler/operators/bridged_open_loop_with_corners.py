@@ -1811,11 +1811,14 @@ def _next_partial_bridge_loop(current_loop, previous_loop=None):
     return aligned
 
 
-def _walk_open_bridge_side(seed_loop, first_loop, visited_keys):
+def _walk_open_bridge_side(seed_loop, first_loop, visited_keys, seed_key=None):
     if first_loop is None:
         return None
     if not first_loop:
-        return []
+        return {
+            'loops': [],
+            'closed': False,
+        }
 
     walked = []
     previous_loop = seed_loop
@@ -1823,7 +1826,18 @@ def _walk_open_bridge_side(seed_loop, first_loop, visited_keys):
 
     while current_loop:
         current_key = _loop_walk_key(current_loop)
-        if not current_key or current_key in visited_keys:
+        if not current_key:
+            return None
+        if current_key in visited_keys:
+            if seed_key is not None and current_key == seed_key:
+                _trace_corner(
+                    "Partial-walk side closed back on seed.",
+                    walked_loop_count=len(walked),
+                )
+                return {
+                    'loops': walked,
+                    'closed': True,
+                }
             return None
         visited_keys.add(current_key)
         walked.append(current_loop)
@@ -1835,7 +1849,10 @@ def _walk_open_bridge_side(seed_loop, first_loop, visited_keys):
         previous_loop = current_loop
         current_loop = next_loop
 
-    return walked
+    return {
+        'loops': walked,
+        'closed': False,
+    }
 
 
 def _expand_open_bridge_from_seed_loop(seed_loop):
@@ -1869,23 +1886,47 @@ def _expand_open_bridge_from_seed_loop(seed_loop):
     first_side = adjacent_loops[0] if adjacent_loops else []
     second_side = adjacent_loops[1] if len(adjacent_loops) > 1 else []
 
-    left_loops = _walk_open_bridge_side(seed_loop, first_side, visited_keys)
-    if left_loops is None:
+    left_result = _walk_open_bridge_side(seed_loop, first_side, visited_keys, seed_key=seed_key)
+    if left_result is None:
         _trace_corner(
             "Seed expansion rejected.",
             reason="left-side walk failed",
             first_side_size=len(first_side) if first_side else 0,
         )
         return None
+    left_loops = left_result['loops']
 
-    right_loops = _walk_open_bridge_side(seed_loop, second_side, visited_keys)
-    if right_loops is None:
+    if left_result.get('closed'):
+        expanded_loops = [list(seed_loop)] + left_loops
+        if len(expanded_loops) < 2:
+            return None
+        _trace_corner(
+            "Expanded closed bridge from selected cross section.",
+            seed_size=len(seed_loop),
+            expanded_loop_count=len(expanded_loops),
+        )
+        return (expanded_loops, True)
+
+    right_result = _walk_open_bridge_side(seed_loop, second_side, visited_keys, seed_key=seed_key)
+    if right_result is None:
         _trace_corner(
             "Seed expansion rejected.",
             reason="right-side walk failed",
             second_side_size=len(second_side) if second_side else 0,
         )
         return None
+    right_loops = right_result['loops']
+
+    if right_result.get('closed'):
+        expanded_loops = [list(seed_loop)] + right_loops
+        if len(expanded_loops) < 2:
+            return None
+        _trace_corner(
+            "Expanded closed bridge from selected cross section.",
+            seed_size=len(seed_loop),
+            expanded_loop_count=len(expanded_loops),
+        )
+        return (expanded_loops, True)
 
     expanded_loops = list(reversed(left_loops)) + [list(seed_loop)] + right_loops
     if len(expanded_loops) < 2:
@@ -2477,17 +2518,22 @@ def _world_loop_segments(obj, loop, is_closed=False):
     return segments
 
 
-def _sharp_corner_indices(points, threshold_degrees=45.0):
+def _sharp_corner_indices(points, threshold_degrees=45.0, is_closed=False):
     if len(points) < 3:
         return []
 
     threshold_cos = __import__("math").cos(__import__("math").radians(threshold_degrees))
     indices = []
-    last_index = len(points) - 1
-    for index in range(1, last_index):
+    point_count = len(points)
+    if is_closed:
+        index_iter = range(point_count)
+    else:
+        index_iter = range(1, point_count - 1)
+
+    for index in index_iter:
         prev_point = points[index - 1]
         current_point = points[index]
-        next_point = points[index + 1]
+        next_point = points[(index + 1) % point_count]
         if prev_point is None or current_point is None or next_point is None:
             continue
 
@@ -2533,17 +2579,19 @@ def _detected_cross_sections(groups, partial_ranges=None):
 
     for group_index, group in enumerate(groups or [], start=1):
         loops, is_closed = group
-        if is_closed or not loops:
+        if not loops:
             continue
 
         if len(loops) < 2:
             continue
+        if is_closed and len(loops) < 3:
+            continue
 
         centers = [_loop_center(loop) for loop in loops]
-        end_indices = {0, len(loops) - 1}
+        end_indices = set() if is_closed else {0, len(loops) - 1}
         raw_corner_indices = [
-            index for index in _sharp_corner_indices(centers)
-            if 0 < index < len(loops) - 1
+            index for index in _sharp_corner_indices(centers, is_closed=is_closed)
+            if is_closed or 0 < index < len(loops) - 1
         ]
         corner_indices = _cluster_corner_indices(raw_corner_indices)
         partial_range = None
@@ -2555,6 +2603,7 @@ def _detected_cross_sections(groups, partial_ranges=None):
             group_index=group_index,
             loop_count=len(loops),
             loop_size=len(loops[0]) if loops and loops[0] else 0,
+            is_closed=is_closed,
             end_indices=sorted(end_indices),
             raw_corner_indices=raw_corner_indices,
             corner_indices=corner_indices,

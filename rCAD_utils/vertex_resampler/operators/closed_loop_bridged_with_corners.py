@@ -4,6 +4,7 @@ import bmesh
 
 from . import closed_loop_bridged
 from .bridge_utils import get_auto_bridged_chain, get_bridged_chain
+from .detection_utils import get_selected_islands
 from ..debug import face_ref, face_refs, loop_ref
 from ..seam_manager import load_seam_homes, save_seam_homes
 
@@ -99,6 +100,33 @@ def _edge_orientation_bit(face, edge):
         return None
 
     return edge_index % 2
+
+
+def _connected_quad_faces(start_faces):
+    live_start_faces = {
+        face for face in start_faces
+        if face is not None and getattr(face, "is_valid", False) and len(face.verts) == 4
+    }
+    if not live_start_faces:
+        return set()
+
+    visited = set(live_start_faces)
+    stack = list(live_start_faces)
+
+    while stack:
+        face = stack.pop()
+        for edge in face.edges:
+            for neighbor in edge.link_faces:
+                if (
+                    neighbor in visited
+                    or not getattr(neighbor, "is_valid", False)
+                    or len(neighbor.verts) != 4
+                ):
+                    continue
+                visited.add(neighbor)
+                stack.append(neighbor)
+
+    return visited
 
 
 def _candidate_strip_faces(start_face, start_bit, selected_faces):
@@ -305,13 +333,54 @@ def _selected_faces_and_candidates(bm):
         return None, []
 
     selected_faces = closed_loop_bridged._selected_face_set(bm, set(sel_verts))
-    if not selected_faces:
+    components = []
+    if selected_faces:
+        components = closed_loop_bridged._face_components(selected_faces)
+    else:
+        component_map = {}
+        for island in get_selected_islands(bm):
+            island_verts = [
+                vert for vert in island.get('verts', [])
+                if getattr(vert, "is_valid", False)
+            ]
+            if len(island_verts) < 4:
+                continue
+
+            start_faces = {
+                face
+                for vert in island_verts
+                for face in vert.link_faces
+                if getattr(face, "is_valid", False) and len(face.verts) == 4
+            }
+            if not start_faces:
+                continue
+
+            component = _connected_quad_faces(start_faces)
+            if len(component) < 3:
+                continue
+
+            component_key = tuple(
+                sorted(face.index for face in component if getattr(face, "is_valid", False))
+            )
+            if component_key:
+                component_map[component_key] = component
+
+        components = list(component_map.values())
+        if components:
+            selected_faces = {
+                face
+                for component in components
+                for face in component
+                if getattr(face, "is_valid", False)
+            }
+
+    if not components:
         _set_last_detect_reason("no selected face set could be built from the selection")
         return None, []
 
     candidates = []
     component_failures = []
-    for component in closed_loop_bridged._face_components(selected_faces):
+    for component in components:
         component_candidates, diagnostics = _all_face_ring_candidates(component)
         if not component_candidates:
             failure = diagnostics.get('reason') or "unknown component failure"
