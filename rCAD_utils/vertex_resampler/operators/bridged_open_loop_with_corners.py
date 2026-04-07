@@ -2847,6 +2847,13 @@ def execute(bm, obj, direction, report=None, data=None):
         collected_section_indices=collected_section_indices,
     )
 
+    shaft_face_positions = _face_positions(
+        {
+            face
+            for group in data.get('groups', [])
+            for face in _shaft_faces_from_open_group(group)
+        }
+    )
     split_edges = set()
     split_section_logs = []
     for section_index, section in enumerate(corner_sections, start=1):
@@ -2881,6 +2888,7 @@ def execute(bm, obj, direction, report=None, data=None):
         ),
     )
 
+    segment_count = 0
     if split_edges:
         bmesh.ops.split_edges(bm, edges=list(split_edges))
         bm.verts.ensure_lookup_table()
@@ -2888,14 +2896,53 @@ def execute(bm, obj, direction, report=None, data=None):
         bm.faces.ensure_lookup_table()
         bm.select_flush_mode()
         bm.normal_update()
+
+        live_shaft_faces = _live_faces_from_positions(bm, shaft_face_positions)
+        _trace_focus(
+            "Post-split shaft face recovery.",
+            shaft_face_count=len(live_shaft_faces),
+        )
+        if live_shaft_faces:
+            _select_only_faces(bm, live_shaft_faces)
+            bm.select_flush_mode()
+            bm.normal_update()
+
+            fresh_data = bridged_open_loop.detect(bm)
+            segment_count = len(fresh_data.get('groups', [])) if fresh_data else 0
+            _trace_focus(
+                "Post-split open bridge detect.",
+                group_count=segment_count,
+            )
+
+            if fresh_data and fresh_data.get('groups'):
+                for group_index, rings_data in enumerate(fresh_data['groups'], start=1):
+                    anchored_group = _anchor_open_group_endpoints(rings_data)
+                    loops = anchored_group['rings'][0]
+                    _trace_focus(
+                        "Segment resample execute.",
+                        group_index=group_index,
+                        loop_count=len(loops),
+                        loop_size=len(loops[0]) if loops else 0,
+                    )
+                    execute_aligned_loops_logic(
+                        bm,
+                        obj,
+                        anchored_group['rings'],
+                        direction,
+                        report=report,
+                        use_seams=anchored_group.get('use_seams', True),
+                        migrate_seams=anchored_group.get('migrate_seams'),
+                        max_seams=anchored_group.get('max_seams'),
+                        forced_seam_verts=anchored_group.get('forced_seam_verts'),
+                    )
         bmesh.update_edit_mesh(obj.data)
 
     if report is not None:
         if split_edges:
             report(
                 {'INFO'},
-                "Open loop bridge with corners split corner sections: "
-                f"corners={len(corner_sections)}, edges={len(split_edges)}.",
+                "Open loop bridge with corners split corner sections and resampled segments: "
+                f"corners={len(corner_sections)}, edges={len(split_edges)}, segments={segment_count}.",
             )
         else:
             report(
