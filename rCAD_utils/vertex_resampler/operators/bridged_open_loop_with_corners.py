@@ -51,6 +51,19 @@ def _trace_focus(message, **details):
         print(f"  {key}: {value}")
 
 
+def _vert_debug_label(vert):
+    if vert is None or not getattr(vert, "is_valid", False):
+        return None
+    return f"v{vert.index}"
+
+
+def _edge_debug_label(edge):
+    if edge is None or not getattr(edge, "is_valid", False):
+        return None
+    vert_ids = [_vert_debug_label(vert) for vert in edge.verts]
+    return f"e{edge.index}[{','.join(vert_ids)}]"
+
+
 def _group_debug_key(group):
     loops = group[0] if group else []
     keys = []
@@ -2835,11 +2848,38 @@ def execute(bm, obj, direction, report=None, data=None):
     )
 
     split_edges = set()
-    for section in corner_sections:
+    split_section_logs = []
+    for section_index, section in enumerate(corner_sections, start=1):
         chain_edges = _chain_edges(section, is_closed=False)
         if not chain_edges:
+            split_section_logs.append({
+                'section_index': section_index,
+                'vert_indices': [vert.index for vert in section if getattr(vert, "is_valid", False)],
+                'edge_indices': None,
+            })
             continue
+        split_section_logs.append({
+            'section_index': section_index,
+            'vert_indices': [vert.index for vert in section if getattr(vert, "is_valid", False)],
+            'edge_indices': [edge.index for edge in chain_edges if getattr(edge, "is_valid", False)],
+            'edge_labels': [_edge_debug_label(edge) for edge in chain_edges if getattr(edge, "is_valid", False)],
+        })
         split_edges.update(chain_edges)
+
+    _trace_focus(
+        "Split execution plan.",
+        corner_section_count=len(corner_sections),
+        split_section_logs=split_section_logs,
+        split_edge_count=len(split_edges),
+        split_edge_indices=sorted(
+            edge.index for edge in split_edges
+            if getattr(edge, "is_valid", False)
+        ),
+        split_edge_labels=sorted(
+            _edge_debug_label(edge) for edge in split_edges
+            if getattr(edge, "is_valid", False)
+        ),
+    )
 
     if split_edges:
         bmesh.ops.split_edges(bm, edges=list(split_edges))
