@@ -283,16 +283,18 @@ def _selected_verts(bm):
     }
 
 
-def _selected_loop_centers(bm):
-    centers = []
-    for component in _selected_vert_components(_selected_verts(bm)):
-        loop = _order_open_chain_component(component)
-        if loop is None:
-            loop = list(component)
-        center = _loop_center(loop)
-        if center is not None:
-            centers.append(center.copy())
-    return centers
+def _group_center(group_data):
+    loops = _group_loops(group_data)
+    centers = [
+        center for center in (_loop_center(loop) for loop in loops)
+        if center is not None
+    ]
+    if not centers:
+        return None
+    total = centers[0].copy()
+    for center in centers[1:]:
+        total += center
+    return total / len(centers)
 
 
 def _capture_selection_state(bm):
@@ -358,37 +360,143 @@ def _restore_selection_state(bm, selection_state):
     bm.select_flush_mode()
 
 
-def _select_matching_loops_by_centers(bm, groups, target_centers):
-    if not groups or not target_centers:
+def _source_loop_specs(groups, partial_ranges=None):
+    specs = []
+    for group_index, group_data in enumerate(groups or [], start=1):
+        loops = _group_loops(group_data)
+        if not loops:
+            continue
+        partial_range = None
+        if partial_ranges and len(partial_ranges) >= group_index:
+            partial_range = partial_ranges[group_index - 1]
+        loop_index = 0
+        if partial_range is not None:
+            loop_index = partial_range.get('loop_index', 0)
+        if loop_index < 0 or loop_index >= len(loops):
+            loop_index = 0
+        loop = loops[loop_index]
+        loop_center = _loop_center(loops[loop_index])
+        group_center = _group_center(group_data)
+        if loop_center is None:
+            continue
+        loop_size = max(1, len(loop) - 1)
+        start_index = 0
+        end_index = len(loop) - 1
+        if partial_range is not None:
+            start_index = max(0, min(len(loop) - 1, partial_range.get('start_index', 0)))
+            end_index = max(start_index, min(len(loop) - 1, partial_range.get('end_index', len(loop) - 1)))
+        source_slice = loop[start_index:end_index + 1]
+        specs.append({
+            'group_index': group_index - 1,
+            'loop_index': loop_index,
+            'group_center': group_center.copy() if group_center is not None else None,
+            'loop_center': loop_center.copy(),
+            'start_ratio': start_index / loop_size if len(loop) > 1 else 0.0,
+            'end_ratio': end_index / loop_size if len(loop) > 1 else 1.0,
+            'source_positions': [
+                vert.co.copy()
+                for vert in source_slice
+                if getattr(vert, "is_valid", False)
+            ],
+        })
+    return specs
+
+
+def _loop_slice_from_source_spec(loop, source_spec):
+    if not loop:
+        return []
+    if len(loop) == 1:
+        return list(loop)
+
+    max_index = len(loop) - 1
+    start_index = int(round(source_spec.get('start_ratio', 0.0) * max_index))
+    end_index = int(round(source_spec.get('end_ratio', 1.0) * max_index))
+    start_index = max(0, min(max_index, start_index))
+    end_index = max(start_index, min(max_index, end_index))
+    return list(loop[start_index:end_index + 1])
+
+
+def _select_source_loops(bm, groups, source_specs):
+    if not groups or not source_specs:
         return False
 
-    candidates = []
-    for group_data in groups:
-        for loop in _group_loops(group_data):
+    group_candidates = []
+    for group_index, group_data in enumerate(groups):
+        loops = _group_loops(group_data)
+        if not loops:
+            continue
+        group_center = _group_center(group_data)
+        loop_entries = []
+        for loop in loops:
             center = _loop_center(loop)
             if center is None:
                 continue
-            candidates.append({
+            loop_entries.append({
                 'loop': loop,
                 'center': center,
             })
+        if not loop_entries:
+            continue
+        group_candidates.append({
+            'group_index': group_index,
+            'group_center': group_center,
+            'loops': loop_entries,
+        })
 
-    if not candidates:
+    if not group_candidates:
         return False
 
     matched_loops = []
-    remaining = list(candidates)
-    for target_center in target_centers:
-        best_index = None
-        best_distance = None
-        for index, candidate in enumerate(remaining):
-            distance = (candidate['center'] - target_center).length
-            if best_distance is None or distance < best_distance:
-                best_distance = distance
-                best_index = index
-        if best_index is None:
+    remaining_groups = list(group_candidates)
+    for source_spec in source_specs:
+        direct_group = next(
+            (
+                candidate_group for candidate_group in remaining_groups
+                if candidate_group['group_index'] == source_spec.get('group_index')
+            ),
+            None,
+        )
+        if direct_group is not None:
+            remaining_groups.remove(direct_group)
+            loop_entries = direct_group['loops']
+            loop_index = source_spec.get('loop_index', 0)
+            loop_index = max(0, min(len(loop_entries) - 1, loop_index))
+            matched_loops.append(
+                _loop_slice_from_source_spec(loop_entries[loop_index]['loop'], source_spec)
+            )
             continue
-        matched_loops.append(remaining.pop(best_index)['loop'])
+
+        best_group_index = None
+        best_group_score = None
+        for index, candidate_group in enumerate(remaining_groups):
+            group_center = candidate_group['group_center']
+            if group_center is None or source_spec['group_center'] is None:
+                group_distance = 0.0
+            else:
+                group_distance = (group_center - source_spec['group_center']).length
+            loop_distance = min(
+                (entry['center'] - source_spec['loop_center']).length
+                for entry in candidate_group['loops']
+            )
+            score = (group_distance, loop_distance)
+            if best_group_score is None or score < best_group_score:
+                best_group_score = score
+                best_group_index = index
+        if best_group_index is None:
+            continue
+        candidate_group = remaining_groups.pop(best_group_index)
+        loop_entries = candidate_group['loops']
+        loop_index = source_spec.get('loop_index', 0)
+        if 0 <= loop_index < len(loop_entries):
+            matched_loops.append(
+                _loop_slice_from_source_spec(loop_entries[loop_index]['loop'], source_spec)
+            )
+            continue
+        best_loop = min(
+            loop_entries,
+            key=lambda entry: (entry['center'] - source_spec['loop_center']).length,
+        )
+        matched_loops.append(_loop_slice_from_source_spec(best_loop['loop'], source_spec))
 
     if not matched_loops:
         return False
@@ -413,6 +521,108 @@ def _select_matching_loops_by_centers(bm, groups, target_centers):
 
     bm.select_flush_mode()
     return True
+
+
+def _source_targets_for_fresh_groups(source_specs, groups):
+    targets = []
+    used = set()
+    for source_index, source_spec in enumerate(source_specs):
+        best = None
+        for group_index, rings_data in enumerate(groups):
+            loops = rings_data[0]
+            if not loops:
+                continue
+            for loop_index, loop in enumerate(loops):
+                candidate_key = (group_index, loop_index)
+                if candidate_key in used:
+                    continue
+
+                sliced_loop = _loop_slice_from_source_spec(loop, source_spec)
+                candidate_positions = [
+                    vert.co.copy()
+                    for vert in sliced_loop
+                    if getattr(vert, "is_valid", False)
+                ]
+                if not candidate_positions:
+                    continue
+
+                source_positions = source_spec.get('source_positions', [])
+                if not source_positions:
+                    center = _loop_center(sliced_loop)
+                    if center is None:
+                        continue
+                    distance_score = (center - source_spec['loop_center']).length
+                    length_delta = 0
+                else:
+                    total_distance = 0.0
+                    for source_position in source_positions:
+                        total_distance += min(
+                            (candidate_position - source_position).length
+                            for candidate_position in candidate_positions
+                        )
+                    distance_score = total_distance / len(source_positions)
+                    length_delta = abs(len(candidate_positions) - len(source_positions))
+
+                score = (
+                    distance_score,
+                    length_delta,
+                    abs(group_index - source_spec.get('group_index', 0)),
+                    abs(loop_index - source_spec.get('loop_index', 0)),
+                )
+                if best is None or score < best['score']:
+                    best = {
+                        'source_index': source_index,
+                        'group_index': group_index,
+                        'loop_index': loop_index,
+                        'score': score,
+                    }
+        if best is not None:
+            used.add((best['group_index'], best['loop_index']))
+            targets.append(best)
+    return targets
+
+
+def _select_loops_from_positions(bm, loop_positions_list):
+    if not loop_positions_list:
+        return False
+
+    for face in bm.faces:
+        if face.is_valid:
+            face.select = False
+    for edge in bm.edges:
+        if edge.is_valid:
+            edge.select = False
+    for vert in bm.verts:
+        if vert.is_valid:
+            vert.select = False
+
+    vert_lookup = _build_vert_position_lookup(bm)
+    any_selected = False
+    for loop_positions in loop_positions_list:
+        selected_verts = []
+        for position in loop_positions:
+            live_verts = _verts_at_position(bm, position, lookup=vert_lookup)
+            if not live_verts:
+                continue
+            vert = live_verts[0]
+            vert.select = True
+            selected_verts.append(vert)
+            any_selected = True
+
+        for vert_a, vert_b in zip(selected_verts, selected_verts[1:]):
+            edge = next(
+                (
+                    item for item in vert_a.link_edges
+                    if getattr(item, "is_valid", False) and item.other_vert(vert_a) is vert_b
+                ),
+                None,
+            )
+            if edge is not None:
+                edge.select = True
+
+    if any_selected:
+        bm.select_flush_mode()
+    return any_selected
 
 
 def _open_groups_from_shaft_faces(shaft_faces):
@@ -2998,12 +3208,15 @@ def detect(bm):
                 )
                 return None
             groups.append(seed_group)
-            partial_ranges.append({
-                'loop_index': 0,
-                'start_index': 0,
-                'end_index': len(seed_loop) - 1,
-                'score': (len(seed_loop), 1.0, 1.0, 0.0, 0),
-            })
+            partial_range = _selected_subset_range_any_loop(seed_group, seed_loop)
+            if partial_range is None:
+                partial_range = {
+                    'loop_index': 0,
+                    'start_index': 0,
+                    'end_index': len(seed_loop) - 1,
+                    'score': (len(seed_loop), 1.0, 1.0, 0.0, 0),
+                }
+            partial_ranges.append(partial_range)
 
         _trace_focus(
             "Detect path chosen: selected seed loops.",
@@ -3057,12 +3270,15 @@ def detect(bm):
 
 def execute(bm, obj, direction, report=None, data=None):
     selection_state = _capture_selection_state(bm)
-    selected_loop_centers = _selected_loop_centers(bm)
     if data is None:
         data = detect(bm)
     if not data:
         _trace_focus("Execute cancelled: detect returned no data.")
         return {'CANCELLED'}
+    source_loop_specs = _source_loop_specs(
+        data.get('groups', []),
+        partial_ranges=data.get('partial_ranges'),
+    )
 
     end_sections, corner_sections, all_sections, collected_section_indices = _detected_cross_sections(
         data.get('groups', []),
@@ -3172,6 +3388,14 @@ def execute(bm, obj, direction, report=None, data=None):
 
                 fresh_data = bridged_open_loop.detect(bm)
                 segment_count = len(fresh_data.get('groups', [])) if fresh_data else 0
+                source_targets = _source_targets_for_fresh_groups(
+                    source_loop_specs,
+                    fresh_data.get('groups', []) if fresh_data else [],
+                )
+                source_target_lookup = {
+                    target['group_index']: target for target in source_targets
+                }
+                final_source_loop_positions = []
                 _trace_focus(
                     "Post-split open bridge detect.",
                     group_count=segment_count,
@@ -3187,6 +3411,7 @@ def execute(bm, obj, direction, report=None, data=None):
                             loop_count=len(loops),
                             loop_size=len(loops[0]) if loops else 0,
                         )
+                        result_info = {}
                         execute_aligned_loops_logic(
                             bm,
                             obj,
@@ -3197,7 +3422,18 @@ def execute(bm, obj, direction, report=None, data=None):
                             migrate_seams=anchored_group.get('migrate_seams'),
                             max_seams=anchored_group.get('max_seams'),
                             forced_seam_verts=anchored_group.get('forced_seam_verts'),
+                            result_info=result_info,
                         )
+                        target = source_target_lookup.get(group_index - 1)
+                        ring_group = result_info.get('ring_group')
+                        if target is not None and ring_group is not None:
+                            target_loop_index = target['loop_index']
+                            if 0 <= target_loop_index < len(ring_group.rings):
+                                final_source_loop_positions.append([
+                                    vert.co.copy()
+                                    for vert in ring_group.rings[target_loop_index].verts
+                                    if getattr(vert, "is_valid", False)
+                                ])
                     welded_vert_count = _weld_live_open_loops(bm, split_infos)
                     if welded_vert_count == 0:
                         fallback_targetmap = _targetmap_from_live_split_positions(
@@ -3214,11 +3450,16 @@ def execute(bm, obj, direction, report=None, data=None):
                                 welded_vert_count = len(fallback_targetmap)
                             except Exception:
                                 welded_vert_count = 0
+                    if final_source_loop_positions:
+                        _select_loops_from_positions(bm, final_source_loop_positions)
         finally:
-            final_data = detect_open_strip_selection(bm)
-            final_groups = final_data.get('groups', []) if final_data else []
-            if not _select_matching_loops_by_centers(bm, final_groups, selected_loop_centers):
-                _restore_selection_state(bm, selection_state)
+            if not _selected_verts(bm):
+                final_data = detect_open_strip_selection(bm)
+                final_groups = final_data.get('groups', []) if final_data else []
+                if not _select_source_loops(bm, final_groups, source_loop_specs):
+                    _restore_selection_state(bm, selection_state)
+            else:
+                bm.select_flush_mode()
             bmesh.update_edit_mesh(obj.data)
 
     if report is not None:

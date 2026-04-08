@@ -317,6 +317,7 @@ def execute_aligned_loops_logic(
     max_seams=None,
     stack_is_cyclic=False,
     forced_seam_verts=None,
+    result_info=None,
 ):
     loops, is_closed = data
 
@@ -566,6 +567,8 @@ def execute_aligned_loops_logic(
         final_ring_group=ring_group_ref(ring_group),
         mesh=mesh_stats(bm),
     )
+    if result_info is not None:
+        result_info['ring_group'] = ring_group
     return {'FINISHED'}
 
 
