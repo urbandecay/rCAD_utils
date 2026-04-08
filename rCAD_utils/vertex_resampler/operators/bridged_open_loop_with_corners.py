@@ -1087,6 +1087,57 @@ def _all_seam_records(bm):
     return _all_seam_records_from_face_components(_face_components(selected_faces))
 
 
+def _outer_boundary_seam_records_from_groups(groups):
+    seam_records = []
+    for group in groups or []:
+        loops, is_closed = group
+        shaft_faces = _shaft_faces_from_loop_sequence(
+            loops,
+            is_closed=is_closed,
+            strict=False,
+        )
+        if not shaft_faces:
+            continue
+
+        boundary_edges = set()
+        for shaft_face in shaft_faces:
+            for edge in shaft_face.edges:
+                linked_faces = {
+                    face for face in edge.link_faces
+                    if getattr(face, "is_valid", False)
+                }
+                if not linked_faces:
+                    continue
+                if any(face not in shaft_faces for face in linked_faces):
+                    boundary_edges.add(edge)
+
+        for boundary_component in _boundary_path_components(boundary_edges):
+            component_edges = {
+                edge for edge in boundary_component
+                if edge is not None and getattr(edge, "is_valid", False)
+            }
+            if not component_edges:
+                continue
+
+            component_outside_faces = set()
+            for edge in component_edges:
+                component_outside_faces.update(
+                    face for face in edge.link_faces
+                    if getattr(face, "is_valid", False) and face not in shaft_faces
+                )
+
+            if not component_outside_faces:
+                continue
+
+            seam_records.append({
+                'boundary_edges': component_edges,
+                'shaft_faces': set(shaft_faces),
+                'corner_faces': component_outside_faces,
+            })
+
+    return seam_records
+
+
 def _detect_corner_endpoint_seed(bm):
     selected_components = _selected_vert_components(_selected_verts(bm))
     if not selected_components:
@@ -3036,6 +3087,8 @@ def execute(bm, obj, direction, report=None, data=None):
     )
     split_edges = set()
     split_section_logs = []
+    split_mode = "corner_sections"
+    seam_records = []
     for section_index, section in enumerate(corner_sections, start=1):
         chain_edges = _chain_edges(section, is_closed=False)
         if not chain_edges:
@@ -3053,8 +3106,32 @@ def execute(bm, obj, direction, report=None, data=None):
         })
         split_edges.update(chain_edges)
 
+    if not split_edges:
+        seam_records = _outer_boundary_seam_records_from_groups(data.get('groups', []))
+        split_mode = "outer_chunk_boundaries"
+        split_edges = {
+            edge
+            for record in seam_records
+            for edge in record.get('boundary_edges', set())
+            if getattr(edge, "is_valid", False)
+        }
+        split_section_logs = [
+            {
+                'section_index': index,
+                'boundary_edge_count': len(record.get('boundary_edges', set())),
+                'shaft_face_count': len(record.get('shaft_faces', set())),
+                'outside_face_count': len(record.get('corner_faces', set())),
+                'edge_indices': sorted(
+                    edge.index for edge in record.get('boundary_edges', set())
+                    if getattr(edge, "is_valid", False)
+                ),
+            }
+            for index, record in enumerate(seam_records, start=1)
+        ]
+
     _trace_focus(
         "Split execution plan.",
+        split_mode=split_mode,
         corner_section_count=len(corner_sections),
         split_section_logs=split_section_logs,
         split_edge_count=len(split_edges),
@@ -3072,13 +3149,16 @@ def execute(bm, obj, direction, report=None, data=None):
     welded_vert_count = 0
     if split_edges:
         try:
-            bmesh.ops.split_edges(bm, edges=list(split_edges))
-            bm.verts.ensure_lookup_table()
-            bm.edges.ensure_lookup_table()
-            bm.faces.ensure_lookup_table()
-            bm.select_flush_mode()
-            bm.normal_update()
-            split_infos = _split_infos_from_sections(bm, corner_sections)
+            if seam_records:
+                split_infos = _split_seam_records(bm, seam_records)
+            else:
+                bmesh.ops.split_edges(bm, edges=list(split_edges))
+                bm.verts.ensure_lookup_table()
+                bm.edges.ensure_lookup_table()
+                bm.faces.ensure_lookup_table()
+                bm.select_flush_mode()
+                bm.normal_update()
+                split_infos = _split_infos_from_sections(bm, corner_sections)
 
             live_shaft_faces = _live_faces_from_positions(bm, shaft_face_positions)
             _trace_focus(
