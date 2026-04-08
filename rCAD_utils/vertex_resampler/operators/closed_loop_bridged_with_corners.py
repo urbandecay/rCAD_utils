@@ -75,6 +75,89 @@ def _live_faces_from_positions(bm, positions, lookup=None):
     return live_faces
 
 
+def _build_vert_position_lookup(bm):
+    lookup = {}
+    for vert in bm.verts:
+        if not getattr(vert, "is_valid", False):
+            continue
+        lookup.setdefault(_position_key(vert.co, _POSITION_TOLERANCE), []).append(vert)
+    return lookup
+
+
+def _verts_at_position(bm, position, lookup=None):
+    if lookup is None:
+        lookup = _build_vert_position_lookup(bm)
+    return [
+        vert for vert in lookup.get(_position_key(position, _POSITION_TOLERANCE), [])
+        if vert.is_valid and (vert.co - position).length <= _POSITION_TOLERANCE
+    ]
+
+
+def _capture_selection_state(bm):
+    return {
+        'vert_positions': [
+            vert.co.copy()
+            for vert in bm.verts
+            if getattr(vert, "is_valid", False) and vert.select
+        ],
+        'face_positions': _face_positions(
+            [
+                face for face in bm.faces
+                if getattr(face, "is_valid", False) and face.select
+            ]
+        ),
+    }
+
+
+def _restore_selection_state(bm, selection_state):
+    if not selection_state:
+        return
+
+    for face in bm.faces:
+        if face.is_valid:
+            face.select = False
+    for edge in bm.edges:
+        if edge.is_valid:
+            edge.select = False
+    for vert in bm.verts:
+        if vert.is_valid:
+            vert.select = False
+
+    face_lookup = _build_face_position_lookup(bm)
+    for face in _live_faces_from_positions(
+        bm,
+        selection_state.get('face_positions', []),
+        lookup=face_lookup,
+    ):
+        face.select = True
+        for edge in face.edges:
+            if edge.is_valid:
+                edge.select = True
+        for vert in face.verts:
+            if vert.is_valid:
+                vert.select = True
+
+    vert_lookup = _build_vert_position_lookup(bm)
+    selected_verts = set()
+    for position in selection_state.get('vert_positions', []):
+        live_verts = _verts_at_position(bm, position, lookup=vert_lookup)
+        if not live_verts:
+            continue
+        vert = live_verts[0]
+        vert.select = True
+        selected_verts.add(vert)
+
+    for edge in bm.edges:
+        if (
+            edge.is_valid
+            and edge.verts[0] in selected_verts
+            and edge.verts[1] in selected_verts
+        ):
+            edge.select = True
+
+    bm.select_flush_mode()
+
+
 def _select_only_faces(bm, selected_faces):
     for face in bm.faces:
         if face.is_valid:
@@ -2307,6 +2390,32 @@ def _execute_closed_path(bm, obj, direction, report, selected_faces, candidates)
             report=report,
             data=fresh_data,
         )
+        if result == {'FINISHED'}:
+            synthetic_direction = (
+                anchor_plan['synthetic_direction']
+                if anchor_plan is not None
+                else 'forward'
+            )
+            merged, _diagnostics = _weld_closed_path_synthetic_seam(
+                bm,
+                synthetic_split_infos[0],
+                real_split_infos,
+                synthetic_direction,
+            )
+            if merged == 0:
+                fallback_targetmap = _targetmap_from_split_clusters(synthetic_split_infos)
+                if fallback_targetmap:
+                    try:
+                        bmesh.ops.weld_verts(
+                            bm,
+                            targetmap=fallback_targetmap,
+                        )
+                        bm.verts.ensure_lookup_table()
+                        bm.edges.ensure_lookup_table()
+                        bm.faces.ensure_lookup_table()
+                        bm.normal_update()
+                    except Exception:
+                        pass
     finally:
         bmesh.update_edit_mesh(obj.data)
 

@@ -283,6 +283,138 @@ def _selected_verts(bm):
     }
 
 
+def _selected_loop_centers(bm):
+    centers = []
+    for component in _selected_vert_components(_selected_verts(bm)):
+        loop = _order_open_chain_component(component)
+        if loop is None:
+            loop = list(component)
+        center = _loop_center(loop)
+        if center is not None:
+            centers.append(center.copy())
+    return centers
+
+
+def _capture_selection_state(bm):
+    return {
+        'vert_positions': [
+            vert.co.copy()
+            for vert in bm.verts
+            if getattr(vert, "is_valid", False) and vert.select
+        ],
+        'face_positions': _face_positions(_selected_faces(bm)),
+    }
+
+
+def _restore_selection_state(bm, selection_state):
+    if not selection_state:
+        return
+
+    for face in bm.faces:
+        if face.is_valid:
+            face.select = False
+    for edge in bm.edges:
+        if edge.is_valid:
+            edge.select = False
+    for vert in bm.verts:
+        if vert.is_valid:
+            vert.select = False
+
+    face_lookup = _build_face_position_lookup(bm, tolerance=_FACE_POSITION_TOLERANCE)
+    match_cache = {}
+    for face in _live_faces_from_positions(
+        bm,
+        selection_state.get('face_positions', []),
+        tolerance=_FACE_POSITION_TOLERANCE,
+        lookup=face_lookup,
+        match_cache=match_cache,
+    ):
+        face.select = True
+        for edge in face.edges:
+            if edge.is_valid:
+                edge.select = True
+        for vert in face.verts:
+            if vert.is_valid:
+                vert.select = True
+
+    vert_lookup = _build_vert_position_lookup(bm)
+    selected_verts = set()
+    for position in selection_state.get('vert_positions', []):
+        live_verts = _verts_at_position(bm, position, lookup=vert_lookup)
+        if not live_verts:
+            continue
+        vert = live_verts[0]
+        vert.select = True
+        selected_verts.add(vert)
+
+    for edge in bm.edges:
+        if (
+            edge.is_valid
+            and edge.verts[0] in selected_verts
+            and edge.verts[1] in selected_verts
+        ):
+            edge.select = True
+
+    bm.select_flush_mode()
+
+
+def _select_matching_loops_by_centers(bm, groups, target_centers):
+    if not groups or not target_centers:
+        return False
+
+    candidates = []
+    for group_data in groups:
+        for loop in _group_loops(group_data):
+            center = _loop_center(loop)
+            if center is None:
+                continue
+            candidates.append({
+                'loop': loop,
+                'center': center,
+            })
+
+    if not candidates:
+        return False
+
+    matched_loops = []
+    remaining = list(candidates)
+    for target_center in target_centers:
+        best_index = None
+        best_distance = None
+        for index, candidate in enumerate(remaining):
+            distance = (candidate['center'] - target_center).length
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_index = index
+        if best_index is None:
+            continue
+        matched_loops.append(remaining.pop(best_index)['loop'])
+
+    if not matched_loops:
+        return False
+
+    for face in bm.faces:
+        if face.is_valid:
+            face.select = False
+    for edge in bm.edges:
+        if edge.is_valid:
+            edge.select = False
+    for vert in bm.verts:
+        if vert.is_valid:
+            vert.select = False
+
+    for loop in matched_loops:
+        for vert in loop:
+            if getattr(vert, "is_valid", False):
+                vert.select = True
+        for edge in _chain_edges(loop, is_closed=False):
+            if getattr(edge, "is_valid", False):
+                edge.select = True
+
+    bm.select_flush_mode()
+    return True
+
+
 def _open_groups_from_shaft_faces(shaft_faces):
     live_shaft_faces = _live_bmesh_items(shaft_faces)
     if not live_shaft_faces:
@@ -2061,6 +2193,38 @@ def _split_infos_from_boundary_components(bm, boundary_components, vert_lookup=N
     return split_infos
 
 
+def _split_infos_from_sections(bm, sections, vert_lookup=None):
+    if vert_lookup is None:
+        vert_lookup = _build_vert_position_lookup(bm)
+
+    split_infos = []
+    for section in sections:
+        positions = [
+            vert.co.copy()
+            for vert in section
+            if getattr(vert, "is_valid", False)
+        ]
+        if len(positions) < 2:
+            continue
+
+        clusters = []
+        for position in positions:
+            cluster = _verts_at_position(bm, position, lookup=vert_lookup)
+            if len(cluster) >= 2:
+                clusters.append({
+                    'position': position.copy(),
+                    'verts': cluster,
+                })
+
+        if clusters:
+            split_infos.append({
+                'anchor_home': positions[0].copy(),
+                'clusters': clusters,
+            })
+
+    return split_infos
+
+
 def _same_position(vec_a, vec_b, tolerance=_POSITION_TOLERANCE):
     return (vec_a - vec_b).length <= tolerance
 
@@ -2841,6 +3005,8 @@ def detect(bm):
 
 
 def execute(bm, obj, direction, report=None, data=None):
+    selection_state = _capture_selection_state(bm)
+    selected_loop_centers = _selected_loop_centers(bm)
     if data is None:
         data = detect(bm)
     if not data:
@@ -2903,60 +3069,85 @@ def execute(bm, obj, direction, report=None, data=None):
     )
 
     segment_count = 0
+    welded_vert_count = 0
     if split_edges:
-        bmesh.ops.split_edges(bm, edges=list(split_edges))
-        bm.verts.ensure_lookup_table()
-        bm.edges.ensure_lookup_table()
-        bm.faces.ensure_lookup_table()
-        bm.select_flush_mode()
-        bm.normal_update()
-
-        live_shaft_faces = _live_faces_from_positions(bm, shaft_face_positions)
-        _trace_focus(
-            "Post-split shaft face recovery.",
-            shaft_face_count=len(live_shaft_faces),
-        )
-        if live_shaft_faces:
-            _select_only_faces(bm, live_shaft_faces)
+        try:
+            bmesh.ops.split_edges(bm, edges=list(split_edges))
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
             bm.select_flush_mode()
             bm.normal_update()
+            split_infos = _split_infos_from_sections(bm, corner_sections)
 
-            fresh_data = bridged_open_loop.detect(bm)
-            segment_count = len(fresh_data.get('groups', [])) if fresh_data else 0
+            live_shaft_faces = _live_faces_from_positions(bm, shaft_face_positions)
             _trace_focus(
-                "Post-split open bridge detect.",
-                group_count=segment_count,
+                "Post-split shaft face recovery.",
+                shaft_face_count=len(live_shaft_faces),
             )
+            if live_shaft_faces:
+                _select_only_faces(bm, live_shaft_faces)
+                bm.select_flush_mode()
+                bm.normal_update()
 
-            if fresh_data and fresh_data.get('groups'):
-                for group_index, rings_data in enumerate(fresh_data['groups'], start=1):
-                    anchored_group = _anchor_open_group_endpoints(rings_data)
-                    loops = anchored_group['rings'][0]
-                    _trace_focus(
-                        "Segment resample execute.",
-                        group_index=group_index,
-                        loop_count=len(loops),
-                        loop_size=len(loops[0]) if loops else 0,
-                    )
-                    execute_aligned_loops_logic(
-                        bm,
-                        obj,
-                        anchored_group['rings'],
-                        direction,
-                        report=report,
-                        use_seams=anchored_group.get('use_seams', True),
-                        migrate_seams=anchored_group.get('migrate_seams'),
-                        max_seams=anchored_group.get('max_seams'),
-                        forced_seam_verts=anchored_group.get('forced_seam_verts'),
-                    )
-        bmesh.update_edit_mesh(obj.data)
+                fresh_data = bridged_open_loop.detect(bm)
+                segment_count = len(fresh_data.get('groups', [])) if fresh_data else 0
+                _trace_focus(
+                    "Post-split open bridge detect.",
+                    group_count=segment_count,
+                )
+
+                if fresh_data and fresh_data.get('groups'):
+                    for group_index, rings_data in enumerate(fresh_data['groups'], start=1):
+                        anchored_group = _anchor_open_group_endpoints(rings_data)
+                        loops = anchored_group['rings'][0]
+                        _trace_focus(
+                            "Segment resample execute.",
+                            group_index=group_index,
+                            loop_count=len(loops),
+                            loop_size=len(loops[0]) if loops else 0,
+                        )
+                        execute_aligned_loops_logic(
+                            bm,
+                            obj,
+                            anchored_group['rings'],
+                            direction,
+                            report=report,
+                            use_seams=anchored_group.get('use_seams', True),
+                            migrate_seams=anchored_group.get('migrate_seams'),
+                            max_seams=anchored_group.get('max_seams'),
+                            forced_seam_verts=anchored_group.get('forced_seam_verts'),
+                        )
+                    welded_vert_count = _weld_live_open_loops(bm, split_infos)
+                    if welded_vert_count == 0:
+                        fallback_targetmap = _targetmap_from_live_split_positions(
+                            bm,
+                            split_infos,
+                        )
+                        if fallback_targetmap:
+                            try:
+                                bmesh.ops.weld_verts(bm, targetmap=fallback_targetmap)
+                                bm.verts.ensure_lookup_table()
+                                bm.edges.ensure_lookup_table()
+                                bm.faces.ensure_lookup_table()
+                                bm.normal_update()
+                                welded_vert_count = len(fallback_targetmap)
+                            except Exception:
+                                welded_vert_count = 0
+        finally:
+            final_data = detect_open_strip_selection(bm)
+            final_groups = final_data.get('groups', []) if final_data else []
+            if not _select_matching_loops_by_centers(bm, final_groups, selected_loop_centers):
+                _restore_selection_state(bm, selection_state)
+            bmesh.update_edit_mesh(obj.data)
 
     if report is not None:
         if split_edges:
             report(
                 {'INFO'},
                 "Open loop bridge with corners split corner sections and resampled segments: "
-                f"corners={len(corner_sections)}, edges={len(split_edges)}, segments={segment_count}.",
+                f"corners={len(corner_sections)}, edges={len(split_edges)}, "
+                f"segments={segment_count}, welded={welded_vert_count}.",
             )
         else:
             report(
