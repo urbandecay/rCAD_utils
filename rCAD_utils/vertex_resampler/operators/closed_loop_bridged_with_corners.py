@@ -3,6 +3,7 @@
 import bmesh
 
 from . import closed_loop_bridged
+from . import bridged_open_loop
 from .bridge_utils import get_auto_bridged_chain, get_bridged_chain
 from .detection_utils import get_selected_islands
 from ..debug import face_ref, face_refs, loop_ref
@@ -23,6 +24,78 @@ def _position_key(vec, tolerance):
         round(vec.y / tolerance),
         round(vec.z / tolerance),
     )
+
+
+def _face_position(face):
+    if face is None or not getattr(face, "is_valid", False):
+        return None
+    count = len(face.verts)
+    if count == 0:
+        return None
+    center = face.verts[0].co.copy()
+    for vert in face.verts[1:]:
+        center += vert.co
+    center /= count
+    return center
+
+
+def _face_positions(faces):
+    return [
+        position for position in (_face_position(face) for face in faces)
+        if position is not None
+    ]
+
+
+def _build_face_position_lookup(bm):
+    lookup = {}
+    for face in bm.faces:
+        if not getattr(face, "is_valid", False):
+            continue
+        position = _face_position(face)
+        if position is None:
+            continue
+        lookup.setdefault(_position_key(position, _POSITION_TOLERANCE), []).append((position, face))
+    return lookup
+
+
+def _live_faces_from_positions(bm, positions, lookup=None):
+    live_faces = set()
+    if not positions:
+        return live_faces
+
+    if lookup is None:
+        lookup = _build_face_position_lookup(bm)
+
+    for position in positions:
+        for candidate_position, face in lookup.get(_position_key(position, _POSITION_TOLERANCE), []):
+            if (candidate_position - position).length <= _POSITION_TOLERANCE:
+                live_faces.add(face)
+                break
+
+    return live_faces
+
+
+def _select_only_faces(bm, selected_faces):
+    for face in bm.faces:
+        if face.is_valid:
+            face.select = False
+    for edge in bm.edges:
+        if edge.is_valid:
+            edge.select = False
+    for vert in bm.verts:
+        if vert.is_valid:
+            vert.select = False
+
+    for face in selected_faces:
+        if face is None or not getattr(face, "is_valid", False):
+            continue
+        face.select = True
+        for edge in face.edges:
+            if edge.is_valid:
+                edge.select = True
+        for vert in face.verts:
+            if vert.is_valid:
+                vert.select = True
 
 
 def _group_loops(group_data):
@@ -2133,29 +2206,6 @@ def _execute_open_path(bm, obj, direction, report, selected_faces, candidates):
             data=fresh_data,
         )
     finally:
-        if anchor_plan is not None:
-            merged, _live_weld_diagnostics = _weld_open_path_corner_rings(
-                bm,
-                split_infos,
-                anchor_plan['corner_directions'],
-            )
-        else:
-            merged, _live_weld_diagnostics = _weld_live_corner_rings(bm, split_infos)
-        if merged == 0:
-            fallback_targetmap = _targetmap_from_split_clusters(split_infos)
-            if fallback_targetmap:
-                try:
-                    bmesh.ops.weld_verts(
-                        bm,
-                        targetmap=fallback_targetmap,
-                    )
-                    bm.verts.ensure_lookup_table()
-                    bm.edges.ensure_lookup_table()
-                    bm.faces.ensure_lookup_table()
-                    bm.normal_update()
-                    merged = len(fallback_targetmap)
-                except Exception:
-                    merged = 0
         bmesh.update_edit_mesh(obj.data)
 
     if report is not None and result != {'FINISHED'}:
@@ -2210,21 +2260,6 @@ def _execute_closed_path(bm, obj, direction, report, selected_faces, candidates)
     if not shared_loops:
         if report is not None:
             report({'ERROR'}, f"CLBWC exec failed: path={path_label}, synthetic seam created no shared corner rings.")
-        merged, _live_weld_diagnostics = _weld_live_corner_rings(bm, synthetic_split_infos)
-        if merged == 0:
-            fallback_targetmap = _targetmap_from_split_clusters(synthetic_split_infos)
-            if fallback_targetmap:
-                try:
-                    bmesh.ops.weld_verts(
-                        bm,
-                        targetmap=fallback_targetmap,
-                    )
-                    bm.verts.ensure_lookup_table()
-                    bm.edges.ensure_lookup_table()
-                    bm.faces.ensure_lookup_table()
-                    bm.normal_update()
-                except Exception:
-                    pass
         bmesh.update_edit_mesh(obj.data)
         return {'CANCELLED'}
 
@@ -2234,47 +2269,38 @@ def _execute_closed_path(bm, obj, direction, report, selected_faces, candidates)
         if anchor_plan is not None
         else _choose_anchor_homes(shared_loops, obj)
     )
+    shaft_face_positions = _face_positions(
+        {
+            face
+            for candidate in candidates
+            for face in candidate.get('strip_faces', ())
+            if face is not None and getattr(face, "is_valid", False)
+        }
+    )
     real_split_infos = _split_shared_corner_rings(bm, selected_faces, shared_loops, anchor_homes)
     if not real_split_infos:
         if report is not None:
             report({'ERROR'}, f"CLBWC exec failed: path={path_label}, could not split shared corner rings after synthetic seam.")
-        merged, _live_weld_diagnostics = _weld_live_corner_rings(bm, synthetic_split_infos)
-        if merged == 0:
-            fallback_targetmap = _targetmap_from_split_clusters(synthetic_split_infos)
-            if fallback_targetmap:
-                try:
-                    bmesh.ops.weld_verts(
-                        bm,
-                        targetmap=fallback_targetmap,
-                    )
-                    bm.verts.ensure_lookup_table()
-                    bm.edges.ensure_lookup_table()
-                    bm.faces.ensure_lookup_table()
-                    bm.normal_update()
-                except Exception:
-                    pass
         return {'CANCELLED'}
 
     try:
-        fresh_data = closed_loop_bridged.detect(bm)
-        if not fresh_data or not fresh_data.get('groups'):
+        live_shaft_faces = _live_faces_from_positions(bm, shaft_face_positions)
+        if not live_shaft_faces:
             if report is not None:
-                report({'ERROR'}, f"CLBWC exec failed: path={path_label}, disconnected bridge detection found no groups.")
+                report({'ERROR'}, f"CLBWC exec failed: path={path_label}, could not recover shaft faces after split.")
             return {'CANCELLED'}
 
-        fresh_data = {
-            **fresh_data,
-            'groups': (
-                _anchor_open_path_groups(fresh_data['groups'], real_split_infos)
-                if anchor_plan is not None
-                else [
-                    _anchor_group_rings(group_data, synthetic_split_infos + real_split_infos)
-                    for group_data in fresh_data['groups']
-                ]
-            ),
-            'skip_phase_normalization': bool(anchor_plan is not None),
-        }
-        result = closed_loop_bridged.execute(
+        _select_only_faces(bm, live_shaft_faces)
+        bm.select_flush_mode()
+        bm.normal_update()
+
+        fresh_data = bridged_open_loop.detect(bm)
+        if not fresh_data or not fresh_data.get('groups'):
+            if report is not None:
+                report({'ERROR'}, f"CLBWC exec failed: path={path_label}, split-open segment detection found no groups.")
+            return {'CANCELLED'}
+
+        result = bridged_open_loop.execute(
             bm,
             obj,
             direction,
@@ -2282,37 +2308,6 @@ def _execute_closed_path(bm, obj, direction, report, selected_faces, candidates)
             data=fresh_data,
         )
     finally:
-        merged = 0
-        if anchor_plan is not None:
-            real_merged, _live_weld_diagnostics = _weld_open_path_corner_rings(
-                bm,
-                real_split_infos,
-                anchor_plan['corner_directions'],
-            )
-            synthetic_merged, _synthetic_weld_diagnostics = _weld_closed_path_synthetic_seam(
-                bm,
-                synthetic_split_infos[0],
-                real_split_infos,
-                anchor_plan['synthetic_direction'],
-            )
-            merged = real_merged + synthetic_merged
-        else:
-            merged, _live_weld_diagnostics = _weld_live_corner_rings(bm, synthetic_split_infos + real_split_infos)
-        if merged == 0:
-            fallback_targetmap = _targetmap_from_split_clusters(synthetic_split_infos + real_split_infos)
-            if fallback_targetmap:
-                try:
-                    bmesh.ops.weld_verts(
-                        bm,
-                        targetmap=fallback_targetmap,
-                    )
-                    bm.verts.ensure_lookup_table()
-                    bm.edges.ensure_lookup_table()
-                    bm.faces.ensure_lookup_table()
-                    bm.normal_update()
-                    merged = len(fallback_targetmap)
-                except Exception:
-                    merged = 0
         bmesh.update_edit_mesh(obj.data)
 
     if report is not None and result != {'FINISHED'}:

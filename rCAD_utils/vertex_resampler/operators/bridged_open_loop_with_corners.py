@@ -365,15 +365,20 @@ def _quad_face_from_vert_set(verts):
     )
 
 
-def _shaft_faces_from_open_group(group):
-    loops, is_closed = group
-    if is_closed or len(loops) < 2:
+def _shaft_faces_from_loop_sequence(loops, is_closed=False, strict=False):
+    if not loops or len(loops) < 2:
         return set()
 
     shaft_faces = set()
-    for current_loop, next_loop in zip(loops, loops[1:]):
+    loop_pairs = list(zip(loops, loops[1:]))
+    if is_closed and len(loops) > 2:
+        loop_pairs.append((loops[-1], loops[0]))
+
+    for current_loop, next_loop in loop_pairs:
         if len(current_loop) != len(next_loop) or len(current_loop) < 2:
-            return set()
+            if strict:
+                return set()
+            continue
 
         for curr_a, curr_b, next_a, next_b in zip(
             current_loop,
@@ -383,10 +388,19 @@ def _shaft_faces_from_open_group(group):
         ):
             face = _quad_face_from_vert_set((curr_a, curr_b, next_b, next_a))
             if face is None:
-                return set()
+                if strict:
+                    return set()
+                continue
             shaft_faces.add(face)
 
     return shaft_faces
+
+
+def _shaft_faces_from_open_group(group):
+    loops, is_closed = group
+    if is_closed or len(loops) < 2:
+        return set()
+    return _shaft_faces_from_loop_sequence(loops, is_closed=False, strict=True)
 
 
 def _corner_face_component_from_shaft_faces(shaft_seed_faces):
@@ -2851,7 +2865,7 @@ def execute(bm, obj, direction, report=None, data=None):
         {
             face
             for group in data.get('groups', [])
-            for face in _shaft_faces_from_open_group(group)
+            for face in _shaft_faces_from_loop_sequence(group[0], is_closed=group[1], strict=False)
         }
     )
     split_edges = set()
