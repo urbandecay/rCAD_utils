@@ -4752,15 +4752,324 @@ def _capture_detected_cross_sections(obj, end_sections, corner_sections, all_sec
         anchor_overlay.add_segments(segments)
 
 
-from . import bridged_open_loop_with_corners_attached_case
-from . import bridged_open_loop_with_corners_plain_case
+def _data_has_attached_outside_geometry(data):
+    if not data:
+        return False
+
+    if any(component.get('outside_side_faces') for component in data.get('components', [])):
+        return True
+
+    groups = data.get('groups', [])
+    if not groups:
+        return False
+
+    return bool(_outer_boundary_seam_records_from_groups(groups))
+
+
+def _detect_plain_open_corner_case(bm):
+    _trace_focus("Detect started.")
+    seed_loops = _selected_seed_loops(bm)
+    if seed_loops:
+        groups = []
+        partial_ranges = []
+        for component_index, seed_loop in enumerate(seed_loops, start=1):
+            seed_group = _expand_open_bridge_from_seed_loop(seed_loop)
+            if seed_group is None:
+                seed_group = _expand_closed_bridge_from_seed_loop(seed_loop)
+            if seed_group is None:
+                _trace_focus(
+                    "Selected seed expansion failed.",
+                    component_index=component_index,
+                    seed_size=len(seed_loop),
+                )
+                return None
+            groups.append(seed_group)
+            partial_range = _selected_subset_range_any_loop(seed_group, seed_loop)
+            if partial_range is None:
+                partial_range = {
+                    'loop_index': 0,
+                    'start_index': 0,
+                    'end_index': len(seed_loop) - 1,
+                    'score': (len(seed_loop), 1.0, 1.0, 0.0, 0),
+                }
+            partial_ranges.append(partial_range)
+
+        _trace_focus(
+            "Detect path chosen: selected seed loops.",
+            group_count=len(groups),
+            seed_sizes=[len(seed_loop) for seed_loop in seed_loops],
+            loop_counts=[len(group[0]) for group in groups],
+        )
+        result = {
+            'groups': groups,
+            'components': [],
+            'mode_label': 'Bridged open loop with corners',
+            'detector_only': True,
+            'partial_ranges': partial_ranges,
+        }
+        if not _data_has_attached_outside_geometry(result):
+            result['outside_geometry_case'] = False
+            return result
+        return None
+
+    data = detect_open_strip_selection(bm)
+    if data is not None and _groups_are_open(data['groups']):
+        selected_verts = _selected_verts(bm)
+        seed_group = _find_group_from_seed_loop(data['groups'], selected_verts)
+        if seed_group is not None:
+            _trace_focus(
+                "Detect path chosen: matched selected cross section inside open groups.",
+                group_count=len(data.get('groups', [])),
+            )
+            result = _attach_partial_ranges(bm, {
+                'groups': [seed_group],
+                'components': data.get('components', []),
+                'mode_label': 'Bridged open loop with corners',
+                'detector_only': True,
+            })
+            if not _data_has_attached_outside_geometry(result):
+                result['outside_geometry_case'] = False
+                return result
+            return None
+
+        _trace_focus(
+            "Detect path chosen: generic open-group scan.",
+            group_count=len(data.get('groups', [])),
+            loop_counts=[len(group[0]) for group in data.get('groups', [])],
+            loop_sizes=[
+                len(group[0][0]) if group[0] else 0
+                for group in data.get('groups', [])
+            ],
+        )
+        result = _attach_partial_ranges(bm, {
+            'groups': data['groups'],
+            'components': data.get('components', []),
+            'mode_label': 'Bridged open loop with corners',
+            'detector_only': True,
+        })
+        if not _data_has_attached_outside_geometry(result):
+            result['outside_geometry_case'] = False
+            return result
+        return None
+
+    _trace_focus("Detect failed.")
+    return None
 
 
 def detect(bm):
-    data = bridged_open_loop_with_corners_attached_case.detect(bm)
-    if data is not None:
-        return data
-    return bridged_open_loop_with_corners_plain_case.detect(bm)
+    return _detect_plain_open_corner_case(bm)
+
+
+def _execute_plain_open_corner_case(bm, obj, direction, report=None, data=None):
+    selection_state = _capture_selection_state(bm)
+    if data is None:
+        data = _detect_plain_open_corner_case(bm)
+    if not data:
+        _trace_focus("Execute cancelled: detect returned no data.")
+        return {'CANCELLED'}
+    source_loop_specs = _source_loop_specs(
+        data.get('groups', []),
+        partial_ranges=data.get('partial_ranges'),
+    )
+
+    end_sections, corner_sections, all_sections, collected_section_indices = _detected_cross_sections(
+        data.get('groups', []),
+        partial_ranges=data.get('partial_ranges'),
+    )
+    _capture_detected_cross_sections(obj, end_sections, corner_sections, all_sections=all_sections)
+
+    _trace_focus(
+        "Preview build finished.",
+        end_cross_section_count=len(end_sections),
+        corner_cross_section_count=len(corner_sections),
+        propagated_cross_section_count=len(all_sections),
+        collected_section_indices=collected_section_indices,
+    )
+
+    shaft_face_positions = _face_positions(
+        {
+            face
+            for group in data.get('groups', [])
+            for face in _shaft_faces_from_loop_sequence(group[0], is_closed=group[1], strict=False)
+        }
+    )
+    split_edges = set()
+    split_section_logs = []
+    split_mode = "corner_sections"
+    seam_records = []
+    for section_index, section in enumerate(corner_sections, start=1):
+        chain_edges = _chain_edges(section, is_closed=False)
+        if not chain_edges:
+            split_section_logs.append({
+                'section_index': section_index,
+                'vert_indices': [vert.index for vert in section if getattr(vert, "is_valid", False)],
+                'edge_indices': None,
+            })
+            continue
+        split_section_logs.append({
+            'section_index': section_index,
+            'vert_indices': [vert.index for vert in section if getattr(vert, "is_valid", False)],
+            'edge_indices': [edge.index for edge in chain_edges if getattr(edge, "is_valid", False)],
+            'edge_labels': [_edge_debug_label(edge) for edge in chain_edges if getattr(edge, "is_valid", False)],
+        })
+        split_edges.update(chain_edges)
+
+    if not split_edges:
+        seam_records = _outer_boundary_seam_records_from_groups(data.get('groups', []))
+        split_mode = "outer_chunk_boundaries"
+        split_edges = {
+            edge
+            for record in seam_records
+            for edge in record.get('boundary_edges', set())
+            if getattr(edge, "is_valid", False)
+        }
+        split_section_logs = [
+            {
+                'section_index': index,
+                'boundary_edge_count': len(record.get('boundary_edges', set())),
+                'shaft_face_count': len(record.get('shaft_faces', set())),
+                'outside_face_count': len(record.get('corner_faces', set())),
+                'edge_indices': sorted(
+                    edge.index for edge in record.get('boundary_edges', set())
+                    if getattr(edge, "is_valid", False)
+                ),
+            }
+            for index, record in enumerate(seam_records, start=1)
+        ]
+
+    _trace_focus(
+        "Split execution plan.",
+        split_mode=split_mode,
+        corner_section_count=len(corner_sections),
+        split_section_logs=split_section_logs,
+        split_edge_count=len(split_edges),
+        split_edge_indices=sorted(
+            edge.index for edge in split_edges
+            if getattr(edge, "is_valid", False)
+        ),
+        split_edge_labels=sorted(
+            _edge_debug_label(edge) for edge in split_edges
+            if getattr(edge, "is_valid", False)
+        ),
+    )
+
+    segment_count = 0
+    welded_vert_count = 0
+    if split_edges:
+        try:
+            if seam_records:
+                split_infos = _split_seam_records(bm, seam_records)
+            else:
+                bmesh.ops.split_edges(bm, edges=list(split_edges))
+                bm.verts.ensure_lookup_table()
+                bm.edges.ensure_lookup_table()
+                bm.faces.ensure_lookup_table()
+                bm.select_flush_mode()
+                bm.normal_update()
+                split_infos = _split_infos_from_sections(bm, corner_sections)
+
+            live_shaft_faces = _live_faces_from_positions(bm, shaft_face_positions)
+            _trace_focus(
+                "Post-split shaft face recovery.",
+                shaft_face_count=len(live_shaft_faces),
+            )
+            if live_shaft_faces:
+                _select_only_faces(bm, live_shaft_faces)
+                bm.select_flush_mode()
+                bm.normal_update()
+
+                fresh_groups = _open_groups_from_shaft_faces(live_shaft_faces)
+                segment_count = len(fresh_groups)
+                source_targets = _source_targets_for_fresh_groups(
+                    source_loop_specs,
+                    fresh_groups,
+                )
+                source_target_lookup = {
+                    target['group_index']: target for target in source_targets
+                }
+                final_source_loop_positions = []
+                _trace_focus(
+                    "Post-split open bridge detect.",
+                    group_count=segment_count,
+                )
+
+                if fresh_groups:
+                    for group_index, rings_data in enumerate(fresh_groups, start=1):
+                        anchored_group = _anchor_open_group_endpoints(rings_data)
+                        loops = anchored_group['rings'][0]
+                        _trace_focus(
+                            "Segment resample execute.",
+                            group_index=group_index,
+                            loop_count=len(loops),
+                            loop_size=len(loops[0]) if loops else 0,
+                        )
+                        result_info = {}
+                        execute_aligned_loops_logic(
+                            bm,
+                            obj,
+                            anchored_group['rings'],
+                            direction,
+                            report=report,
+                            use_seams=anchored_group.get('use_seams', True),
+                            migrate_seams=anchored_group.get('migrate_seams'),
+                            max_seams=anchored_group.get('max_seams'),
+                            forced_seam_verts=anchored_group.get('forced_seam_verts'),
+                            result_info=result_info,
+                        )
+                        target = source_target_lookup.get(group_index - 1)
+                        ring_group = result_info.get('ring_group')
+                        if target is not None and ring_group is not None:
+                            target_loop_index = target['loop_index']
+                            if 0 <= target_loop_index < len(ring_group.rings):
+                                final_source_loop_positions.append([
+                                    vert.co.copy()
+                                    for vert in ring_group.rings[target_loop_index].verts
+                                    if getattr(vert, "is_valid", False)
+                                ])
+                    welded_vert_count = _weld_live_open_loops(bm, split_infos)
+                    if welded_vert_count == 0:
+                        fallback_targetmap = _targetmap_from_live_split_positions(
+                            bm,
+                            split_infos,
+                        )
+                        if fallback_targetmap:
+                            try:
+                                bmesh.ops.weld_verts(bm, targetmap=fallback_targetmap)
+                                bm.verts.ensure_lookup_table()
+                                bm.edges.ensure_lookup_table()
+                                bm.faces.ensure_lookup_table()
+                                bm.normal_update()
+                                welded_vert_count = len(fallback_targetmap)
+                            except Exception:
+                                welded_vert_count = 0
+                    if final_source_loop_positions:
+                        _select_loops_from_positions(bm, final_source_loop_positions)
+        finally:
+            if not _selected_verts(bm):
+                final_data = detect_open_strip_selection(bm)
+                final_groups = final_data.get('groups', []) if final_data else []
+                if not _select_source_loops(bm, final_groups, source_loop_specs):
+                    _restore_selection_state(bm, selection_state)
+            else:
+                bm.select_flush_mode()
+            bmesh.update_edit_mesh(obj.data)
+
+    if report is not None:
+        if split_edges:
+            report(
+                {'INFO'},
+                "Open loop bridge with corners split corner sections and resampled segments: "
+                f"corners={len(corner_sections)}, edges={len(split_edges)}, "
+                f"segments={segment_count}, welded={welded_vert_count}.",
+            )
+        else:
+            report(
+                {'INFO'},
+                "Open loop bridge with corners detector only: "
+                f"ends={len(end_sections)}, corners={len(corner_sections)}.",
+            )
+
+    return {'FINISHED'}
 
 
 def execute(bm, obj, direction, report=None, data=None):
@@ -4769,17 +5078,7 @@ def execute(bm, obj, direction, report=None, data=None):
     if not data:
         _trace_focus("Execute cancelled: detect returned no data.")
         return {'CANCELLED'}
-
-    if data.get('outside_geometry_case'):
-        return bridged_open_loop_with_corners_attached_case.execute(
-            bm,
-            obj,
-            direction,
-            report=report,
-            data=data,
-        )
-
-    return bridged_open_loop_with_corners_plain_case.execute(
+    return _execute_plain_open_corner_case(
         bm,
         obj,
         direction,

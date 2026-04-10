@@ -4752,15 +4752,260 @@ def _capture_detected_cross_sections(obj, end_sections, corner_sections, all_sec
         anchor_overlay.add_segments(segments)
 
 
-from . import bridged_open_loop_with_corners_attached_case
-from . import bridged_open_loop_with_corners_plain_case
+def _attached_data_has_attached_outside_geometry(data):
+    if not data:
+        return False
+
+    if any(component.get('outside_side_faces') for component in data.get('components', [])):
+        return True
+
+    groups = data.get('groups', [])
+    if not groups:
+        return False
+
+    return bool(_attached_outer_boundary_seam_records_from_groups(groups))
+
+
+def _detect_attached_open_corner_case(bm):
+    _trace_focus("Detect started.")
+    seed_loops = _selected_seed_loops(bm)
+    if seed_loops:
+        groups = []
+        partial_ranges = []
+        for component_index, seed_loop in enumerate(seed_loops, start=1):
+            seed_group = _expand_open_bridge_from_seed_loop(seed_loop)
+            if seed_group is None:
+                seed_group = _expand_closed_bridge_from_seed_loop(seed_loop)
+            if seed_group is None:
+                _trace_focus(
+                    "Selected seed expansion failed.",
+                    component_index=component_index,
+                    seed_size=len(seed_loop),
+                )
+                return None
+            groups.append(seed_group)
+            partial_range = _selected_subset_range_any_loop(seed_group, seed_loop)
+            if partial_range is None:
+                partial_range = {
+                    'loop_index': 0,
+                    'start_index': 0,
+                    'end_index': len(seed_loop) - 1,
+                    'score': (len(seed_loop), 1.0, 1.0, 0.0, 0),
+                }
+            partial_ranges.append(partial_range)
+
+        _trace_focus(
+            "Detect path chosen: selected seed loops.",
+            group_count=len(groups),
+            seed_sizes=[len(seed_loop) for seed_loop in seed_loops],
+            loop_counts=[len(group[0]) for group in groups],
+        )
+        result = {
+            'groups': groups,
+            'components': [],
+            'mode_label': 'Bridged open loop with corners',
+            'detector_only': True,
+            'partial_ranges': partial_ranges,
+        }
+        if _attached_data_has_attached_outside_geometry(result):
+            result['outside_geometry_case'] = True
+            return result
+        return None
+
+    data = _attached_detect_open_strip_selection(bm)
+    if data is not None and _groups_are_open(data['groups']):
+        selected_verts = _selected_verts(bm)
+        seed_group = _find_group_from_seed_loop(data['groups'], selected_verts)
+        if seed_group is not None:
+            _trace_focus(
+                "Detect path chosen: matched selected cross section inside open groups.",
+                group_count=len(data.get('groups', [])),
+            )
+            result = _attach_partial_ranges(bm, {
+                'groups': [seed_group],
+                'components': data.get('components', []),
+                'mode_label': 'Bridged open loop with corners',
+                'detector_only': True,
+            })
+            if _attached_data_has_attached_outside_geometry(result):
+                result['outside_geometry_case'] = True
+                return result
+            return None
+
+        _trace_focus(
+            "Detect path chosen: generic open-group scan.",
+            group_count=len(data.get('groups', [])),
+            loop_counts=[len(group[0]) for group in data.get('groups', [])],
+            loop_sizes=[
+                len(group[0][0]) if group[0] else 0
+                for group in data.get('groups', [])
+            ],
+        )
+        result = _attach_partial_ranges(bm, {
+            'groups': data['groups'],
+            'components': data.get('components', []),
+            'mode_label': 'Bridged open loop with corners',
+            'detector_only': True,
+        })
+        if _attached_data_has_attached_outside_geometry(result):
+            result['outside_geometry_case'] = True
+            return result
+        return None
+
+    _trace_focus("Detect failed.")
+    return None
 
 
 def detect(bm):
-    data = bridged_open_loop_with_corners_attached_case.detect(bm)
-    if data is not None:
-        return data
-    return bridged_open_loop_with_corners_plain_case.detect(bm)
+    data = _detect_attached_open_corner_case(bm)
+    return data
+
+
+def _execute_attached_open_corner_case(bm, obj, direction, report=None, data=None):
+    if data is None:
+        data = _detect_attached_open_corner_case(bm)
+    if not data:
+        _trace_focus("Execute cancelled: detect returned no data.")
+        return {'CANCELLED'}
+    execute_plan = _attached_build_open_corner_execute_plan(data)
+    end_sections = execute_plan['end_sections']
+    corner_sections = execute_plan['corner_sections']
+    segment_sections = execute_plan['segment_sections']
+    segment_section_positions = execute_plan['segment_section_positions']
+    all_sections = execute_plan['all_sections']
+    collected_section_indices = execute_plan['collected_section_indices']
+    _capture_detected_cross_sections(obj, end_sections, corner_sections, all_sections=all_sections)
+
+    _trace_focus(
+        "Preview build finished.",
+        end_cross_section_count=len(end_sections),
+        corner_cross_section_count=len(corner_sections),
+        propagated_cross_section_count=len(all_sections),
+        collected_section_indices=collected_section_indices,
+    )
+
+    shaft_face_positions = execute_plan['shaft_face_positions']
+    segment_split_edges = execute_plan['segment_split_edges']
+    split_edges = execute_plan['split_edges']
+    split_section_logs = execute_plan['split_section_logs']
+    split_mode = execute_plan['split_mode']
+    seam_records = execute_plan['seam_records']
+
+    segment_count = 0
+    if split_edges:
+        initial_shaft_faces = _live_faces_from_positions(bm, shaft_face_positions)
+        _attached_trace_split_debug(
+            "Planned separation.",
+            split_mode=split_mode,
+            end_section_count=len(end_sections),
+            corner_section_count=len(corner_sections),
+            interior_section_count=len(segment_sections),
+            seam_record_count=len(seam_records),
+            split_edge_count=len(split_edges),
+            initial_shaft_face_count=len(initial_shaft_faces),
+            initial_shaft_components=_attached_shaft_component_summary(initial_shaft_faces),
+            split_section_logs=split_section_logs,
+        )
+
+        if seam_records:
+            _attached_split_seam_records(bm, seam_records)
+            detached_shaft_faces = _live_faces_from_positions(bm, shaft_face_positions)
+            _attached_trace_split_debug(
+                "After outside detach split.",
+                shaft_face_count=len(detached_shaft_faces),
+                shaft_components=_attached_shaft_component_summary(detached_shaft_faces),
+            )
+        else:
+            bmesh.ops.split_edges(bm, edges=list(split_edges))
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            bm.select_flush_mode()
+            bm.normal_update()
+            detached_shaft_faces = _live_faces_from_positions(bm, shaft_face_positions)
+            _attached_trace_split_debug(
+                "After direct section split.",
+                shaft_face_count=len(detached_shaft_faces),
+                shaft_components=_attached_shaft_component_summary(detached_shaft_faces),
+            )
+
+        if segment_split_edges:
+            live_segment_edges = _live_bmesh_items(segment_split_edges)
+            live_segment_control_verts = _split_control_verts(live_segment_edges)
+            if seam_records and segment_section_positions:
+                vert_lookup = _build_vert_position_lookup(bm)
+                _attached_trace_split_debug(
+                    "Before interior seam split.",
+                    section_cluster_summary=_attached_section_cluster_summary(
+                        bm,
+                        segment_section_positions,
+                        vert_lookup=vert_lookup,
+                    ),
+                )
+            _attached_trace_split_debug(
+                "Planned interior seam edges.",
+                live_edge_count=len(live_segment_edges),
+                live_control_vert_count=len(live_segment_control_verts),
+                live_edge_indices=sorted(
+                    edge.index for edge in live_segment_edges
+                    if getattr(edge, "is_valid", False)
+                ),
+            )
+            if live_segment_edges:
+                bmesh.ops.split_edges(
+                    bm,
+                    edges=list(live_segment_edges),
+                    verts=list(live_segment_control_verts),
+                    use_verts=bool(live_segment_control_verts),
+                )
+                bm.verts.ensure_lookup_table()
+                bm.edges.ensure_lookup_table()
+                bm.faces.ensure_lookup_table()
+                bm.select_flush_mode()
+                bm.normal_update()
+                post_internal_split_faces = _live_faces_from_positions(bm, shaft_face_positions)
+                split_details = {
+                    'shaft_face_count': len(post_internal_split_faces),
+                    'shaft_components': _attached_shaft_component_summary(post_internal_split_faces),
+                }
+                if seam_records and segment_section_positions:
+                    split_details['section_cluster_summary'] = _attached_section_cluster_summary(
+                        bm,
+                        segment_section_positions,
+                    )
+                _attached_trace_split_debug("After interior seam split.", **split_details)
+
+        live_shaft_faces = _live_faces_from_positions(bm, shaft_face_positions)
+        if live_shaft_faces:
+            _select_only_faces(bm, live_shaft_faces)
+            bm.select_flush_mode()
+            bm.normal_update()
+            segment_count = len(_face_components(live_shaft_faces))
+            _attached_trace_split_debug(
+                "Separation-only split result.",
+                group_count=segment_count,
+                shaft_components=_attached_shaft_component_summary(live_shaft_faces),
+            )
+
+        bmesh.update_edit_mesh(obj.data)
+
+    if report is not None:
+        if split_edges:
+            report(
+                {'INFO'},
+                "Open loop bridge with corners separation only: "
+                f"ends={len(end_sections)}, corners={len(corner_sections)}, "
+                f"sections={len(segment_sections)}, edges={len(split_edges)}, "
+                f"segments={segment_count}.",
+            )
+        else:
+            report(
+                {'INFO'},
+                "Open loop bridge with corners detector only: "
+                f"ends={len(end_sections)}, corners={len(corner_sections)}.",
+            )
+
+    return {'FINISHED'}
 
 
 def execute(bm, obj, direction, report=None, data=None):
@@ -4770,16 +5015,7 @@ def execute(bm, obj, direction, report=None, data=None):
         _trace_focus("Execute cancelled: detect returned no data.")
         return {'CANCELLED'}
 
-    if data.get('outside_geometry_case'):
-        return bridged_open_loop_with_corners_attached_case.execute(
-            bm,
-            obj,
-            direction,
-            report=report,
-            data=data,
-        )
-
-    return bridged_open_loop_with_corners_plain_case.execute(
+    return _execute_attached_open_corner_case(
         bm,
         obj,
         direction,
