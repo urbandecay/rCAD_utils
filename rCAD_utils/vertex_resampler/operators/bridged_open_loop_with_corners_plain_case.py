@@ -4742,14 +4742,8 @@ def _capture_detected_cross_sections(obj, end_sections, corner_sections, all_sec
             all_points.append(matrix_world @ center)
         segments.extend(_world_loop_segments(obj, section, is_closed=False))
 
-    if all_points:
-        anchor_overlay.add_points(all_points, label_prefix="S")
-    if end_points:
-        anchor_overlay.add_points(end_points, label_prefix="E")
-    if corner_points:
-        anchor_overlay.add_points(corner_points, label_prefix="C")
-    if segments:
-        anchor_overlay.add_segments(segments)
+    # if segments:
+    #     anchor_overlay.add_segments(segments)
 
 
 def _data_has_attached_outside_geometry(data):

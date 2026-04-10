@@ -129,8 +129,8 @@ def _capture_cross_section_overlay(obj, ring_group):
     )
 
     segments = between_ring_segments if between_avg <= along_avg else along_loop_segments
-    if segments:
-        anchor_overlay.add_segments(segments)
+    # if segments:
+    #     anchor_overlay.add_segments(segments)
 
 
 def _sanitize_chain_verts(verts, closed):

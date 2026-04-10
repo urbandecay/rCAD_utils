@@ -57,7 +57,7 @@ def _remove_handlers():
 
 
 def _draw_points():
-    if not _ACTIVE_POINTS and not _ACTIVE_SEGMENTS:
+    if not _ACTIVE_SEGMENTS:
         return
 
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
@@ -74,38 +74,12 @@ def _draw_points():
         shader.uniform_float("color", (0.1, 1.0, 1.0, 0.9))
         batch.draw(shader)
         gpu.state.line_width_set(1.0)
-    if _ACTIVE_POINTS:
-        coords = [item['co'] for item in _ACTIVE_POINTS]
-        batch = batch_for_shader(shader, 'POINTS', {"pos": coords})
-        gpu.state.point_size_set(10.0)
-        shader.bind()
-        shader.uniform_float("color", (1.0, 0.35, 0.1, 0.95))
-        batch.draw(shader)
-        gpu.state.point_size_set(1.0)
     gpu.state.depth_test_set('LESS_EQUAL')
     gpu.state.blend_set('NONE')
 
 
 def _draw_labels():
-    if not _ACTIVE_POINTS:
-        return
-
-    context = bpy.context
-    region = getattr(context, "region", None)
-    region_data = getattr(context, "region_data", None)
-    if region is None or region_data is None:
-        return
-
-    font_id = 0
-    blf.size(font_id, 12.0)
-    blf.color(font_id, 1.0, 0.9, 0.7, 1.0)
-
-    for item in _ACTIVE_POINTS:
-        screen_pos = location_3d_to_region_2d(region, region_data, item['co'])
-        if screen_pos is None:
-            continue
-        blf.position(font_id, screen_pos.x + 8.0, screen_pos.y + 8.0, 0.0)
-        blf.draw(font_id, item['label'])
+    return
 
 
 def begin_capture():
@@ -114,12 +88,7 @@ def begin_capture():
 
 
 def add_points(points, label_prefix="A"):
-    start_index = len(_PENDING_POINTS) + 1
-    for offset, point in enumerate(points):
-        _PENDING_POINTS.append({
-            'co': point,
-            'label': f"{label_prefix}{start_index + offset}",
-        })
+    return
 
 
 def add_segments(segments):
