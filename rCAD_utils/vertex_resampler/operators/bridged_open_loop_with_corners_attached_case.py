@@ -3,7 +3,6 @@
 import bmesh
 
 from .. import anchor_overlay
-from ..debug import debug_log
 from .bridge_utils import _is_ordered_open_chain
 from .detection_utils import get_selected_islands
 from .resample_common import execute_aligned_loops_logic
@@ -5327,15 +5326,101 @@ def _attached_weld_middle_segments(bm, resampled_groups, split_infos):
     )
 
 
-def _attached_weld_outer_geometry(bm, split_infos):
+def _attached_boundary_record_position_specs(bm, seam_records, boundary_split_infos):
+    record_specs = []
+    used_split_indices = set()
+
+    for record in seam_records or []:
+        live_boundary_edges = _live_bmesh_items(record.get('boundary_edges', set()))
+        live_corner_faces = _live_bmesh_items(record.get('corner_faces', set()))
+        chain = _ordered_chain_verts(live_boundary_edges)
+        if not chain or not live_corner_faces:
+            continue
+
+        anchor_position = chain[0].co.copy()
+        best_split_index = None
+        best_split_distance = None
+        for split_index, split_info in enumerate(boundary_split_infos):
+            if split_index in used_split_indices:
+                continue
+            distance = (split_info['anchor_home'] - anchor_position).length
+            if best_split_distance is None or distance < best_split_distance:
+                best_split_distance = distance
+                best_split_index = split_index
+
+        if best_split_index is None:
+            continue
+
+        used_split_indices.add(best_split_index)
+        record_specs.append({
+            'corner_faces': live_corner_faces,
+            'positions': [
+                cluster['position'].copy()
+                for cluster in boundary_split_infos[best_split_index].get('clusters', [])
+                if cluster.get('position') is not None
+            ],
+        })
+
+    return record_specs
+
+
+def _attached_outer_targetmap_from_seam_positions(bm, context, split_infos):
     _section_split_infos, boundary_split_infos = _attached_split_infos_by_kind(split_infos)
     if not boundary_split_infos:
-        return 0
+        return {}
 
-    boundary_targetmap = _targetmap_from_live_split_positions(
+    record_specs = _attached_boundary_record_position_specs(
         bm,
+        context.get('seam_records', []),
         boundary_split_infos,
     )
+    if not record_specs:
+        return {}
+
+    vert_lookup = _build_vert_position_lookup(bm)
+    targetmap = {}
+    for record_spec in record_specs:
+        corner_faces = record_spec['corner_faces']
+        for position in record_spec['positions']:
+            live_verts = _verts_at_position(
+                bm,
+                position,
+                lookup=vert_lookup,
+            )
+            if len(live_verts) < 2:
+                continue
+
+            outside_verts = [
+                vert for vert in live_verts
+                if any(face in corner_faces for face in vert.link_faces)
+            ]
+            if not outside_verts:
+                continue
+
+            target = outside_verts[0]
+            for vert in live_verts:
+                if vert is target or not getattr(vert, "is_valid", False):
+                    continue
+                targetmap[vert] = target
+
+    return targetmap
+
+
+def _attached_weld_outer_geometry(bm, context, split_infos):
+    boundary_targetmap = _attached_outer_targetmap_from_seam_positions(
+        bm,
+        context,
+        split_infos,
+    )
+    if not boundary_targetmap:
+        _section_split_infos, boundary_split_infos = _attached_split_infos_by_kind(split_infos)
+        if not boundary_split_infos:
+            return 0
+
+        boundary_targetmap = _targetmap_from_live_split_positions(
+            bm,
+            boundary_split_infos,
+        )
     if not boundary_targetmap:
         return 0
 
@@ -5520,7 +5605,22 @@ def _execute_attached_open_corner_case(bm, obj, direction, report=None, data=Non
                     resample_result['resampled_groups'],
                     split_infos,
                 )
-            if not _attached_select_outer_connection_verts(bm, context, split_infos):
+            seam_selected = _attached_select_outer_connection_verts(
+                bm,
+                context,
+                split_infos,
+            )
+            _attached_weld_outer_geometry(
+                bm,
+                context,
+                split_infos,
+            )
+            seam_selected = _attached_select_outer_connection_verts(
+                bm,
+                context,
+                split_infos,
+            ) or seam_selected
+            if not seam_selected:
                 _restore_selection_state(bm, selection_state)
         else:
             _restore_selection_state(bm, selection_state)
