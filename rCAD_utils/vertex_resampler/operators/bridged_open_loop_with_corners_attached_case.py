@@ -11,6 +11,7 @@ from .resample_common import execute_aligned_loops_logic
 _VECTOR_TOLERANCE = 1.0e-6
 _POSITION_TOLERANCE = 1.0e-6
 _FACE_POSITION_TOLERANCE = 1.0e-5
+_SOURCE_ENDPOINT_SEAM_ID_LAYER = "rcad_source_endpoint_seam_id"
 
 
 # Keep the cornered open-bridge detection local to this file so the attached
@@ -1322,6 +1323,61 @@ def _capture_selection_state(bm):
         ],
         'face_positions': _face_positions(_selected_faces(bm)),
     }
+
+
+def _source_endpoint_seam_layer(bm):
+    layer = bm.verts.layers.int.get(_SOURCE_ENDPOINT_SEAM_ID_LAYER)
+    if layer is None:
+        layer = bm.verts.layers.int.new(_SOURCE_ENDPOINT_SEAM_ID_LAYER)
+    return layer
+
+
+def _clear_source_endpoint_seam_ids(bm, layer=None):
+    if layer is None:
+        layer = bm.verts.layers.int.get(_SOURCE_ENDPOINT_SEAM_ID_LAYER)
+        if layer is None:
+            return
+
+    for vert in bm.verts:
+        if getattr(vert, "is_valid", False):
+            vert[layer] = 0
+
+
+def _tag_selected_source_loop_endpoints(bm, source_specs):
+    if not source_specs:
+        return None
+
+    layer = _source_endpoint_seam_layer(bm)
+    _clear_source_endpoint_seam_ids(bm, layer=layer)
+
+    vert_lookup = _build_vert_position_lookup(bm)
+    selected_verts = _selected_verts(bm)
+    seam_id = 1
+    seen_positions = set()
+
+    for source_spec in source_specs:
+        source_positions = source_spec.get('source_positions', [])
+        if not source_positions:
+            continue
+
+        for position in (source_positions[0], source_positions[-1]):
+            position_key = _position_key(position, _POSITION_TOLERANCE)
+            if position_key in seen_positions:
+                continue
+            seen_positions.add(position_key)
+
+            live_verts = _verts_at_position(bm, position, lookup=vert_lookup)
+            if not live_verts:
+                continue
+
+            target_vert = next(
+                (vert for vert in live_verts if vert in selected_verts),
+                live_verts[0],
+            )
+            target_vert[layer] = seam_id
+            seam_id += 1
+
+    return layer
 
 
 def _restore_selection_state(bm, selection_state):
@@ -4170,6 +4226,46 @@ def _weld_boundary_positions(bm, positions, vert_lookup=None):
         return 0
 
 
+def _weld_selected_source_endpoint_seam_ids(bm, layer=None):
+    if layer is None:
+        layer = bm.verts.layers.int.get(_SOURCE_ENDPOINT_SEAM_ID_LAYER)
+        if layer is None:
+            return 0
+
+    tagged_verts = {}
+    for vert in bm.verts:
+        if not getattr(vert, "is_valid", False):
+            continue
+        seam_id = vert[layer]
+        if seam_id > 0 and seam_id not in tagged_verts:
+            tagged_verts[seam_id] = vert
+
+    if not tagged_verts:
+        return 0
+
+    vert_lookup = _build_vert_position_lookup(bm)
+    targetmap = {}
+    for seam_id, target_vert in tagged_verts.items():
+        live_verts = _verts_at_position(bm, target_vert.co.copy(), lookup=vert_lookup)
+        for vert in live_verts:
+            if vert is not target_vert and getattr(vert, "is_valid", False):
+                targetmap[vert] = target_vert
+
+    if not targetmap:
+        return 0
+
+    try:
+        bmesh.ops.weld_verts(bm, targetmap=targetmap)
+    except Exception:
+        return 0
+
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    bm.normal_update()
+    return len(targetmap)
+
+
 def _cluster_loop_match_count(loop, split_info):
     loop_set = {vert for vert in loop if getattr(vert, "is_valid", False)}
     return sum(
@@ -4955,236 +5051,399 @@ def detect(bm):
     return data
 
 
-def _execute_attached_open_corner_case(bm, obj, direction, report=None, data=None):
+def _attached_prepare_execution_context(bm, obj, data):
     selection_state = _capture_selection_state(bm)
-    if data is None:
-        data = _detect_attached_open_corner_case(bm)
-    if not data:
-        _trace_focus("Execute cancelled: detect returned no data.")
-        return {'CANCELLED'}
     source_loop_specs = _attached_source_loop_specs(
         data.get('groups', []),
         partial_ranges=data.get('partial_ranges'),
     )
+    source_endpoint_seam_layer = _tag_selected_source_loop_endpoints(
+        bm,
+        source_loop_specs,
+    )
     execute_plan = _attached_build_open_corner_execute_plan(data)
     end_sections = execute_plan['end_sections']
     corner_sections = execute_plan['corner_sections']
-    segment_sections = execute_plan['segment_sections']
-    segment_section_positions = execute_plan['segment_section_positions']
     all_sections = execute_plan['all_sections']
-    collected_section_indices = execute_plan['collected_section_indices']
-    _capture_detected_cross_sections(obj, end_sections, corner_sections, all_sections=all_sections)
 
+    _capture_detected_cross_sections(
+        obj,
+        end_sections,
+        corner_sections,
+        all_sections=all_sections,
+    )
     _trace_focus(
         "Preview build finished.",
         end_cross_section_count=len(end_sections),
         corner_cross_section_count=len(corner_sections),
         propagated_cross_section_count=len(all_sections),
-        collected_section_indices=collected_section_indices,
+        collected_section_indices=execute_plan['collected_section_indices'],
     )
 
-    shaft_face_positions = execute_plan['shaft_face_positions']
-    segment_split_edges = execute_plan['segment_split_edges']
-    split_edges = execute_plan['split_edges']
-    split_section_logs = execute_plan['split_section_logs']
-    split_mode = execute_plan['split_mode']
-    seam_records = execute_plan['seam_records']
+    return {
+        'selection_state': selection_state,
+        'source_loop_specs': source_loop_specs,
+        'source_endpoint_seam_layer': source_endpoint_seam_layer,
+        'execute_plan': execute_plan,
+        'end_sections': end_sections,
+        'corner_sections': corner_sections,
+        'segment_sections': execute_plan['segment_sections'],
+        'segment_section_positions': execute_plan['segment_section_positions'],
+        'collected_section_indices': execute_plan['collected_section_indices'],
+        'shaft_face_positions': execute_plan['shaft_face_positions'],
+        'segment_split_edges': execute_plan['segment_split_edges'],
+        'split_edges': execute_plan['split_edges'],
+        'split_section_logs': execute_plan['split_section_logs'],
+        'split_mode': execute_plan['split_mode'],
+        'seam_records': execute_plan['seam_records'],
+    }
+
+
+def _attached_trace_execution_plan(bm, context):
+    initial_shaft_faces = _live_faces_from_positions(
+        bm,
+        context['shaft_face_positions'],
+    )
+    _attached_trace_split_debug(
+        "Planned separation.",
+        split_mode=context['split_mode'],
+        end_section_count=len(context['end_sections']),
+        corner_section_count=len(context['corner_sections']),
+        interior_section_count=len(context['segment_sections']),
+        seam_record_count=len(context['seam_records']),
+        split_edge_count=len(context['split_edges']),
+        initial_shaft_face_count=len(initial_shaft_faces),
+        initial_shaft_components=_attached_shaft_component_summary(initial_shaft_faces),
+        split_section_logs=context['split_section_logs'],
+    )
+
+
+def _attached_detach_outer_geometry(bm, context):
+    split_infos = []
+
+    if context['seam_records']:
+        split_infos.extend(_attached_split_seam_records(bm, context['seam_records']))
+        detached_shaft_faces = _live_faces_from_positions(
+            bm,
+            context['shaft_face_positions'],
+        )
+        _attached_trace_split_debug(
+            "After outside detach split.",
+            shaft_face_count=len(detached_shaft_faces),
+            shaft_components=_attached_shaft_component_summary(detached_shaft_faces),
+        )
+        return split_infos
+
+    bmesh.ops.split_edges(bm, edges=list(context['split_edges']))
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    bm.select_flush_mode()
+    bm.normal_update()
+    split_infos.extend(_split_infos_from_sections(bm, context['segment_sections']))
+    detached_shaft_faces = _live_faces_from_positions(
+        bm,
+        context['shaft_face_positions'],
+    )
+    _attached_trace_split_debug(
+        "After direct section split.",
+        shaft_face_count=len(detached_shaft_faces),
+        shaft_components=_attached_shaft_component_summary(detached_shaft_faces),
+    )
+    return split_infos
+
+
+def _attached_split_internal_sections(bm, context, split_infos):
+    if not (context['seam_records'] and context['segment_split_edges']):
+        return split_infos
+
+    live_segment_edges = _live_bmesh_items(context['segment_split_edges'])
+    live_segment_control_verts = _split_control_verts(live_segment_edges)
+    if context['segment_section_positions']:
+        vert_lookup = _build_vert_position_lookup(bm)
+        _attached_trace_split_debug(
+            "Before interior seam split.",
+            section_cluster_summary=_attached_section_cluster_summary(
+                bm,
+                context['segment_section_positions'],
+                vert_lookup=vert_lookup,
+            ),
+        )
+    _attached_trace_split_debug(
+        "Planned interior seam edges.",
+        live_edge_count=len(live_segment_edges),
+        live_control_vert_count=len(live_segment_control_verts),
+        live_edge_indices=sorted(
+            edge.index for edge in live_segment_edges
+            if getattr(edge, "is_valid", False)
+        ),
+    )
+    if not live_segment_edges:
+        return split_infos
+
+    bmesh.ops.split_edges(
+        bm,
+        edges=list(live_segment_edges),
+        verts=list(live_segment_control_verts),
+        use_verts=bool(live_segment_control_verts),
+    )
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    bm.select_flush_mode()
+    bm.normal_update()
+    split_infos.extend(_split_infos_from_sections(bm, context['segment_sections']))
+    post_internal_split_faces = _live_faces_from_positions(
+        bm,
+        context['shaft_face_positions'],
+    )
+    split_details = {
+        'shaft_face_count': len(post_internal_split_faces),
+        'shaft_components': _attached_shaft_component_summary(post_internal_split_faces),
+    }
+    if context['segment_section_positions']:
+        split_details['section_cluster_summary'] = _attached_section_cluster_summary(
+            bm,
+            context['segment_section_positions'],
+        )
+    _attached_trace_split_debug("After interior seam split.", **split_details)
+    return split_infos
+
+
+def _attached_recover_detached_shaft(bm, context):
+    live_shaft_faces = _live_faces_from_positions(
+        bm,
+        context['shaft_face_positions'],
+    )
+    if not live_shaft_faces:
+        return []
+
+    _select_only_faces(bm, live_shaft_faces)
+    bm.select_flush_mode()
+    bm.normal_update()
+    return live_shaft_faces
+
+
+def _attached_resample_middle_segments(
+    bm,
+    obj,
+    direction,
+    report,
+    context,
+    live_shaft_faces,
+):
+    fresh_groups = _attached_open_groups_from_shaft_faces(live_shaft_faces)
+    segment_count = len(fresh_groups)
+    source_targets = _attached_source_targets_for_fresh_groups(
+        context['source_loop_specs'],
+        fresh_groups,
+    )
+    source_target_lookup = {
+        target['group_index']: target for target in source_targets
+    }
+    final_source_loop_positions = []
+    resampled_segment_count = 0
+    resampled_groups = []
+
+    _attached_trace_split_debug(
+        "Post-split open bridge detect.",
+        group_count=segment_count,
+        shaft_components=_attached_shaft_component_summary(live_shaft_faces),
+    )
+
+    if not fresh_groups:
+        return {
+            'segment_count': segment_count,
+            'resampled_segment_count': resampled_segment_count,
+            'resampled_groups': resampled_groups,
+            'final_source_loop_positions': final_source_loop_positions,
+        }
+
+    for group_index, rings_data in enumerate(fresh_groups, start=1):
+        anchored_group = _anchor_open_group_endpoints(rings_data)
+        loops = anchored_group['rings'][0]
+        _attached_trace_split_debug(
+            "Segment resample execute.",
+            group_index=group_index,
+            loop_count=len(loops),
+            loop_size=len(loops[0]) if loops else 0,
+        )
+        result_info = {}
+        execute_aligned_loops_logic(
+            bm,
+            obj,
+            anchored_group['rings'],
+            direction,
+            report=report,
+            use_seams=anchored_group.get('use_seams', True),
+            migrate_seams=anchored_group.get('migrate_seams'),
+            max_seams=anchored_group.get('max_seams'),
+            forced_seam_verts=anchored_group.get('forced_seam_verts'),
+            result_info=result_info,
+        )
+        resampled_segment_count += 1
+        target = source_target_lookup.get(group_index - 1)
+        ring_group = result_info.get('ring_group')
+        if ring_group is not None:
+            resampled_groups.append((
+                [list(ring_info.verts) for ring_info in ring_group.rings],
+                False,
+            ))
+        if target is not None and ring_group is not None:
+            target_loop_index = target['loop_index']
+            if 0 <= target_loop_index < len(ring_group.rings):
+                final_source_loop_positions.append([
+                    vert.co.copy()
+                    for vert in ring_group.rings[target_loop_index].verts
+                    if getattr(vert, "is_valid", False)
+                ])
+
+    return {
+        'segment_count': segment_count,
+        'resampled_segment_count': resampled_segment_count,
+        'resampled_groups': resampled_groups,
+        'final_source_loop_positions': final_source_loop_positions,
+    }
+
+
+def _attached_split_infos_by_kind(split_infos):
+    section_split_infos = [
+        split_info for split_info in split_infos
+        if split_info.get('split_kind') == 'section'
+    ]
+    boundary_split_infos = [
+        split_info for split_info in split_infos
+        if split_info.get('split_kind') == 'boundary'
+    ]
+    return section_split_infos, boundary_split_infos
+
+
+def _attached_weld_middle_segments(bm, resampled_groups, split_infos):
+    section_split_infos, _boundary_split_infos = _attached_split_infos_by_kind(split_infos)
+    return _weld_open_groups(
+        bm,
+        resampled_groups,
+        section_split_infos,
+    )
+
+
+def _attached_weld_outer_geometry(bm, split_infos):
+    _section_split_infos, boundary_split_infos = _attached_split_infos_by_kind(split_infos)
+    if not boundary_split_infos:
+        return 0
+
+    boundary_targetmap = _targetmap_from_live_split_positions(
+        bm,
+        boundary_split_infos,
+    )
+    if not boundary_targetmap:
+        return 0
+
+    try:
+        bmesh.ops.weld_verts(bm, targetmap=boundary_targetmap)
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+        bm.normal_update()
+        return len(boundary_targetmap)
+    except Exception:
+        return 0
+
+
+def _attached_weld_selected_cross_section_cleanup(bm, context):
+    return _weld_selected_source_endpoint_seam_ids(
+        bm,
+        layer=context['source_endpoint_seam_layer'],
+    )
+
+
+def _attached_restore_source_loop_selection(bm, final_source_loop_positions):
+    if not final_source_loop_positions:
+        return
+
+    _log_unwelded_source_loop_verts(bm, final_source_loop_positions)
+    _select_loops_from_positions(bm, final_source_loop_positions)
+
+
+def _attached_log_weld_leftovers(bm, split_infos):
+    _log_unwelded_split_verts(bm, split_infos)
+
+
+def _attached_restore_final_selection(bm, context):
+    if not _selected_verts(bm):
+        final_data = _attached_detect_open_strip_selection(bm)
+        final_groups = final_data.get('groups', []) if final_data else []
+        if not _attached_select_source_loops(
+            bm,
+            final_groups,
+            context['source_loop_specs'],
+        ):
+            _restore_selection_state(bm, context['selection_state'])
+        return
+
+    bm.select_flush_mode()
+
+
+def _attached_finalize_execution(bm, obj, context):
+    _clear_source_endpoint_seam_ids(
+        bm,
+        layer=context['source_endpoint_seam_layer'],
+    )
+    _attached_restore_final_selection(bm, context)
+    bmesh.update_edit_mesh(obj.data)
+
+
+def _execute_attached_open_corner_case(bm, obj, direction, report=None, data=None):
+    if data is None:
+        data = _detect_attached_open_corner_case(bm)
+    if not data:
+        _trace_focus("Execute cancelled: detect returned no data.")
+        return {'CANCELLED'}
+    context = _attached_prepare_execution_context(bm, obj, data)
 
     segment_count = 0
     resampled_segment_count = 0
     welded_vert_count = 0
-    if split_edges:
+    if context['split_edges']:
         split_infos = []
         try:
-            initial_shaft_faces = _live_faces_from_positions(bm, shaft_face_positions)
-            _attached_trace_split_debug(
-                "Planned separation.",
-                split_mode=split_mode,
-                end_section_count=len(end_sections),
-                corner_section_count=len(corner_sections),
-                interior_section_count=len(segment_sections),
-                seam_record_count=len(seam_records),
-                split_edge_count=len(split_edges),
-                initial_shaft_face_count=len(initial_shaft_faces),
-                initial_shaft_components=_attached_shaft_component_summary(initial_shaft_faces),
-                split_section_logs=split_section_logs,
-            )
+            _attached_trace_execution_plan(bm, context)
+            split_infos = _attached_detach_outer_geometry(bm, context)
+            split_infos = _attached_split_internal_sections(bm, context, split_infos)
 
-            if seam_records:
-                split_infos.extend(_attached_split_seam_records(bm, seam_records))
-                detached_shaft_faces = _live_faces_from_positions(bm, shaft_face_positions)
-                _attached_trace_split_debug(
-                    "After outside detach split.",
-                    shaft_face_count=len(detached_shaft_faces),
-                    shaft_components=_attached_shaft_component_summary(detached_shaft_faces),
-                )
-            else:
-                bmesh.ops.split_edges(bm, edges=list(split_edges))
-                bm.verts.ensure_lookup_table()
-                bm.edges.ensure_lookup_table()
-                bm.faces.ensure_lookup_table()
-                bm.select_flush_mode()
-                bm.normal_update()
-                split_infos.extend(_split_infos_from_sections(bm, segment_sections))
-                detached_shaft_faces = _live_faces_from_positions(bm, shaft_face_positions)
-                _attached_trace_split_debug(
-                    "After direct section split.",
-                    shaft_face_count=len(detached_shaft_faces),
-                    shaft_components=_attached_shaft_component_summary(detached_shaft_faces),
-                )
-
-            if seam_records and segment_split_edges:
-                live_segment_edges = _live_bmesh_items(segment_split_edges)
-                live_segment_control_verts = _split_control_verts(live_segment_edges)
-                if seam_records and segment_section_positions:
-                    vert_lookup = _build_vert_position_lookup(bm)
-                    _attached_trace_split_debug(
-                        "Before interior seam split.",
-                        section_cluster_summary=_attached_section_cluster_summary(
-                            bm,
-                            segment_section_positions,
-                            vert_lookup=vert_lookup,
-                        ),
-                    )
-                _attached_trace_split_debug(
-                    "Planned interior seam edges.",
-                    live_edge_count=len(live_segment_edges),
-                    live_control_vert_count=len(live_segment_control_verts),
-                    live_edge_indices=sorted(
-                        edge.index for edge in live_segment_edges
-                        if getattr(edge, "is_valid", False)
-                    ),
-                )
-                if live_segment_edges:
-                    bmesh.ops.split_edges(
-                        bm,
-                        edges=list(live_segment_edges),
-                        verts=list(live_segment_control_verts),
-                        use_verts=bool(live_segment_control_verts),
-                    )
-                    bm.verts.ensure_lookup_table()
-                    bm.edges.ensure_lookup_table()
-                    bm.faces.ensure_lookup_table()
-                    bm.select_flush_mode()
-                    bm.normal_update()
-                    split_infos.extend(_split_infos_from_sections(bm, segment_sections))
-                    post_internal_split_faces = _live_faces_from_positions(bm, shaft_face_positions)
-                    split_details = {
-                        'shaft_face_count': len(post_internal_split_faces),
-                        'shaft_components': _attached_shaft_component_summary(post_internal_split_faces),
-                    }
-                    if segment_section_positions:
-                        split_details['section_cluster_summary'] = _attached_section_cluster_summary(
-                            bm,
-                            segment_section_positions,
-                        )
-                    _attached_trace_split_debug("After interior seam split.", **split_details)
-
-            live_shaft_faces = _live_faces_from_positions(bm, shaft_face_positions)
+            live_shaft_faces = _attached_recover_detached_shaft(bm, context)
             if live_shaft_faces:
-                _select_only_faces(bm, live_shaft_faces)
-                bm.select_flush_mode()
-                bm.normal_update()
-
-                fresh_groups = _attached_open_groups_from_shaft_faces(live_shaft_faces)
-                segment_count = len(fresh_groups)
-                source_targets = _attached_source_targets_for_fresh_groups(
-                    source_loop_specs,
-                    fresh_groups,
+                resample_result = _attached_resample_middle_segments(
+                    bm,
+                    obj,
+                    direction,
+                    report,
+                    context,
+                    live_shaft_faces,
                 )
-                source_target_lookup = {
-                    target['group_index']: target for target in source_targets
-                }
-                final_source_loop_positions = []
-                _attached_trace_split_debug(
-                    "Post-split open bridge detect.",
-                    group_count=segment_count,
-                    shaft_components=_attached_shaft_component_summary(live_shaft_faces),
-                )
-
-                if fresh_groups:
-                    resampled_groups = []
-                    for group_index, rings_data in enumerate(fresh_groups, start=1):
-                        anchored_group = _anchor_open_group_endpoints(rings_data)
-                        loops = anchored_group['rings'][0]
-                        _attached_trace_split_debug(
-                            "Segment resample execute.",
-                            group_index=group_index,
-                            loop_count=len(loops),
-                            loop_size=len(loops[0]) if loops else 0,
-                        )
-                        result_info = {}
-                        execute_aligned_loops_logic(
-                            bm,
-                            obj,
-                            anchored_group['rings'],
-                            direction,
-                            report=None,
-                            use_seams=anchored_group.get('use_seams', True),
-                            migrate_seams=anchored_group.get('migrate_seams'),
-                            max_seams=anchored_group.get('max_seams'),
-                            forced_seam_verts=anchored_group.get('forced_seam_verts'),
-                            result_info=result_info,
-                        )
-                        resampled_segment_count += 1
-                        target = source_target_lookup.get(group_index - 1)
-                        ring_group = result_info.get('ring_group')
-                        if ring_group is not None:
-                            resampled_groups.append((
-                                [list(ring_info.verts) for ring_info in ring_group.rings],
-                                False,
-                            ))
-                        if target is not None and ring_group is not None:
-                            target_loop_index = target['loop_index']
-                            if 0 <= target_loop_index < len(ring_group.rings):
-                                final_source_loop_positions.append([
-                                    vert.co.copy()
-                                    for vert in ring_group.rings[target_loop_index].verts
-                                    if getattr(vert, "is_valid", False)
-                                ])
-
-                    boundary_split_infos = [
-                        split_info for split_info in split_infos
-                        if split_info.get('split_kind') == 'boundary'
-                    ]
-                    section_split_infos = [
-                        split_info for split_info in split_infos
-                        if split_info.get('split_kind') == 'section'
-                    ]
-                    welded_vert_count = _weld_open_groups(
+                segment_count = resample_result['segment_count']
+                resampled_segment_count = resample_result['resampled_segment_count']
+                if resample_result['resampled_groups']:
+                    welded_vert_count += _attached_weld_middle_segments(
                         bm,
-                        resampled_groups,
-                        section_split_infos,
+                        resample_result['resampled_groups'],
+                        split_infos,
                     )
-                    if boundary_split_infos:
-                        boundary_targetmap = _targetmap_from_live_split_positions(
-                            bm,
-                            boundary_split_infos,
-                        )
-                        if boundary_targetmap:
-                            try:
-                                bmesh.ops.weld_verts(bm, targetmap=boundary_targetmap)
-                                bm.verts.ensure_lookup_table()
-                                bm.edges.ensure_lookup_table()
-                                bm.faces.ensure_lookup_table()
-                                bm.normal_update()
-                                welded_vert_count += len(boundary_targetmap)
-                            except Exception:
-                                pass
-
-                    if final_source_loop_positions:
-                        _log_unwelded_source_loop_verts(bm, final_source_loop_positions)
-                        _select_loops_from_positions(bm, final_source_loop_positions)
-                    _log_unwelded_split_verts(bm, split_infos)
+                    welded_vert_count += _attached_weld_outer_geometry(
+                        bm,
+                        split_infos,
+                    )
+                    welded_vert_count += _attached_weld_selected_cross_section_cleanup(
+                        bm,
+                        context,
+                    )
+                    _attached_restore_source_loop_selection(
+                        bm,
+                        resample_result['final_source_loop_positions'],
+                    )
+                    _attached_log_weld_leftovers(bm, split_infos)
         finally:
-            if not _selected_verts(bm):
-                final_data = _attached_detect_open_strip_selection(bm)
-                final_groups = final_data.get('groups', []) if final_data else []
-                if not _attached_select_source_loops(bm, final_groups, source_loop_specs):
-                    _restore_selection_state(bm, selection_state)
-            else:
-                bm.select_flush_mode()
-            bmesh.update_edit_mesh(obj.data)
+            _attached_finalize_execution(bm, obj, context)
 
     return {'FINISHED'}
 
