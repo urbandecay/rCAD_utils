@@ -5365,6 +5365,92 @@ def _attached_restore_source_loop_selection(bm, final_source_loop_positions):
     _select_loops_from_positions(bm, final_source_loop_positions)
 
 
+def _attached_select_outer_connection_verts(bm, context, split_infos):
+    _section_split_infos, boundary_split_infos = _attached_split_infos_by_kind(split_infos)
+    seam_records = context.get('seam_records', [])
+    if not seam_records and not boundary_split_infos:
+        return False
+
+    for face in bm.faces:
+        if face.is_valid:
+            face.select = False
+    for edge in bm.edges:
+        if edge.is_valid:
+            edge.select = False
+    for vert in bm.verts:
+        if vert.is_valid:
+            vert.select = False
+
+    vert_lookup = _build_vert_position_lookup(bm)
+    position_keys = set()
+    candidate_positions = []
+
+    def _add_position(position):
+        if position is None:
+            return
+        position_key = _position_key(position, _POSITION_TOLERANCE)
+        if position_key in position_keys:
+            return
+        position_keys.add(position_key)
+        candidate_positions.append(position.copy())
+
+    any_selected = False
+    seen_vert_indices = set()
+
+    for split_info in boundary_split_infos:
+        for cluster in split_info.get('clusters', []):
+            live_cluster_verts = [
+                vert for vert in cluster.get('verts', [])
+                if getattr(vert, "is_valid", False)
+            ]
+            if live_cluster_verts:
+                for vert in live_cluster_verts:
+                    _add_position(vert.co)
+            else:
+                _add_position(cluster.get('position'))
+
+    for record in seam_records:
+        for edge in _live_bmesh_items(record.get('boundary_edges', set())):
+            for vert in edge.verts:
+                if getattr(vert, "is_valid", False):
+                    _add_position(vert.co)
+
+    for position in candidate_positions:
+        for vert in _verts_at_position(bm, position, lookup=vert_lookup):
+            if not getattr(vert, "is_valid", False):
+                continue
+            if vert.index in seen_vert_indices:
+                continue
+            seen_vert_indices.add(vert.index)
+            vert.select = True
+            any_selected = True
+
+    for split_info in boundary_split_infos:
+        for cluster in split_info.get('clusters', []):
+            for vert in cluster.get('verts', []):
+                if not getattr(vert, "is_valid", False):
+                    continue
+                if vert.index in seen_vert_indices:
+                    continue
+                seen_vert_indices.add(vert.index)
+                vert.select = True
+                any_selected = True
+
+    for record in seam_records:
+        live_boundary_edges = _live_bmesh_items(record.get('boundary_edges', set()))
+        for edge in live_boundary_edges:
+            for vert in edge.verts:
+                if not getattr(vert, "is_valid", False):
+                    continue
+                if vert.index in seen_vert_indices:
+                    continue
+                seen_vert_indices.add(vert.index)
+                vert.select = True
+                any_selected = True
+
+    return any_selected
+
+
 def _attached_log_weld_leftovers(bm, split_infos):
     _log_unwelded_split_verts(bm, split_infos)
 
@@ -5399,51 +5485,50 @@ def _execute_attached_open_corner_case(bm, obj, direction, report=None, data=Non
     if not data:
         _trace_focus("Execute cancelled: detect returned no data.")
         return {'CANCELLED'}
-    context = _attached_prepare_execution_context(bm, obj, data)
 
-    segment_count = 0
-    resampled_segment_count = 0
-    welded_vert_count = 0
-    if context['split_edges']:
-        split_infos = []
-        try:
-            _attached_trace_execution_plan(bm, context)
-            split_infos = _attached_detach_outer_geometry(bm, context)
-            split_infos = _attached_split_internal_sections(bm, context, split_infos)
-
-            live_shaft_faces = _attached_recover_detached_shaft(bm, context)
-            if live_shaft_faces:
-                resample_result = _attached_resample_middle_segments(
+    selection_state = _capture_selection_state(bm)
+    execute_plan = _attached_build_open_corner_execute_plan(data)
+    source_loop_specs = _attached_source_loop_specs(
+        data.get('groups', []),
+        partial_ranges=data.get('partial_ranges'),
+    )
+    if execute_plan['split_edges']:
+        context = {
+            'source_loop_specs': source_loop_specs,
+            'shaft_face_positions': execute_plan['shaft_face_positions'],
+            'segment_sections': execute_plan['segment_sections'],
+            'segment_section_positions': execute_plan['segment_section_positions'],
+            'segment_split_edges': execute_plan['segment_split_edges'],
+            'split_edges': execute_plan['split_edges'],
+            'seam_records': execute_plan['seam_records'],
+        }
+        split_infos = _attached_detach_outer_geometry(bm, context)
+        split_infos = _attached_split_internal_sections(bm, context, split_infos)
+        live_shaft_faces = _attached_recover_detached_shaft(bm, context)
+        if live_shaft_faces:
+            resample_result = _attached_resample_middle_segments(
+                bm,
+                obj,
+                direction,
+                report,
+                context,
+                live_shaft_faces,
+            )
+            if resample_result['resampled_groups']:
+                _attached_weld_middle_segments(
                     bm,
-                    obj,
-                    direction,
-                    report,
-                    context,
-                    live_shaft_faces,
+                    resample_result['resampled_groups'],
+                    split_infos,
                 )
-                segment_count = resample_result['segment_count']
-                resampled_segment_count = resample_result['resampled_segment_count']
-                if resample_result['resampled_groups']:
-                    welded_vert_count += _attached_weld_middle_segments(
-                        bm,
-                        resample_result['resampled_groups'],
-                        split_infos,
-                    )
-                    welded_vert_count += _attached_weld_outer_geometry(
-                        bm,
-                        split_infos,
-                    )
-                    welded_vert_count += _attached_weld_selected_cross_section_cleanup(
-                        bm,
-                        context,
-                    )
-                    _attached_restore_source_loop_selection(
-                        bm,
-                        resample_result['final_source_loop_positions'],
-                    )
-                    _attached_log_weld_leftovers(bm, split_infos)
-        finally:
-            _attached_finalize_execution(bm, obj, context)
+            if not _attached_select_outer_connection_verts(bm, context, split_infos):
+                _restore_selection_state(bm, selection_state)
+        else:
+            _restore_selection_state(bm, selection_state)
+    else:
+        _restore_selection_state(bm, selection_state)
+
+    if obj is not None:
+        bmesh.update_edit_mesh(obj.data)
 
     return {'FINISHED'}
 
