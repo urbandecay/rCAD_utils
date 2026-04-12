@@ -1630,6 +1630,18 @@ def _best_source_target_for_group(source_specs, rings_data):
     return min(matches, key=lambda item: item['score'])
 
 
+def _source_specs_for_group(source_specs, group_index):
+    matching_specs = [
+        source_spec for source_spec in (source_specs or [])
+        if source_spec.get('group_index') == group_index
+    ]
+    if matching_specs:
+        return matching_specs
+    if 0 <= group_index < len(source_specs or []):
+        return [source_specs[group_index]]
+    return []
+
+
 def _orient_group_to_source(source_specs, rings_data):
     transposed = _transpose_open_group(rings_data)
     if transposed is None or not source_specs:
@@ -1652,17 +1664,28 @@ def _resample_connected_open_groups(
     groups,
     source_loop_specs,
 ):
-    oriented_groups = [
-        _orient_group_to_source(source_loop_specs, rings_data)
-        for rings_data in (groups or [])
-    ]
+    oriented_groups = []
+    source_target_lookup = {}
+    for group_index, rings_data in enumerate(groups or []):
+        group_source_specs = _source_specs_for_group(source_loop_specs, group_index)
+        oriented_group = _orient_group_to_source(group_source_specs, rings_data)
+        oriented_groups.append(oriented_group)
+
+        group_targets = _source_targets_for_fresh_groups(
+            group_source_specs,
+            [oriented_group],
+        )
+        if group_targets:
+            target = dict(group_targets[0])
+            target['group_index'] = group_index
+            source_target_lookup[group_index] = target
+
     source_targets = _source_targets_for_fresh_groups(
         source_loop_specs,
         oriented_groups,
     )
-    source_target_lookup = {
-        target['group_index']: target for target in source_targets
-    }
+    for target in source_targets:
+        source_target_lookup.setdefault(target['group_index'], target)
     final_source_loop_positions = []
     resampled_group_count = 0
 
