@@ -7,7 +7,6 @@ from bpy.types import Operator, Panel
 from .mode_options import MODE_ITEMS, MODE_LABELS
 
 _LEGACY_MODE_REMAP = {
-    'CLOSED_LOOP_BRIDGED_WITH_CORNERS': 'CLOSED_LOOP',
     'CLOSED_LOOP_BRIDGED': 'CLOSED_LOOP',
 }
 

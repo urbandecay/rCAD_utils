@@ -2,6 +2,7 @@
 
 MODE_ITEMS = [
     ('BRIDGED_OPEN_LOOP_WITH_CORNERS', "Open Loop Bridge With Corners", ""),
+    ('CLOSED_LOOP_BRIDGED_WITH_CORNERS', "Closed Loop Bridge With Corners", ""),
     ('CORNER', "Corner", ""),
     ('BRIDGED_OPEN_LOOP', "Open Loop Bridge", ""),
     ('PIPE', "Pipe", ""),
