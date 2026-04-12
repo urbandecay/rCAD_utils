@@ -1718,7 +1718,7 @@ def _corner_group_execute_settings(rings_data):
     loop_is_closed = _loop_has_closing_edge(loops[0])
     return {
         'rings': (loops, loop_is_closed),
-        'stack_is_cyclic': bool(path_is_closed and not loop_is_closed),
+        'stack_is_cyclic': bool(path_is_closed),
         'anchor_open_endpoints': not loop_is_closed,
     }
 
@@ -4328,6 +4328,19 @@ def _expand_bridge_from_closed_seed_loop(seed_loop, close_on_seed=False):
     }
 
 
+def _expand_bridge_from_closed_seed_loop_any_path(seed_loop):
+    closed_result = _expand_bridge_from_closed_seed_loop(
+        seed_loop,
+        close_on_seed=True,
+    )
+    if closed_result is not None:
+        return closed_result
+    return _expand_bridge_from_closed_seed_loop(
+        seed_loop,
+        close_on_seed=False,
+    )
+
+
 def _find_group_from_seed_loop(groups, selected_verts):
     selected_set = {
         vert for vert in selected_verts
@@ -5439,7 +5452,7 @@ def _detect_plain_closed_corner_case(bm):
         groups = []
         partial_ranges = []
         for component_index, seed_loop in enumerate(cycle_seed_loops, start=1):
-            seed_result = _expand_bridge_from_closed_seed_loop(seed_loop, close_on_seed=False)
+            seed_result = _expand_bridge_from_closed_seed_loop_any_path(seed_loop)
             if seed_result is None:
                 _trace_focus(
                     "Selected closed cross-section expansion failed.",
