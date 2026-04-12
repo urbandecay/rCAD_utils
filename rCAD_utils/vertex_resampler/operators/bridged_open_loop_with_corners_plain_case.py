@@ -1604,7 +1604,7 @@ def _source_targets_for_fresh_groups(source_specs, groups):
 
 def _transpose_open_group(rings_data):
     loops, is_closed = rings_data
-    if is_closed or len(loops) < 2:
+    if len(loops) < 2:
         return None
 
     loop_size = len(loops[0]) if loops else 0
@@ -1620,7 +1620,24 @@ def _transpose_open_group(rings_data):
             return None
         transposed_loops.append(transposed_loop)
 
-    return transposed_loops, False
+    return transposed_loops, is_closed
+
+
+def _loop_has_closing_edge(loop):
+    return _chain_edges(loop, is_closed=True) is not None
+
+
+def _corner_group_execute_settings(rings_data):
+    loops, path_is_closed = rings_data
+    if not loops:
+        return None
+
+    loop_is_closed = _loop_has_closing_edge(loops[0])
+    return {
+        'rings': (loops, loop_is_closed),
+        'stack_is_cyclic': bool(path_is_closed and not loop_is_closed),
+        'anchor_open_endpoints': not loop_is_closed,
+    }
 
 
 def _best_source_target_for_group(source_specs, rings_data):
@@ -1690,11 +1707,21 @@ def _resample_connected_open_groups(
     resampled_group_count = 0
 
     for group_index, rings_data in enumerate(oriented_groups, start=1):
-        loops, is_closed = rings_data
-        if is_closed or not loops:
+        execute_settings = _corner_group_execute_settings(rings_data)
+        if execute_settings is None:
             continue
+        loops, _path_is_closed = rings_data
 
-        anchored_group = _anchor_open_group_endpoints(rings_data)
+        execute_rings = execute_settings['rings']
+        anchored_group = (
+            _anchor_open_group_endpoints(execute_rings)
+            if execute_settings['anchor_open_endpoints']
+            else {
+                'rings': execute_rings,
+                'use_seams': False,
+                'migrate_seams': False,
+            }
+        )
         _trace_focus(
             "Connected corner resample execute.",
             group_index=group_index,
@@ -1711,6 +1738,7 @@ def _resample_connected_open_groups(
             use_seams=anchored_group.get('use_seams', True),
             migrate_seams=anchored_group.get('migrate_seams'),
             max_seams=anchored_group.get('max_seams'),
+            stack_is_cyclic=execute_settings['stack_is_cyclic'],
             forced_seam_verts=anchored_group.get('forced_seam_verts'),
             result_info=result_info,
         )
