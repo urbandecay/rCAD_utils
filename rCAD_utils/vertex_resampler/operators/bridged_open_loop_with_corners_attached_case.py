@@ -5540,19 +5540,23 @@ def _attached_log_weld_leftovers(bm, split_infos):
     _log_unwelded_split_verts(bm, split_infos)
 
 
-def _attached_restore_final_selection(bm, context):
-    if not _selected_verts(bm):
-        final_data = _attached_detect_open_strip_selection(bm)
-        final_groups = final_data.get('groups', []) if final_data else []
-        if not _attached_select_source_loops(
-            bm,
-            final_groups,
-            context['source_loop_specs'],
-        ):
-            _restore_selection_state(bm, context['selection_state'])
+def _attached_restore_final_selection(bm, context, final_source_loop_positions=None):
+    if final_source_loop_positions and _select_loops_from_positions(
+        bm,
+        final_source_loop_positions,
+    ):
         return
 
-    bm.select_flush_mode()
+    final_data = _attached_detect_open_strip_selection(bm)
+    final_groups = final_data.get('groups', []) if final_data else []
+    if _attached_select_source_loops(
+        bm,
+        final_groups,
+        context['source_loop_specs'],
+    ):
+        return
+
+    _restore_selection_state(bm, context['selection_state'])
 
 
 def _attached_finalize_execution(bm, obj, context):
@@ -5605,23 +5609,16 @@ def _execute_attached_open_corner_case(bm, obj, direction, report=None, data=Non
                     resample_result['resampled_groups'],
                     split_infos,
                 )
-            seam_selected = _attached_select_outer_connection_verts(
-                bm,
-                context,
-                split_infos,
-            )
             _attached_weld_outer_geometry(
                 bm,
                 context,
                 split_infos,
             )
-            seam_selected = _attached_select_outer_connection_verts(
+            _attached_restore_final_selection(
                 bm,
                 context,
-                split_infos,
-            ) or seam_selected
-            if not seam_selected:
-                _restore_selection_state(bm, selection_state)
+                final_source_loop_positions=resample_result['final_source_loop_positions'],
+            )
         else:
             _restore_selection_state(bm, selection_state)
     else:
