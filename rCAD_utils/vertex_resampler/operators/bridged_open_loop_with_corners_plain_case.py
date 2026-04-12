@@ -1602,6 +1602,118 @@ def _source_targets_for_fresh_groups(source_specs, groups):
     return targets
 
 
+def _transpose_open_group(rings_data):
+    loops, is_closed = rings_data
+    if is_closed or len(loops) < 2:
+        return None
+
+    loop_size = len(loops[0]) if loops else 0
+    if loop_size < 2:
+        return None
+    if any(len(loop) != loop_size for loop in loops):
+        return None
+
+    transposed_loops = []
+    for vert_index in range(loop_size):
+        transposed_loop = [loop[vert_index] for loop in loops]
+        if len(transposed_loop) < 2:
+            return None
+        transposed_loops.append(transposed_loop)
+
+    return transposed_loops, False
+
+
+def _best_source_target_for_group(source_specs, rings_data):
+    matches = _source_targets_for_fresh_groups(source_specs, [rings_data])
+    if not matches:
+        return None
+    return min(matches, key=lambda item: item['score'])
+
+
+def _orient_group_to_source(source_specs, rings_data):
+    transposed = _transpose_open_group(rings_data)
+    if transposed is None or not source_specs:
+        return rings_data
+
+    original_match = _best_source_target_for_group(source_specs, rings_data)
+    transposed_match = _best_source_target_for_group(source_specs, transposed)
+    if transposed_match is None:
+        return rings_data
+    if original_match is None or transposed_match['score'] < original_match['score']:
+        return transposed
+    return rings_data
+
+
+def _resample_connected_open_groups(
+    bm,
+    obj,
+    direction,
+    report,
+    groups,
+    source_loop_specs,
+):
+    oriented_groups = [
+        _orient_group_to_source(source_loop_specs, rings_data)
+        for rings_data in (groups or [])
+    ]
+    source_targets = _source_targets_for_fresh_groups(
+        source_loop_specs,
+        oriented_groups,
+    )
+    source_target_lookup = {
+        target['group_index']: target for target in source_targets
+    }
+    final_source_loop_positions = []
+    resampled_group_count = 0
+
+    for group_index, rings_data in enumerate(oriented_groups, start=1):
+        loops, is_closed = rings_data
+        if is_closed or not loops:
+            continue
+
+        anchored_group = _anchor_open_group_endpoints(rings_data)
+        _trace_focus(
+            "Connected corner resample execute.",
+            group_index=group_index,
+            loop_count=len(loops),
+            loop_size=len(loops[0]) if loops else 0,
+        )
+        result_info = {}
+        result = execute_aligned_loops_logic(
+            bm,
+            obj,
+            anchored_group['rings'],
+            direction,
+            report=report,
+            use_seams=anchored_group.get('use_seams', True),
+            migrate_seams=anchored_group.get('migrate_seams'),
+            max_seams=anchored_group.get('max_seams'),
+            forced_seam_verts=anchored_group.get('forced_seam_verts'),
+            result_info=result_info,
+        )
+        if result == {'CANCELLED'}:
+            continue
+
+        resampled_group_count += 1
+        target = source_target_lookup.get(group_index - 1)
+        ring_group = result_info.get('ring_group')
+        if target is None or ring_group is None:
+            continue
+
+        target_loop_index = target['loop_index']
+        if 0 <= target_loop_index < len(ring_group.rings):
+            final_source_loop_positions.append([
+                vert.co.copy()
+                for vert in ring_group.rings[target_loop_index].verts
+                if getattr(vert, "is_valid", False)
+            ])
+
+    return {
+        'resampled_group_count': resampled_group_count,
+        'final_source_loop_positions': final_source_loop_positions,
+    }
+
+
 def _attached_source_loop_specs(groups, partial_ranges=None):
     specs = []
     for group_index, group_data in enumerate(groups or [], start=1):
@@ -4293,18 +4405,55 @@ def _live_open_loop_pair(groups, split_info):
     return (loop_a, loop_b)
 
 
+def _pin_live_open_loop_pair_to_split_positions(loop_a, loop_b, split_info):
+    clusters = split_info.get('clusters', [])
+    positions = [
+        cluster.get('position')
+        for cluster in clusters
+        if cluster.get('position') is not None
+    ]
+    if len(positions) < 2:
+        return 0
+
+    pinned = 0
+    if len(positions) == len(loop_a) == len(loop_b):
+        for position, vert_a, vert_b in zip(positions, loop_a, loop_b):
+            if getattr(vert_a, "is_valid", False):
+                vert_a.co = position.copy()
+                pinned += 1
+            if getattr(vert_b, "is_valid", False):
+                vert_b.co = position.copy()
+                pinned += 1
+        return pinned
+
+    endpoint_specs = (
+        (positions[0], loop_a[0], loop_b[0]),
+        (positions[-1], loop_a[-1], loop_b[-1]),
+    )
+    for position, vert_a, vert_b in endpoint_specs:
+        if getattr(vert_a, "is_valid", False):
+            vert_a.co = position.copy()
+            pinned += 1
+        if getattr(vert_b, "is_valid", False):
+            vert_b.co = position.copy()
+            pinned += 1
+    return pinned
+
+
 def _weld_live_open_loops(bm, split_infos):
     live_data = detect_open_strip_selection(bm)
     groups = live_data.get('groups') if live_data else []
     if not groups:
         return 0
 
+    total_merged = 0
     targetmap = {}
     for split_info in split_infos:
         pair = _live_open_loop_pair(groups, split_info)
         if pair is None:
             continue
         loop_a, loop_b = pair
+        _pin_live_open_loop_pair_to_split_positions(loop_a, loop_b, split_info)
         for vert_a, vert_b in zip(loop_a, loop_b):
             if (
                 not getattr(vert_a, "is_valid", False)
@@ -4314,19 +4463,30 @@ def _weld_live_open_loops(bm, split_infos):
                 continue
             targetmap[vert_b] = vert_a
 
-    if not targetmap:
-        return 0
+    if targetmap:
+        try:
+            bmesh.ops.weld_verts(bm, targetmap=targetmap)
+            total_merged += len(targetmap)
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            bm.normal_update()
+        except Exception:
+            return total_merged
 
-    try:
-        bmesh.ops.weld_verts(bm, targetmap=targetmap)
-    except Exception:
-        return 0
+    fallback_targetmap = _targetmap_from_live_split_positions(bm, split_infos)
+    if fallback_targetmap:
+        try:
+            bmesh.ops.weld_verts(bm, targetmap=fallback_targetmap)
+            total_merged += len(fallback_targetmap)
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            bm.normal_update()
+        except Exception:
+            return total_merged
 
-    bm.verts.ensure_lookup_table()
-    bm.edges.ensure_lookup_table()
-    bm.faces.ensure_lookup_table()
-    bm.normal_update()
-    return len(targetmap)
+    return total_merged
 
 
 def _attached_weld_live_open_loops(bm, split_infos):
@@ -4335,12 +4495,14 @@ def _attached_weld_live_open_loops(bm, split_infos):
     if not groups:
         return 0
 
+    total_merged = 0
     targetmap = {}
     for split_info in split_infos:
         pair = _live_open_loop_pair(groups, split_info)
         if pair is None:
             continue
         loop_a, loop_b = pair
+        _pin_live_open_loop_pair_to_split_positions(loop_a, loop_b, split_info)
         for vert_a, vert_b in zip(loop_a, loop_b):
             if (
                 not getattr(vert_a, "is_valid", False)
@@ -4350,19 +4512,30 @@ def _attached_weld_live_open_loops(bm, split_infos):
                 continue
             targetmap[vert_b] = vert_a
 
-    if not targetmap:
-        return 0
+    if targetmap:
+        try:
+            bmesh.ops.weld_verts(bm, targetmap=targetmap)
+            total_merged += len(targetmap)
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            bm.normal_update()
+        except Exception:
+            return total_merged
 
-    try:
-        bmesh.ops.weld_verts(bm, targetmap=targetmap)
-    except Exception:
-        return 0
+    fallback_targetmap = _targetmap_from_live_split_positions(bm, split_infos)
+    if fallback_targetmap:
+        try:
+            bmesh.ops.weld_verts(bm, targetmap=fallback_targetmap)
+            total_merged += len(fallback_targetmap)
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            bm.normal_update()
+        except Exception:
+            return total_merged
 
-    bm.verts.ensure_lookup_table()
-    bm.edges.ensure_lookup_table()
-    bm.faces.ensure_lookup_table()
-    bm.normal_update()
-    return len(targetmap)
+    return total_merged
 
 
 def _targetmap_from_split_clusters(split_infos):
@@ -4880,188 +5053,40 @@ def _execute_plain_open_corner_case(bm, obj, direction, report=None, data=None):
         collected_section_indices=collected_section_indices,
     )
 
-    shaft_face_positions = _face_positions(
-        {
-            face
-            for group in data.get('groups', [])
-            for face in _shaft_faces_from_loop_sequence(group[0], is_closed=group[1], strict=False)
-        }
-    )
-    split_edges = set()
-    split_section_logs = []
-    split_mode = "corner_sections"
-    seam_records = []
-    for section_index, section in enumerate(corner_sections, start=1):
-        chain_edges = _chain_edges(section, is_closed=False)
-        if not chain_edges:
-            split_section_logs.append({
-                'section_index': section_index,
-                'vert_indices': [vert.index for vert in section if getattr(vert, "is_valid", False)],
-                'edge_indices': None,
-            })
-            continue
-        split_section_logs.append({
-            'section_index': section_index,
-            'vert_indices': [vert.index for vert in section if getattr(vert, "is_valid", False)],
-            'edge_indices': [edge.index for edge in chain_edges if getattr(edge, "is_valid", False)],
-            'edge_labels': [_edge_debug_label(edge) for edge in chain_edges if getattr(edge, "is_valid", False)],
-        })
-        split_edges.update(chain_edges)
-
-    if not split_edges:
-        seam_records = _outer_boundary_seam_records_from_groups(data.get('groups', []))
-        split_mode = "outer_chunk_boundaries"
-        split_edges = {
-            edge
-            for record in seam_records
-            for edge in record.get('boundary_edges', set())
-            if getattr(edge, "is_valid", False)
-        }
-        split_section_logs = [
-            {
-                'section_index': index,
-                'boundary_edge_count': len(record.get('boundary_edges', set())),
-                'shaft_face_count': len(record.get('shaft_faces', set())),
-                'outside_face_count': len(record.get('corner_faces', set())),
-                'edge_indices': sorted(
-                    edge.index for edge in record.get('boundary_edges', set())
-                    if getattr(edge, "is_valid", False)
-                ),
-            }
-            for index, record in enumerate(seam_records, start=1)
-        ]
-
     _trace_focus(
-        "Split execution plan.",
-        split_mode=split_mode,
+        "Connected execution plan.",
+        group_count=len(data.get('groups', [])),
         corner_section_count=len(corner_sections),
-        split_section_logs=split_section_logs,
-        split_edge_count=len(split_edges),
-        split_edge_indices=sorted(
-            edge.index for edge in split_edges
-            if getattr(edge, "is_valid", False)
-        ),
-        split_edge_labels=sorted(
-            _edge_debug_label(edge) for edge in split_edges
-            if getattr(edge, "is_valid", False)
-        ),
     )
 
-    segment_count = 0
-    welded_vert_count = 0
-    if split_edges:
-        try:
-            if seam_records:
-                split_infos = _split_seam_records(bm, seam_records)
-            else:
-                bmesh.ops.split_edges(bm, edges=list(split_edges))
-                bm.verts.ensure_lookup_table()
-                bm.edges.ensure_lookup_table()
-                bm.faces.ensure_lookup_table()
-                bm.select_flush_mode()
-                bm.normal_update()
-                split_infos = _split_infos_from_sections(bm, corner_sections)
+    result = _resample_connected_open_groups(
+        bm,
+        obj,
+        direction,
+        report,
+        data.get('groups', []),
+        source_loop_specs,
+    )
+    final_source_loop_positions = result['final_source_loop_positions']
 
-            live_shaft_faces = _live_faces_from_positions(bm, shaft_face_positions)
-            _trace_focus(
-                "Post-split shaft face recovery.",
-                shaft_face_count=len(live_shaft_faces),
-            )
-            if live_shaft_faces:
-                _select_only_faces(bm, live_shaft_faces)
-                bm.select_flush_mode()
-                bm.normal_update()
+    if final_source_loop_positions:
+        _select_loops_from_positions(bm, final_source_loop_positions)
+    else:
+        final_data = detect_open_strip_selection(bm)
+        final_groups = final_data.get('groups', []) if final_data else []
+        if not _select_source_loops(bm, final_groups, source_loop_specs):
+            _restore_selection_state(bm, selection_state)
 
-                fresh_groups = _open_groups_from_shaft_faces(live_shaft_faces)
-                segment_count = len(fresh_groups)
-                source_targets = _source_targets_for_fresh_groups(
-                    source_loop_specs,
-                    fresh_groups,
-                )
-                source_target_lookup = {
-                    target['group_index']: target for target in source_targets
-                }
-                final_source_loop_positions = []
-                _trace_focus(
-                    "Post-split open bridge detect.",
-                    group_count=segment_count,
-                )
-
-                if fresh_groups:
-                    for group_index, rings_data in enumerate(fresh_groups, start=1):
-                        anchored_group = _anchor_open_group_endpoints(rings_data)
-                        loops = anchored_group['rings'][0]
-                        _trace_focus(
-                            "Segment resample execute.",
-                            group_index=group_index,
-                            loop_count=len(loops),
-                            loop_size=len(loops[0]) if loops else 0,
-                        )
-                        result_info = {}
-                        execute_aligned_loops_logic(
-                            bm,
-                            obj,
-                            anchored_group['rings'],
-                            direction,
-                            report=report,
-                            use_seams=anchored_group.get('use_seams', True),
-                            migrate_seams=anchored_group.get('migrate_seams'),
-                            max_seams=anchored_group.get('max_seams'),
-                            forced_seam_verts=anchored_group.get('forced_seam_verts'),
-                            result_info=result_info,
-                        )
-                        target = source_target_lookup.get(group_index - 1)
-                        ring_group = result_info.get('ring_group')
-                        if target is not None and ring_group is not None:
-                            target_loop_index = target['loop_index']
-                            if 0 <= target_loop_index < len(ring_group.rings):
-                                final_source_loop_positions.append([
-                                    vert.co.copy()
-                                    for vert in ring_group.rings[target_loop_index].verts
-                                    if getattr(vert, "is_valid", False)
-                                ])
-                    welded_vert_count = _weld_live_open_loops(bm, split_infos)
-                    if welded_vert_count == 0:
-                        fallback_targetmap = _targetmap_from_live_split_positions(
-                            bm,
-                            split_infos,
-                        )
-                        if fallback_targetmap:
-                            try:
-                                bmesh.ops.weld_verts(bm, targetmap=fallback_targetmap)
-                                bm.verts.ensure_lookup_table()
-                                bm.edges.ensure_lookup_table()
-                                bm.faces.ensure_lookup_table()
-                                bm.normal_update()
-                                welded_vert_count = len(fallback_targetmap)
-                            except Exception:
-                                welded_vert_count = 0
-                    if final_source_loop_positions:
-                        _select_loops_from_positions(bm, final_source_loop_positions)
-        finally:
-            if not _selected_verts(bm):
-                final_data = detect_open_strip_selection(bm)
-                final_groups = final_data.get('groups', []) if final_data else []
-                if not _select_source_loops(bm, final_groups, source_loop_specs):
-                    _restore_selection_state(bm, selection_state)
-            else:
-                bm.select_flush_mode()
-            bmesh.update_edit_mesh(obj.data)
+    bm.select_flush_mode()
+    bmesh.update_edit_mesh(obj.data)
 
     if report is not None:
-        if split_edges:
-            report(
-                {'INFO'},
-                "Open loop bridge with corners split corner sections and resampled segments: "
-                f"corners={len(corner_sections)}, edges={len(split_edges)}, "
-                f"segments={segment_count}, welded={welded_vert_count}.",
-            )
-        else:
-            report(
-                {'INFO'},
-                "Open loop bridge with corners detector only: "
-                f"ends={len(end_sections)}, corners={len(corner_sections)}.",
-            )
+        report(
+            {'INFO'},
+            "Open loop bridge with corners resampled connected paths in place: "
+            f"groups={result['resampled_group_count']}, "
+            f"ends={len(end_sections)}, corners={len(corner_sections)}.",
+        )
 
     return {'FINISHED'}
 

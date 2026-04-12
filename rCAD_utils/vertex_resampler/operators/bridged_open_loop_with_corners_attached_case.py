@@ -1861,6 +1861,48 @@ def _attached_source_targets_for_fresh_groups(source_specs, groups):
     return targets
 
 
+def _transpose_open_group(rings_data):
+    loops, is_closed = rings_data
+    if is_closed or len(loops) < 2:
+        return None
+
+    loop_size = len(loops[0]) if loops else 0
+    if loop_size < 2:
+        return None
+    if any(len(loop) != loop_size for loop in loops):
+        return None
+
+    transposed_loops = []
+    for vert_index in range(loop_size):
+        transposed_loop = [loop[vert_index] for loop in loops]
+        if len(transposed_loop) < 2:
+            return None
+        transposed_loops.append(transposed_loop)
+
+    return transposed_loops, False
+
+
+def _attached_best_source_target_for_group(source_specs, rings_data):
+    matches = _attached_source_targets_for_fresh_groups(source_specs, [rings_data])
+    if not matches:
+        return None
+    return min(matches, key=lambda item: item['score'])
+
+
+def _attached_orient_fresh_group_to_source(source_specs, rings_data):
+    transposed = _transpose_open_group(rings_data)
+    if transposed is None or not source_specs:
+        return rings_data
+
+    original_match = _attached_best_source_target_for_group(source_specs, rings_data)
+    transposed_match = _attached_best_source_target_for_group(source_specs, transposed)
+    if transposed_match is None:
+        return rings_data
+    if original_match is None or transposed_match['score'] < original_match['score']:
+        return transposed
+    return rings_data
+
+
 def _attached_segment_sections(groups, partial_ranges=None):
     sections = []
     for group_index, group in enumerate(groups or [], start=1):
@@ -4386,16 +4428,53 @@ def _live_open_loop_pair(groups, split_info):
     return (loop_a, loop_b)
 
 
+def _pin_live_open_loop_pair_to_split_positions(loop_a, loop_b, split_info):
+    clusters = split_info.get('clusters', [])
+    positions = [
+        cluster.get('position')
+        for cluster in clusters
+        if cluster.get('position') is not None
+    ]
+    if len(positions) < 2:
+        return 0
+
+    pinned = 0
+    if len(positions) == len(loop_a) == len(loop_b):
+        for position, vert_a, vert_b in zip(positions, loop_a, loop_b):
+            if getattr(vert_a, "is_valid", False):
+                vert_a.co = position.copy()
+                pinned += 1
+            if getattr(vert_b, "is_valid", False):
+                vert_b.co = position.copy()
+                pinned += 1
+        return pinned
+
+    endpoint_specs = (
+        (positions[0], loop_a[0], loop_b[0]),
+        (positions[-1], loop_a[-1], loop_b[-1]),
+    )
+    for position, vert_a, vert_b in endpoint_specs:
+        if getattr(vert_a, "is_valid", False):
+            vert_a.co = position.copy()
+            pinned += 1
+        if getattr(vert_b, "is_valid", False):
+            vert_b.co = position.copy()
+            pinned += 1
+    return pinned
+
+
 def _weld_open_groups(bm, groups, split_infos):
     if not groups:
         return 0
 
+    total_merged = 0
     targetmap = {}
     for split_info in split_infos:
         pair = _live_open_loop_pair(groups, split_info)
         if pair is None:
             continue
         loop_a, loop_b = pair
+        _pin_live_open_loop_pair_to_split_positions(loop_a, loop_b, split_info)
         for vert_a, vert_b in zip(loop_a, loop_b):
             if (
                 not getattr(vert_a, "is_valid", False)
@@ -4405,19 +4484,30 @@ def _weld_open_groups(bm, groups, split_infos):
                 continue
             targetmap[vert_b] = vert_a
 
-    if not targetmap:
-        return 0
+    if targetmap:
+        try:
+            bmesh.ops.weld_verts(bm, targetmap=targetmap)
+            total_merged += len(targetmap)
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            bm.normal_update()
+        except Exception:
+            return total_merged
 
-    try:
-        bmesh.ops.weld_verts(bm, targetmap=targetmap)
-    except Exception:
-        return 0
+    fallback_targetmap = _targetmap_from_live_split_positions(bm, split_infos)
+    if fallback_targetmap:
+        try:
+            bmesh.ops.weld_verts(bm, targetmap=fallback_targetmap)
+            total_merged += len(fallback_targetmap)
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            bm.normal_update()
+        except Exception:
+            return total_merged
 
-    bm.verts.ensure_lookup_table()
-    bm.edges.ensure_lookup_table()
-    bm.faces.ensure_lookup_table()
-    bm.normal_update()
-    return len(targetmap)
+    return total_merged
 
 
 def _weld_live_open_loops(bm, split_infos):
@@ -5229,9 +5319,15 @@ def _attached_resample_middle_segments(
     direction,
     report,
     context,
-    live_shaft_faces,
+    groups,
 ):
-    fresh_groups = _attached_open_groups_from_shaft_faces(live_shaft_faces)
+    fresh_groups = [
+        _attached_orient_fresh_group_to_source(
+            context['source_loop_specs'],
+            rings_data,
+        )
+        for rings_data in (groups or [])
+    ]
     segment_count = len(fresh_groups)
     source_targets = _attached_source_targets_for_fresh_groups(
         context['source_loop_specs'],
@@ -5244,10 +5340,9 @@ def _attached_resample_middle_segments(
     resampled_segment_count = 0
     resampled_groups = []
 
-    _attached_trace_split_debug(
-        "Post-split open bridge detect.",
+    _trace_focus(
+        "Connected corner resample plan.",
         group_count=segment_count,
-        shaft_components=_attached_shaft_component_summary(live_shaft_faces),
     )
 
     if not fresh_groups:
@@ -5259,16 +5354,19 @@ def _attached_resample_middle_segments(
         }
 
     for group_index, rings_data in enumerate(fresh_groups, start=1):
+        loops, is_closed = rings_data
+        if is_closed or not loops:
+            continue
+
         anchored_group = _anchor_open_group_endpoints(rings_data)
-        loops = anchored_group['rings'][0]
-        _attached_trace_split_debug(
-            "Segment resample execute.",
+        _trace_focus(
+            "Connected corner resample execute.",
             group_index=group_index,
             loop_count=len(loops),
             loop_size=len(loops[0]) if loops else 0,
         )
         result_info = {}
-        execute_aligned_loops_logic(
+        result = execute_aligned_loops_logic(
             bm,
             obj,
             anchored_group['rings'],
@@ -5280,6 +5378,8 @@ def _attached_resample_middle_segments(
             forced_seam_verts=anchored_group.get('forced_seam_verts'),
             result_info=result_info,
         )
+        if result == {'CANCELLED'}:
+            continue
         resampled_segment_count += 1
         target = source_target_lookup.get(group_index - 1)
         ring_group = result_info.get('ring_group')
@@ -5575,57 +5675,37 @@ def _execute_attached_open_corner_case(bm, obj, direction, report=None, data=Non
         _trace_focus("Execute cancelled: detect returned no data.")
         return {'CANCELLED'}
 
-    selection_state = _capture_selection_state(bm)
-    execute_plan = _attached_build_open_corner_execute_plan(data)
-    source_loop_specs = _attached_source_loop_specs(
-        data.get('groups', []),
-        partial_ranges=data.get('partial_ranges'),
-    )
-    if execute_plan['split_edges']:
-        context = {
-            'source_loop_specs': source_loop_specs,
-            'shaft_face_positions': execute_plan['shaft_face_positions'],
-            'segment_sections': execute_plan['segment_sections'],
-            'segment_section_positions': execute_plan['segment_section_positions'],
-            'segment_split_edges': execute_plan['segment_split_edges'],
-            'split_edges': execute_plan['split_edges'],
-            'seam_records': execute_plan['seam_records'],
-        }
-        split_infos = _attached_detach_outer_geometry(bm, context)
-        split_infos = _attached_split_internal_sections(bm, context, split_infos)
-        live_shaft_faces = _attached_recover_detached_shaft(bm, context)
-        if live_shaft_faces:
-            resample_result = _attached_resample_middle_segments(
-                bm,
-                obj,
-                direction,
-                report,
-                context,
-                live_shaft_faces,
-            )
-            if resample_result['resampled_groups']:
-                _attached_weld_middle_segments(
-                    bm,
-                    resample_result['resampled_groups'],
-                    split_infos,
-                )
-            _attached_weld_outer_geometry(
-                bm,
-                context,
-                split_infos,
-            )
-            _attached_restore_final_selection(
-                bm,
-                context,
-                final_source_loop_positions=resample_result['final_source_loop_positions'],
-            )
-        else:
-            _restore_selection_state(bm, selection_state)
-    else:
-        _restore_selection_state(bm, selection_state)
+    context = _attached_prepare_execution_context(bm, obj, data)
+    try:
+        resample_result = _attached_resample_middle_segments(
+            bm,
+            obj,
+            direction,
+            report,
+            context,
+            data.get('groups', []),
+        )
+        _attached_restore_final_selection(
+            bm,
+            context,
+            final_source_loop_positions=resample_result['final_source_loop_positions'],
+        )
+    finally:
+        _clear_source_endpoint_seam_ids(
+            bm,
+            layer=context['source_endpoint_seam_layer'],
+        )
 
     if obj is not None:
         bmesh.update_edit_mesh(obj.data)
+
+    if report is not None:
+        report(
+            {'INFO'},
+            "Open loop bridge with corners resampled connected paths in place: "
+            f"groups={resample_result['resampled_segment_count']}, "
+            f"ends={len(context['end_sections'])}, corners={len(context['corner_sections'])}.",
+        )
 
     return {'FINISHED'}
 
