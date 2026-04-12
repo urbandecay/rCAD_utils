@@ -1,16 +1,16 @@
-# closed_loop_bridged_with_corners.py — Resample bridged closed loops with corners.
+# closed_loop_bridged_with_corners_attached_case.py — Resample bridged closed loops with corners (attached case).
 
 import bmesh
 
 from .. import anchor_overlay
-from ..debug import debug_log
-from .bridge_utils import _is_ordered_open_chain
+from .bridge_utils import _is_ordered_open_chain, get_auto_bridged_chain, get_bridged_chain
 from .detection_utils import get_selected_islands
 from .resample_common import execute_aligned_loops_logic
 
 _VECTOR_TOLERANCE = 1.0e-6
 _POSITION_TOLERANCE = 1.0e-6
 _FACE_POSITION_TOLERANCE = 1.0e-5
+_SOURCE_ENDPOINT_SEAM_ID_LAYER = "rcad_source_endpoint_seam_id"
 
 
 # Keep the cornered open-bridge detection local to this file so the attached
@@ -948,18 +948,16 @@ def detect_open_strip_selection(bm):
     return None
 
 
-def _attached_detect_open_strip_selection(bm):
+def _attached_detect_closed_strip_selection(bm):
     selected_verts = {vert for vert in bm.verts if vert.select}
     _trace_detect(
-        "Starting attached-case open strip detection.",
+        "Starting attached-case closed strip detection.",
         selected_vert_count=len(selected_verts),
     )
     if not selected_verts:
         return None
 
-    endpoint_seed_data = _detect_open_strip_from_endpoint_seed(selected_verts)
-    if endpoint_seed_data is not None:
-        return endpoint_seed_data
+    # Closed loops have no endpoints, so skip endpoint seed detection.
 
     selected_faces = _selected_face_set(bm, selected_verts)
     if selected_faces:
@@ -1001,10 +999,20 @@ def _attached_detect_open_strip_selection(bm):
             'has_outside_side_faces': has_outside_side_faces,
         }
 
-    strip_groups = _detect_open_strips_from_selected_verts(bm)
-    if strip_groups and _matches_selected_verts(strip_groups, selected_verts):
+    # Bridged chain fallback for closed loops.
+    bridged_data = get_bridged_chain(bm)
+    if bridged_data and bridged_data[1] and len(bridged_data[0]) >= 2:
         return {
-            'groups': strip_groups,
+            'groups': [bridged_data],
+            'components': [],
+            'has_extra_selected_faces': False,
+            'has_outside_side_faces': False,
+        }
+
+    auto_bridged = get_auto_bridged_chain(bm)
+    if auto_bridged and auto_bridged[1] and len(auto_bridged[0]) >= 2:
+        return {
+            'groups': [auto_bridged],
             'components': [],
             'has_extra_selected_faces': False,
             'has_outside_side_faces': False,
@@ -1030,7 +1038,7 @@ def _position_key(vec, tolerance):
 
 
 def _debug_step(step, **details):
-    debug_log("open_corner_split", step, **details)
+    return
 
 
 def _trace_corner(message, **details):
@@ -1038,15 +1046,11 @@ def _trace_corner(message, **details):
 
 
 def _trace_focus(message, **details):
-    print(f"[vertex_resampler:open_corner_detect] {message}")
-    for key, value in details.items():
-        print(f"  {key}: {value}")
+    return
 
 
 def _attached_trace_split_debug(message, **details):
-    print(f"[vertex_resampler:open_corner_split_debug] {message}")
-    for key, value in details.items():
-        print(f"  {key}: {value}")
+    return
 
 
 def _vert_debug_label(vert):
@@ -1207,6 +1211,77 @@ def _selected_seed_loops(bm):
     return seed_loops
 
 
+def _is_ordered_closed_cycle(loop):
+    if len(loop) < 3:
+        return False
+    valid_loop = [
+        vert for vert in loop
+        if vert is not None and getattr(vert, "is_valid", False)
+    ]
+    if len(valid_loop) != len(loop) or len(set(valid_loop)) != len(valid_loop):
+        return False
+
+    pairs = list(zip(valid_loop, valid_loop[1:]))
+    pairs.append((valid_loop[-1], valid_loop[0]))
+    return all(_edge_between(vert_a, vert_b) is not None for vert_a, vert_b in pairs)
+
+
+def _order_cycle_component(component_verts):
+    component_set = {
+        vert for vert in component_verts
+        if vert is not None and getattr(vert, "is_valid", False)
+    }
+    if len(component_set) < 3:
+        return None
+
+    component_edges = {
+        edge
+        for vert in component_set
+        for edge in vert.link_edges
+        if edge.other_vert(vert) in component_set
+    }
+    ordered_cycle = _order_cycle_from_edges(component_edges)
+    if ordered_cycle is None:
+        return None
+
+    ordered_verts, _ordered_edges = ordered_cycle
+    if set(ordered_verts) != component_set:
+        return None
+    return ordered_verts
+
+
+def _selected_cycle_seed_loops(bm):
+    islands = get_selected_islands(bm)
+    if islands:
+        closed_loops = []
+        for island in islands:
+            if not island.get('closed'):
+                return []
+            loop = [
+                vert for vert in island.get('verts', [])
+                if getattr(vert, "is_valid", False)
+            ]
+            if not _is_ordered_closed_cycle(loop):
+                ordered_loop = _order_cycle_component(loop)
+                if ordered_loop is None or not _is_ordered_closed_cycle(ordered_loop):
+                    return None
+                loop = ordered_loop
+            closed_loops.append(loop)
+        return closed_loops
+
+    selected_components = _selected_vert_components(_selected_verts(bm))
+    if not selected_components:
+        return []
+
+    closed_loops = []
+    for component in selected_components:
+        ordered_loop = _order_cycle_component(component)
+        if ordered_loop is None or not _is_ordered_closed_cycle(ordered_loop):
+            return None
+        closed_loops.append(ordered_loop)
+    return closed_loops
+
+
 def _face_indices(faces):
     return {
         face.index for face in faces
@@ -1330,6 +1405,61 @@ def _capture_selection_state(bm):
         ],
         'face_positions': _face_positions(_selected_faces(bm)),
     }
+
+
+def _source_endpoint_seam_layer(bm):
+    layer = bm.verts.layers.int.get(_SOURCE_ENDPOINT_SEAM_ID_LAYER)
+    if layer is None:
+        layer = bm.verts.layers.int.new(_SOURCE_ENDPOINT_SEAM_ID_LAYER)
+    return layer
+
+
+def _clear_source_endpoint_seam_ids(bm, layer=None):
+    if layer is None:
+        layer = bm.verts.layers.int.get(_SOURCE_ENDPOINT_SEAM_ID_LAYER)
+        if layer is None:
+            return
+
+    for vert in bm.verts:
+        if getattr(vert, "is_valid", False):
+            vert[layer] = 0
+
+
+def _tag_selected_source_loop_endpoints(bm, source_specs):
+    if not source_specs:
+        return None
+
+    layer = _source_endpoint_seam_layer(bm)
+    _clear_source_endpoint_seam_ids(bm, layer=layer)
+
+    vert_lookup = _build_vert_position_lookup(bm)
+    selected_verts = _selected_verts(bm)
+    seam_id = 1
+    seen_positions = set()
+
+    for source_spec in source_specs:
+        source_positions = source_spec.get('source_positions', [])
+        if not source_positions:
+            continue
+
+        for position in (source_positions[0], source_positions[-1]):
+            position_key = _position_key(position, _POSITION_TOLERANCE)
+            if position_key in seen_positions:
+                continue
+            seen_positions.add(position_key)
+
+            live_verts = _verts_at_position(bm, position, lookup=vert_lookup)
+            if not live_verts:
+                continue
+
+            target_vert = next(
+                (vert for vert in live_verts if vert in selected_verts),
+                live_verts[0],
+            )
+            target_vert[layer] = seam_id
+            seam_id += 1
+
+    return layer
 
 
 def _restore_selection_state(bm, selection_state):
@@ -1812,6 +1942,77 @@ def _attached_source_targets_for_fresh_groups(source_specs, groups):
             used.add((best['group_index'], best['loop_index']))
             targets.append(best)
     return targets
+
+
+def _transpose_open_group(rings_data):
+    loops, is_closed = rings_data
+    if len(loops) < 2:
+        return None
+
+    loop_size = len(loops[0]) if loops else 0
+    if loop_size < 2:
+        return None
+    if any(len(loop) != loop_size for loop in loops):
+        return None
+
+    transposed_loops = []
+    for vert_index in range(loop_size):
+        transposed_loop = [loop[vert_index] for loop in loops]
+        if len(transposed_loop) < 2:
+            return None
+        transposed_loops.append(transposed_loop)
+
+    return transposed_loops, is_closed
+
+
+def _loop_has_closing_edge(loop):
+    return _chain_edges(loop, is_closed=True) is not None
+
+
+def _corner_group_execute_settings(rings_data):
+    loops, path_is_closed = rings_data
+    if not loops:
+        return None
+
+    loop_is_closed = _loop_has_closing_edge(loops[0])
+    return {
+        'rings': (loops, loop_is_closed),
+        'stack_is_cyclic': bool(path_is_closed and not loop_is_closed),
+        'anchor_open_endpoints': not loop_is_closed,
+    }
+
+
+def _attached_best_source_target_for_group(source_specs, rings_data):
+    matches = _attached_source_targets_for_fresh_groups(source_specs, [rings_data])
+    if not matches:
+        return None
+    return min(matches, key=lambda item: item['score'])
+
+
+def _attached_source_specs_for_group(source_specs, group_index):
+    matching_specs = [
+        source_spec for source_spec in (source_specs or [])
+        if source_spec.get('group_index') == group_index
+    ]
+    if matching_specs:
+        return matching_specs
+    if 0 <= group_index < len(source_specs or []):
+        return [source_specs[group_index]]
+    return []
+
+
+def _attached_orient_fresh_group_to_source(source_specs, rings_data):
+    transposed = _transpose_open_group(rings_data)
+    if transposed is None or not source_specs:
+        return rings_data
+
+    original_match = _attached_best_source_target_for_group(source_specs, rings_data)
+    transposed_match = _attached_best_source_target_for_group(source_specs, transposed)
+    if transposed_match is None:
+        return rings_data
+    if original_match is None or transposed_match['score'] < original_match['score']:
+        return transposed
+    return rings_data
 
 
 def _attached_segment_sections(groups, partial_ranges=None):
@@ -3157,7 +3358,7 @@ def _detect_corner_any_cross_section_seed(bm):
     return {
         'groups': matched_groups,
         'components': [],
-        'mode_label': 'Bridged open loop with corners',
+        'mode_label': 'Closed loop bridged with corners',
         'detector_only': True,
         'partial_ranges': partial_ranges,
     }
@@ -3288,6 +3489,22 @@ def _loop_walk_key(loop):
         vert.index for vert in loop
         if vert is not None and getattr(vert, "is_valid", False)
     )
+
+
+def _cycle_walk_key(loop):
+    ids = tuple(
+        vert.index for vert in loop
+        if vert is not None and getattr(vert, "is_valid", False)
+    )
+    if not ids:
+        return ()
+    rotations = [ids[index:] + ids[:index] for index in range(len(ids))]
+    reversed_ids = tuple(reversed(ids))
+    rotations.extend(
+        reversed_ids[index:] + reversed_ids[:index]
+        for index in range(len(reversed_ids))
+    )
+    return min(rotations)
 
 
 def _order_open_chain_component(component_verts):
@@ -3504,6 +3721,97 @@ def _adjacent_bridge_loops_from_seed(seed_loop):
     return aligned_loops
 
 
+def _best_aligned_closed_loop(reference_loop, candidate_loop):
+    if len(reference_loop) != len(candidate_loop) or not candidate_loop:
+        return list(candidate_loop)
+
+    best_loop = None
+    best_score = None
+    for start_index in range(len(candidate_loop)):
+        rotated_loop = _rotate_loop(candidate_loop, start_index)
+        reversed_loop = list(reversed(rotated_loop))
+        for variant in (rotated_loop, reversed_loop):
+            score = _pair_distance_score(reference_loop, variant)
+            if score is None:
+                continue
+            if best_score is None or score < best_score:
+                best_score = score
+                best_loop = variant
+    return best_loop if best_loop is not None else list(candidate_loop)
+
+
+def _adjacent_closed_bridge_loops_from_seed(seed_loop):
+    seed_set = {
+        vert for vert in seed_loop
+        if vert is not None and getattr(vert, "is_valid", False)
+    }
+    if len(seed_set) != len(seed_loop):
+        return None
+
+    partner_map = {}
+    all_partners = set()
+    for vert in seed_loop:
+        partners = []
+        for edge in vert.link_edges:
+            other = edge.other_vert(vert)
+            if other in seed_set or not getattr(other, "is_valid", False):
+                continue
+            partners.append(other)
+        deduped_partners = sorted(set(partners), key=lambda item: item.index)
+        if not deduped_partners:
+            return None
+        partner_map[vert] = deduped_partners
+        all_partners.update(deduped_partners)
+
+    visited = set()
+    components = []
+    for vert in sorted(all_partners, key=lambda item: item.index):
+        if vert in visited:
+            continue
+        stack = [vert]
+        component = set()
+        visited.add(vert)
+        while stack:
+            current = stack.pop()
+            component.add(current)
+            for edge in current.link_edges:
+                other = edge.other_vert(current)
+                if other not in all_partners or other in visited:
+                    continue
+                visited.add(other)
+                stack.append(other)
+        components.append(component)
+
+    full_size_components = [
+        component for component in components
+        if len(component) == len(seed_loop)
+    ]
+    if len(full_size_components) not in {1, 2}:
+        return None
+
+    aligned_loops = []
+    for component in full_size_components:
+        aligned = []
+        for vert in seed_loop:
+            matches = [partner for partner in partner_map[vert] if partner in component]
+            if len(matches) != 1:
+                return None
+            aligned.append(matches[0])
+
+        aligned = _best_aligned_closed_loop(seed_loop, aligned)
+        if not _is_ordered_closed_cycle(aligned):
+            ordered_component = _order_cycle_component(component)
+            if ordered_component is None:
+                return None
+            aligned = _best_aligned_closed_loop(seed_loop, ordered_component)
+            if not _is_ordered_closed_cycle(aligned):
+                return None
+
+        aligned_loops.append(aligned)
+
+    return aligned_loops
+
+
 def _next_partial_bridge_loop(current_loop, previous_loop=None):
     current_set = {
         vert for vert in current_loop
@@ -3639,6 +3947,87 @@ def _next_partial_bridge_loop(current_loop, previous_loop=None):
     return aligned
 
 
+def _next_closed_bridge_loop(current_loop, previous_loop=None):
+    current_set = {
+        vert for vert in current_loop
+        if vert is not None and getattr(vert, "is_valid", False)
+    }
+    previous_set = {
+        vert for vert in (previous_loop or ())
+        if vert is not None and getattr(vert, "is_valid", False)
+    }
+    if len(current_set) != len(current_loop):
+        return None
+
+    partner_map = {}
+    all_partners = set()
+    for vert in current_loop:
+        partners = []
+        for edge in vert.link_edges:
+            other = edge.other_vert(vert)
+            if (
+                other in current_set
+                or other in previous_set
+                or not getattr(other, "is_valid", False)
+            ):
+                continue
+            partners.append(other)
+        deduped_partners = sorted(set(partners), key=lambda item: item.index)
+        partner_map[vert] = deduped_partners
+        if deduped_partners:
+            all_partners.update(deduped_partners)
+
+    if not all_partners:
+        return []
+
+    visited = set()
+    components = []
+    for vert in sorted(all_partners, key=lambda item: item.index):
+        if vert in visited:
+            continue
+        stack = [vert]
+        component = set()
+        visited.add(vert)
+        while stack:
+            current = stack.pop()
+            component.add(current)
+            for edge in current.link_edges:
+                other = edge.other_vert(current)
+                if other not in all_partners or other in visited:
+                    continue
+                visited.add(other)
+                stack.append(other)
+        components.append(component)
+
+    full_size_components = [
+        component for component in components
+        if len(component) == len(current_loop)
+    ]
+    if not full_size_components:
+        return []
+    if len(full_size_components) != 1:
+        return None
+
+    component = full_size_components[0]
+    aligned = []
+    for vert in current_loop:
+        matches = [partner for partner in partner_map[vert] if partner in component]
+        if len(matches) != 1:
+            return None
+        aligned.append(matches[0])
+
+    aligned = _best_aligned_closed_loop(current_loop, aligned)
+    if not _is_ordered_closed_cycle(aligned):
+        ordered_component = _order_cycle_component(component)
+        if ordered_component is None:
+            return None
+        aligned = _best_aligned_closed_loop(current_loop, ordered_component)
+        if not _is_ordered_closed_cycle(aligned):
+            return None
+
+    return aligned
+
+
 def _walk_bridge_side(seed_loop, first_loop, visited_keys, seed_key=None, close_on_seed=False):
     if first_loop is None:
         return None
@@ -3671,6 +4060,46 @@ def _walk_bridge_side(seed_loop, first_loop, visited_keys, seed_key=None, close_
         walked.append(current_loop)
 
         next_loop = _next_partial_bridge_loop(current_loop, previous_loop=previous_loop)
+        if next_loop is None:
+            return None
+
+        previous_loop = current_loop
+        current_loop = next_loop
+
+    return {
+        'loops': walked,
+        'closed': False,
+    }
+
+
+def _walk_closed_bridge_side(seed_loop, first_loop, visited_keys, seed_key=None, close_on_seed=False):
+    if first_loop is None:
+        return None
+    if not first_loop:
+        return {
+            'loops': [],
+            'closed': False,
+        }
+
+    walked = []
+    previous_loop = seed_loop
+    current_loop = first_loop
+
+    while current_loop:
+        current_key = _cycle_walk_key(current_loop)
+        if not current_key:
+            return None
+        if current_key in visited_keys:
+            if close_on_seed and seed_key is not None and current_key == seed_key:
+                return {
+                    'loops': walked,
+                    'closed': True,
+                }
+            return None
+        visited_keys.add(current_key)
+        walked.append(current_loop)
+
+        next_loop = _next_closed_bridge_loop(current_loop, previous_loop=previous_loop)
         if next_loop is None:
             return None
 
@@ -3788,6 +4217,79 @@ def _expand_closed_bridge_from_seed_loop(seed_loop):
     return _expand_bridge_from_seed_loop(seed_loop, close_on_seed=True)
 
 
+def _expand_bridge_from_closed_seed_loop(seed_loop, close_on_seed=False):
+    if seed_loop is None or len(seed_loop) < 3:
+        return None
+
+    seed_loop = _best_aligned_closed_loop(seed_loop, seed_loop)
+    if not _is_ordered_closed_cycle(seed_loop):
+        ordered_seed = _order_cycle_component(seed_loop)
+        if ordered_seed is None or not _is_ordered_closed_cycle(ordered_seed):
+            return None
+        seed_loop = ordered_seed
+
+    seed_key = _cycle_walk_key(seed_loop)
+    if not seed_key:
+        return None
+
+    visited_keys = {seed_key}
+    adjacent_loops = _adjacent_closed_bridge_loops_from_seed(seed_loop)
+    if adjacent_loops is None:
+        return None
+
+    first_side = adjacent_loops[0] if adjacent_loops else []
+    second_side = adjacent_loops[1] if len(adjacent_loops) > 1 else []
+
+    left_result = _walk_closed_bridge_side(
+        seed_loop,
+        first_side,
+        visited_keys,
+        seed_key=seed_key,
+        close_on_seed=close_on_seed,
+    )
+    if left_result is None:
+        return None
+    left_loops = left_result['loops']
+
+    if left_result.get('closed'):
+        expanded_loops = [list(seed_loop)] + left_loops
+        if len(expanded_loops) < 2:
+            return None
+        return {
+            'group': (expanded_loops, True),
+            'seed_loop_index': 0,
+        }
+
+    right_result = _walk_closed_bridge_side(
+        seed_loop,
+        second_side,
+        visited_keys,
+        seed_key=seed_key,
+        close_on_seed=close_on_seed,
+    )
+    if right_result is None:
+        return None
+    right_loops = right_result['loops']
+
+    if right_result.get('closed'):
+        expanded_loops = [list(seed_loop)] + right_loops
+        if len(expanded_loops) < 2:
+            return None
+        return {
+            'group': (expanded_loops, True),
+            'seed_loop_index': 0,
+        }
+
+    expanded_loops = list(reversed(left_loops)) + [list(seed_loop)] + right_loops
+    if len(expanded_loops) < 2:
+        return None
+
+    return {
+        'group': (expanded_loops, False),
+        'seed_loop_index': len(left_loops),
+    }
+
+
 def _find_group_from_seed_loop(groups, selected_verts):
     selected_set = {
         vert for vert in selected_verts
@@ -3855,6 +4357,7 @@ def _split_infos_from_boundary_components(bm, boundary_components, vert_lookup=N
 
         if clusters:
             split_infos.append({
+                'split_kind': 'boundary',
                 'anchor_home': positions[0].copy(),
                 'clusters': clusters,
             })
@@ -3887,6 +4390,7 @@ def _split_infos_from_sections(bm, sections, vert_lookup=None):
 
         if clusters:
             split_infos.append({
+                'split_kind': 'section',
                 'anchor_home': positions[0].copy(),
                 'clusters': clusters,
             })
@@ -4176,6 +4680,46 @@ def _weld_boundary_positions(bm, positions, vert_lookup=None):
         return 0
 
 
+def _weld_selected_source_endpoint_seam_ids(bm, layer=None):
+    if layer is None:
+        layer = bm.verts.layers.int.get(_SOURCE_ENDPOINT_SEAM_ID_LAYER)
+        if layer is None:
+            return 0
+
+    tagged_verts = {}
+    for vert in bm.verts:
+        if not getattr(vert, "is_valid", False):
+            continue
+        seam_id = vert[layer]
+        if seam_id > 0 and seam_id not in tagged_verts:
+            tagged_verts[seam_id] = vert
+
+    if not tagged_verts:
+        return 0
+
+    vert_lookup = _build_vert_position_lookup(bm)
+    targetmap = {}
+    for seam_id, target_vert in tagged_verts.items():
+        live_verts = _verts_at_position(bm, target_vert.co.copy(), lookup=vert_lookup)
+        for vert in live_verts:
+            if vert is not target_vert and getattr(vert, "is_valid", False):
+                targetmap[vert] = target_vert
+
+    if not targetmap:
+        return 0
+
+    try:
+        bmesh.ops.weld_verts(bm, targetmap=targetmap)
+    except Exception:
+        return 0
+
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    bm.normal_update()
+    return len(targetmap)
+
+
 def _cluster_loop_match_count(loop, split_info):
     loop_set = {vert for vert in loop if getattr(vert, "is_valid", False)}
     return sum(
@@ -4247,6 +4791,53 @@ def _pair_distance_score(loop_a, loop_b):
     )
 
 
+def _rotate_loop(loop, start_index):
+    if not loop:
+        return list(loop)
+    start_index %= len(loop)
+    return list(loop[start_index:]) + list(loop[:start_index])
+
+
+def _normalize_closed_group_loop_phase(rings_data):
+    loops, path_is_closed = rings_data
+    if not loops or not _loop_has_closing_edge(loops[0]):
+        return rings_data
+
+    normalized_loops = [list(loops[0])]
+    reference_loop = normalized_loops[0]
+
+    for loop in loops[1:]:
+        current_loop = list(loop)
+        if len(current_loop) != len(reference_loop) or len(current_loop) <= 1:
+            normalized_loops.append(current_loop)
+            reference_loop = current_loop
+            continue
+
+        best_loop = current_loop
+        best_score = _pair_distance_score(reference_loop, current_loop)
+
+        for start_index in range(len(current_loop)):
+            rotated_loop = _rotate_loop(current_loop, start_index)
+            forward_score = _pair_distance_score(reference_loop, rotated_loop)
+            reversed_loop = _reverse_loop_with_fixed_start(rotated_loop)
+            reverse_score = _pair_distance_score(reference_loop, reversed_loop)
+
+            for score, candidate_loop in (
+                (forward_score, rotated_loop),
+                (reverse_score, reversed_loop),
+            ):
+                if score is None:
+                    continue
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_loop = candidate_loop
+
+        normalized_loops.append(best_loop)
+        reference_loop = best_loop
+
+    return (normalized_loops, path_is_closed)
+
+
 def _live_open_loop_pair(groups, split_info):
     matches = _open_group_matches(groups, split_info)
     if len(matches) < 2:
@@ -4297,6 +4888,88 @@ def _live_open_loop_pair(groups, split_info):
     return (loop_a, loop_b)
 
 
+def _pin_live_open_loop_pair_to_split_positions(loop_a, loop_b, split_info):
+    clusters = split_info.get('clusters', [])
+    positions = [
+        cluster.get('position')
+        for cluster in clusters
+        if cluster.get('position') is not None
+    ]
+    if len(positions) < 2:
+        return 0
+
+    pinned = 0
+    if len(positions) == len(loop_a) == len(loop_b):
+        for position, vert_a, vert_b in zip(positions, loop_a, loop_b):
+            if getattr(vert_a, "is_valid", False):
+                vert_a.co = position.copy()
+                pinned += 1
+            if getattr(vert_b, "is_valid", False):
+                vert_b.co = position.copy()
+                pinned += 1
+        return pinned
+
+    endpoint_specs = (
+        (positions[0], loop_a[0], loop_b[0]),
+        (positions[-1], loop_a[-1], loop_b[-1]),
+    )
+    for position, vert_a, vert_b in endpoint_specs:
+        if getattr(vert_a, "is_valid", False):
+            vert_a.co = position.copy()
+            pinned += 1
+        if getattr(vert_b, "is_valid", False):
+            vert_b.co = position.copy()
+            pinned += 1
+    return pinned
+
+
+def _weld_open_groups(bm, groups, split_infos):
+    if not groups:
+        return 0
+
+    total_merged = 0
+    targetmap = {}
+    for split_info in split_infos:
+        pair = _live_open_loop_pair(groups, split_info)
+        if pair is None:
+            continue
+        loop_a, loop_b = pair
+        _pin_live_open_loop_pair_to_split_positions(loop_a, loop_b, split_info)
+        for vert_a, vert_b in zip(loop_a, loop_b):
+            if (
+                not getattr(vert_a, "is_valid", False)
+                or not getattr(vert_b, "is_valid", False)
+                or vert_a is vert_b
+            ):
+                continue
+            targetmap[vert_b] = vert_a
+
+    if targetmap:
+        try:
+            bmesh.ops.weld_verts(bm, targetmap=targetmap)
+            total_merged += len(targetmap)
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            bm.normal_update()
+        except Exception:
+            return total_merged
+
+    fallback_targetmap = _targetmap_from_live_split_positions(bm, split_infos)
+    if fallback_targetmap:
+        try:
+            bmesh.ops.weld_verts(bm, targetmap=fallback_targetmap)
+            total_merged += len(fallback_targetmap)
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            bm.normal_update()
+        except Exception:
+            return total_merged
+
+    return total_merged
+
+
 def _weld_live_open_loops(bm, split_infos):
     live_data = detect_open_strip_selection(bm)
     groups = live_data.get('groups') if live_data else []
@@ -4336,37 +5009,7 @@ def _weld_live_open_loops(bm, split_infos):
 def _attached_weld_live_open_loops(bm, split_infos):
     live_data = _attached_detect_open_strip_selection(bm)
     groups = live_data.get('groups') if live_data else []
-    if not groups:
-        return 0
-
-    targetmap = {}
-    for split_info in split_infos:
-        pair = _live_open_loop_pair(groups, split_info)
-        if pair is None:
-            continue
-        loop_a, loop_b = pair
-        for vert_a, vert_b in zip(loop_a, loop_b):
-            if (
-                not getattr(vert_a, "is_valid", False)
-                or not getattr(vert_b, "is_valid", False)
-                or vert_a is vert_b
-            ):
-                continue
-            targetmap[vert_b] = vert_a
-
-    if not targetmap:
-        return 0
-
-    try:
-        bmesh.ops.weld_verts(bm, targetmap=targetmap)
-    except Exception:
-        return 0
-
-    bm.verts.ensure_lookup_table()
-    bm.edges.ensure_lookup_table()
-    bm.faces.ensure_lookup_table()
-    bm.normal_update()
-    return len(targetmap)
+    return _weld_open_groups(bm, groups, split_infos)
 
 
 def _targetmap_from_split_clusters(split_infos):
@@ -4402,6 +5045,104 @@ def _targetmap_from_live_split_positions(bm, split_infos, vert_lookup=None):
     return targetmap
 
 
+def _find_unwelded_split_verts(bm, split_infos, vert_lookup=None):
+    if vert_lookup is None:
+        vert_lookup = _build_vert_position_lookup(bm)
+
+    unmatched = []
+    seen = set()
+    for split_info in split_infos or []:
+        split_kind = split_info.get('split_kind', 'unknown')
+        for cluster_index, cluster in enumerate(split_info.get('clusters', []), start=1):
+            position = cluster.get('position')
+            if position is None:
+                continue
+            position_key = _position_key(position, _POSITION_TOLERANCE)
+            dedupe_key = (split_kind, position_key)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+
+            live_verts = _verts_at_position(bm, position, lookup=vert_lookup)
+            if len(live_verts) <= 1:
+                continue
+
+            unmatched.append({
+                'split_kind': split_kind,
+                'cluster_index': cluster_index,
+                'kept_vert': live_verts[0].index,
+                'unwelded_vert_indices': [vert.index for vert in live_verts[1:]],
+                'live_vert_indices': [vert.index for vert in live_verts],
+            })
+
+    return unmatched
+
+
+def _log_unwelded_split_verts(bm, split_infos):
+    unmatched = _find_unwelded_split_verts(bm, split_infos)
+    for item in unmatched:
+        print(
+            "[vertex_resampler:unwelded] "
+            f"split_kind={item['split_kind']} "
+            f"cluster_index={item['cluster_index']} "
+            f"kept_vert=v{item['kept_vert']} "
+            f"unwelded={item['unwelded_vert_indices']} "
+            f"live={item['live_vert_indices']}"
+        )
+    return unmatched
+
+
+def _find_unwelded_source_loop_verts(bm, loop_positions_list, vert_lookup=None):
+    if vert_lookup is None:
+        vert_lookup = _build_vert_position_lookup(bm)
+
+    unmatched = []
+    seen = set()
+    for loop_index, loop_positions in enumerate(loop_positions_list or [], start=1):
+        if not loop_positions:
+            continue
+
+        position_specs = (
+            ("start", loop_positions[0]),
+            ("end", loop_positions[-1]),
+        )
+        for endpoint_label, position in position_specs:
+            position_key = _position_key(position, _POSITION_TOLERANCE)
+            dedupe_key = (loop_index, endpoint_label, position_key)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+
+            live_verts = _verts_at_position(bm, position, lookup=vert_lookup)
+            if len(live_verts) <= 1:
+                continue
+
+            unmatched.append({
+                'loop_index': loop_index,
+                'endpoint': endpoint_label,
+                'kept_vert': live_verts[0].index,
+                'unwelded_vert_indices': [vert.index for vert in live_verts[1:]],
+                'live_vert_indices': [vert.index for vert in live_verts],
+            })
+
+    return unmatched
+
+
+def _log_unwelded_source_loop_verts(bm, loop_positions_list):
+    unmatched = _find_unwelded_source_loop_verts(bm, loop_positions_list)
+    for item in unmatched:
+        print(
+            "[vertex_resampler:unwelded] "
+            "split_kind=source_loop "
+            f"loop_index={item['loop_index']} "
+            f"endpoint={item['endpoint']} "
+            f"kept_vert=v{item['kept_vert']} "
+            f"unwelded={item['unwelded_vert_indices']} "
+            f"live={item['live_vert_indices']}"
+        )
+    return unmatched
+
+
 def _anchor_open_group_endpoints(rings_data):
     loops, _is_closed = rings_data
     forced_seam_verts = []
@@ -4420,6 +5161,26 @@ def _anchor_open_group_endpoints(rings_data):
         'rings': rings_data,
         'use_seams': True,
         'migrate_seams': False,
+        'max_seams': 2,
+        'forced_seam_verts': forced_seam_verts,
+    }
+
+
+def _anchor_closed_group_phase(rings_data):
+    loops, is_closed = rings_data
+    forced_seam_verts = []
+    for loop in loops:
+        seam_verts = set()
+        if loop:
+            first_vert = loop[0]
+            if getattr(first_vert, "is_valid", False):
+                seam_verts.add(first_vert)
+        forced_seam_verts.append(seam_verts)
+
+    return {
+        'rings': (loops, is_closed),
+        'use_seams': True,
+        'migrate_seams': True,
         'max_seams': 2,
         'forced_seam_verts': forced_seam_verts,
     }
@@ -4750,15 +5511,764 @@ def _capture_detected_cross_sections(obj, end_sections, corner_sections, all_sec
     #     anchor_overlay.add_segments(segments)
 
 
-from . import closed_loop_bridged_with_corners_attached_case
-from . import closed_loop_bridged_with_corners_plain_case
+def _attached_data_has_attached_outside_geometry(data):
+    if not data:
+        return False
+
+    if any(component.get('outside_side_faces') for component in data.get('components', [])):
+        return True
+
+    groups = data.get('groups', [])
+    if not groups:
+        return False
+
+    return bool(_attached_outer_boundary_seam_records_from_groups(groups))
+
+
+def _detect_attached_closed_corner_case(bm):
+    _trace_focus("Detect started.")
+    cycle_seed_loops = _selected_cycle_seed_loops(bm)
+    if cycle_seed_loops:
+        groups = []
+        partial_ranges = []
+        for component_index, seed_loop in enumerate(cycle_seed_loops, start=1):
+            seed_result = _expand_bridge_from_closed_seed_loop(seed_loop, close_on_seed=False)
+            if seed_result is None:
+                _trace_focus(
+                    "Selected closed cross-section expansion failed.",
+                    component_index=component_index,
+                    seed_size=len(seed_loop),
+                )
+                return None
+            groups.append(seed_result['group'])
+            partial_ranges.append({
+                'loop_index': seed_result['seed_loop_index'],
+                'start_index': 0,
+                'end_index': len(seed_loop) - 1,
+                'score': (len(seed_loop), 1.0, 1.0, 0.0, 0),
+            })
+
+        result = {
+            'groups': groups,
+            'components': [],
+            'mode_label': 'Closed loop bridged with corners',
+            'detector_only': True,
+            'partial_ranges': partial_ranges,
+        }
+        if _attached_data_has_attached_outside_geometry(result):
+            result['outside_geometry_case'] = True
+            return result
+        return None
+
+    cross_section_data = _detect_corner_any_cross_section_seed(bm)
+    if cross_section_data is not None:
+        _trace_focus(
+            "Detect path chosen: selected cross sections.",
+            group_count=len(cross_section_data.get('groups', [])),
+        )
+        result = _attach_partial_ranges(bm, {
+            'groups': cross_section_data.get('groups', []),
+            'components': cross_section_data.get('components', []),
+            'mode_label': 'Closed loop bridged with corners',
+            'detector_only': True,
+            'partial_ranges': cross_section_data.get('partial_ranges'),
+        })
+        if _attached_data_has_attached_outside_geometry(result):
+            result['outside_geometry_case'] = True
+            return result
+        return None
+
+    seed_loops = _selected_seed_loops(bm)
+    if seed_loops:
+        groups = []
+        partial_ranges = []
+        for component_index, seed_loop in enumerate(seed_loops, start=1):
+            # Prefer closed bridge expansion for closed loop detection.
+            seed_group = _expand_closed_bridge_from_seed_loop(seed_loop)
+            if seed_group is None:
+                seed_group = _expand_open_bridge_from_seed_loop(seed_loop)
+            if seed_group is None:
+                _trace_focus(
+                    "Selected seed expansion failed.",
+                    component_index=component_index,
+                    seed_size=len(seed_loop),
+                )
+                return None
+            # Reject if the group is not a closed loop.
+            if not seed_group[1]:
+                _trace_focus(
+                    "Rejected: seed group is not a closed loop.",
+                    component_index=component_index,
+                )
+                return None
+            groups.append(seed_group)
+            partial_range = _selected_subset_range_any_loop(seed_group, seed_loop)
+            if partial_range is None:
+                partial_range = {
+                    'loop_index': 0,
+                    'start_index': 0,
+                    'end_index': len(seed_loop) - 1,
+                    'score': (len(seed_loop), 1.0, 1.0, 0.0, 0),
+                }
+            partial_ranges.append(partial_range)
+
+        _trace_focus(
+            "Detect path chosen: selected seed loops.",
+            group_count=len(groups),
+            seed_sizes=[len(seed_loop) for seed_loop in seed_loops],
+            loop_counts=[len(group[0]) for group in groups],
+        )
+        result = {
+            'groups': groups,
+            'components': [],
+            'mode_label': 'Closed loop bridged with corners',
+            'detector_only': True,
+            'partial_ranges': partial_ranges,
+        }
+        if _attached_data_has_attached_outside_geometry(result):
+            result['outside_geometry_case'] = True
+            return result
+        return None
+
+    data = _attached_detect_closed_strip_selection(bm)
+    if data is not None and _groups_are_closed(data['groups']):
+        selected_verts = _selected_verts(bm)
+        seed_group = _find_group_from_seed_loop(data['groups'], selected_verts)
+        if seed_group is not None:
+            _trace_focus(
+                "Detect path chosen: matched selected cross section inside closed groups.",
+                group_count=len(data.get('groups', [])),
+            )
+            result = _attach_partial_ranges(bm, {
+                'groups': [seed_group],
+                'components': data.get('components', []),
+                'mode_label': 'Closed loop bridged with corners',
+                'detector_only': True,
+            })
+            if _attached_data_has_attached_outside_geometry(result):
+                result['outside_geometry_case'] = True
+                return result
+            return None
+
+        _trace_focus(
+            "Detect path chosen: generic closed-group scan.",
+            group_count=len(data.get('groups', [])),
+            loop_counts=[len(group[0]) for group in data.get('groups', [])],
+            loop_sizes=[
+                len(group[0][0]) if group[0] else 0
+                for group in data.get('groups', [])
+            ],
+        )
+        result = _attach_partial_ranges(bm, {
+            'groups': data['groups'],
+            'components': data.get('components', []),
+            'mode_label': 'Closed loop bridged with corners',
+            'detector_only': True,
+        })
+        if _attached_data_has_attached_outside_geometry(result):
+            result['outside_geometry_case'] = True
+            return result
+        return None
+
+    _trace_focus("Detect failed.")
+    return None
 
 
 def detect(bm):
-    data = closed_loop_bridged_with_corners_attached_case.detect(bm)
-    if data is not None:
-        return data
-    return closed_loop_bridged_with_corners_plain_case.detect(bm)
+    data = _detect_attached_closed_corner_case(bm)
+    return data
+
+
+def _attached_prepare_execution_context(bm, obj, data):
+    selection_state = _capture_selection_state(bm)
+    source_loop_specs = _attached_source_loop_specs(
+        data.get('groups', []),
+        partial_ranges=data.get('partial_ranges'),
+    )
+    source_endpoint_seam_layer = _tag_selected_source_loop_endpoints(
+        bm,
+        source_loop_specs,
+    )
+    execute_plan = _attached_build_open_corner_execute_plan(data)
+    end_sections = execute_plan['end_sections']
+    corner_sections = execute_plan['corner_sections']
+    all_sections = execute_plan['all_sections']
+
+    _capture_detected_cross_sections(
+        obj,
+        end_sections,
+        corner_sections,
+        all_sections=all_sections,
+    )
+    _trace_focus(
+        "Preview build finished.",
+        end_cross_section_count=len(end_sections),
+        corner_cross_section_count=len(corner_sections),
+        propagated_cross_section_count=len(all_sections),
+        collected_section_indices=execute_plan['collected_section_indices'],
+    )
+
+    return {
+        'selection_state': selection_state,
+        'source_loop_specs': source_loop_specs,
+        'source_endpoint_seam_layer': source_endpoint_seam_layer,
+        'execute_plan': execute_plan,
+        'end_sections': end_sections,
+        'corner_sections': corner_sections,
+        'segment_sections': execute_plan['segment_sections'],
+        'segment_section_positions': execute_plan['segment_section_positions'],
+        'collected_section_indices': execute_plan['collected_section_indices'],
+        'shaft_face_positions': execute_plan['shaft_face_positions'],
+        'segment_split_edges': execute_plan['segment_split_edges'],
+        'split_edges': execute_plan['split_edges'],
+        'split_section_logs': execute_plan['split_section_logs'],
+        'split_mode': execute_plan['split_mode'],
+        'seam_records': execute_plan['seam_records'],
+    }
+
+
+def _attached_trace_execution_plan(bm, context):
+    initial_shaft_faces = _live_faces_from_positions(
+        bm,
+        context['shaft_face_positions'],
+    )
+    _attached_trace_split_debug(
+        "Planned separation.",
+        split_mode=context['split_mode'],
+        end_section_count=len(context['end_sections']),
+        corner_section_count=len(context['corner_sections']),
+        interior_section_count=len(context['segment_sections']),
+        seam_record_count=len(context['seam_records']),
+        split_edge_count=len(context['split_edges']),
+        initial_shaft_face_count=len(initial_shaft_faces),
+        initial_shaft_components=_attached_shaft_component_summary(initial_shaft_faces),
+        split_section_logs=context['split_section_logs'],
+    )
+
+
+def _attached_detach_outer_geometry(bm, context):
+    split_infos = []
+
+    if context['seam_records']:
+        split_infos.extend(_attached_split_seam_records(bm, context['seam_records']))
+        detached_shaft_faces = _live_faces_from_positions(
+            bm,
+            context['shaft_face_positions'],
+        )
+        _attached_trace_split_debug(
+            "After outside detach split.",
+            shaft_face_count=len(detached_shaft_faces),
+            shaft_components=_attached_shaft_component_summary(detached_shaft_faces),
+        )
+        return split_infos
+
+    bmesh.ops.split_edges(bm, edges=list(context['split_edges']))
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    bm.select_flush_mode()
+    bm.normal_update()
+    split_infos.extend(_split_infos_from_sections(bm, context['segment_sections']))
+    detached_shaft_faces = _live_faces_from_positions(
+        bm,
+        context['shaft_face_positions'],
+    )
+    _attached_trace_split_debug(
+        "After direct section split.",
+        shaft_face_count=len(detached_shaft_faces),
+        shaft_components=_attached_shaft_component_summary(detached_shaft_faces),
+    )
+    return split_infos
+
+
+def _attached_split_internal_sections(bm, context, split_infos):
+    if not (context['seam_records'] and context['segment_split_edges']):
+        return split_infos
+
+    live_segment_edges = _live_bmesh_items(context['segment_split_edges'])
+    live_segment_control_verts = _split_control_verts(live_segment_edges)
+    if context['segment_section_positions']:
+        vert_lookup = _build_vert_position_lookup(bm)
+        _attached_trace_split_debug(
+            "Before interior seam split.",
+            section_cluster_summary=_attached_section_cluster_summary(
+                bm,
+                context['segment_section_positions'],
+                vert_lookup=vert_lookup,
+            ),
+        )
+    _attached_trace_split_debug(
+        "Planned interior seam edges.",
+        live_edge_count=len(live_segment_edges),
+        live_control_vert_count=len(live_segment_control_verts),
+        live_edge_indices=sorted(
+            edge.index for edge in live_segment_edges
+            if getattr(edge, "is_valid", False)
+        ),
+    )
+    if not live_segment_edges:
+        return split_infos
+
+    bmesh.ops.split_edges(
+        bm,
+        edges=list(live_segment_edges),
+        verts=list(live_segment_control_verts),
+        use_verts=bool(live_segment_control_verts),
+    )
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    bm.select_flush_mode()
+    bm.normal_update()
+    split_infos.extend(_split_infos_from_sections(bm, context['segment_sections']))
+    post_internal_split_faces = _live_faces_from_positions(
+        bm,
+        context['shaft_face_positions'],
+    )
+    split_details = {
+        'shaft_face_count': len(post_internal_split_faces),
+        'shaft_components': _attached_shaft_component_summary(post_internal_split_faces),
+    }
+    if context['segment_section_positions']:
+        split_details['section_cluster_summary'] = _attached_section_cluster_summary(
+            bm,
+            context['segment_section_positions'],
+        )
+    _attached_trace_split_debug("After interior seam split.", **split_details)
+    return split_infos
+
+
+def _attached_recover_detached_shaft(bm, context):
+    live_shaft_faces = _live_faces_from_positions(
+        bm,
+        context['shaft_face_positions'],
+    )
+    if not live_shaft_faces:
+        return []
+
+    _select_only_faces(bm, live_shaft_faces)
+    bm.select_flush_mode()
+    bm.normal_update()
+    return live_shaft_faces
+
+
+def _attached_resample_middle_segments(
+    bm,
+    obj,
+    direction,
+    report,
+    context,
+    groups,
+):
+    fresh_groups = []
+    source_target_lookup = {}
+    for group_index, rings_data in enumerate(groups or []):
+        group_source_specs = _attached_source_specs_for_group(
+            context['source_loop_specs'],
+            group_index,
+        )
+        oriented_group = _attached_orient_fresh_group_to_source(
+            group_source_specs,
+            rings_data,
+        )
+        oriented_group = _normalize_closed_group_loop_phase(oriented_group)
+        fresh_groups.append(oriented_group)
+
+        group_targets = _attached_source_targets_for_fresh_groups(
+            group_source_specs,
+            [oriented_group],
+        )
+        if group_targets:
+            target = dict(group_targets[0])
+            target['group_index'] = group_index
+            source_target_lookup[group_index] = target
+
+    segment_count = len(fresh_groups)
+    source_targets = _attached_source_targets_for_fresh_groups(
+        context['source_loop_specs'],
+        fresh_groups,
+    )
+    for target in source_targets:
+        source_target_lookup.setdefault(target['group_index'], target)
+    final_source_loop_positions = []
+    resampled_segment_count = 0
+    resampled_groups = []
+
+    _trace_focus(
+        "Connected corner resample plan.",
+        group_count=segment_count,
+    )
+
+    if not fresh_groups:
+        return {
+            'segment_count': segment_count,
+            'resampled_segment_count': resampled_segment_count,
+            'resampled_groups': resampled_groups,
+            'final_source_loop_positions': final_source_loop_positions,
+        }
+
+    for group_index, rings_data in enumerate(fresh_groups, start=1):
+        execute_settings = _corner_group_execute_settings(rings_data)
+        if execute_settings is None:
+            continue
+        loops, _path_is_closed = rings_data
+
+        execute_rings = execute_settings['rings']
+        anchored_group = (
+            _anchor_open_group_endpoints(execute_rings)
+            if execute_settings['anchor_open_endpoints']
+            else _anchor_closed_group_phase(execute_rings)
+        )
+        _trace_focus(
+            "Connected corner resample execute.",
+            group_index=group_index,
+            loop_count=len(loops),
+            loop_size=len(loops[0]) if loops else 0,
+        )
+        result_info = {}
+        result = execute_aligned_loops_logic(
+            bm,
+            obj,
+            anchored_group['rings'],
+            direction,
+            report=report,
+            use_seams=anchored_group.get('use_seams', True),
+            migrate_seams=anchored_group.get('migrate_seams'),
+            max_seams=anchored_group.get('max_seams'),
+            stack_is_cyclic=execute_settings['stack_is_cyclic'],
+            forced_seam_verts=anchored_group.get('forced_seam_verts'),
+            result_info=result_info,
+        )
+        if result == {'CANCELLED'}:
+            continue
+        resampled_segment_count += 1
+        target = source_target_lookup.get(group_index - 1)
+        ring_group = result_info.get('ring_group')
+        if ring_group is not None:
+            resampled_groups.append((
+                [list(ring_info.verts) for ring_info in ring_group.rings],
+                False,
+            ))
+        if target is not None and ring_group is not None:
+            target_loop_index = target['loop_index']
+            if 0 <= target_loop_index < len(ring_group.rings):
+                final_source_loop_positions.append([
+                    vert.co.copy()
+                    for vert in ring_group.rings[target_loop_index].verts
+                    if getattr(vert, "is_valid", False)
+                ])
+
+    return {
+        'segment_count': segment_count,
+        'resampled_segment_count': resampled_segment_count,
+        'resampled_groups': resampled_groups,
+        'final_source_loop_positions': final_source_loop_positions,
+    }
+
+
+def _attached_split_infos_by_kind(split_infos):
+    section_split_infos = [
+        split_info for split_info in split_infos
+        if split_info.get('split_kind') == 'section'
+    ]
+    boundary_split_infos = [
+        split_info for split_info in split_infos
+        if split_info.get('split_kind') == 'boundary'
+    ]
+    return section_split_infos, boundary_split_infos
+
+
+def _attached_weld_middle_segments(bm, resampled_groups, split_infos):
+    section_split_infos, _boundary_split_infos = _attached_split_infos_by_kind(split_infos)
+    return _weld_open_groups(
+        bm,
+        resampled_groups,
+        section_split_infos,
+    )
+
+
+def _attached_boundary_record_position_specs(bm, seam_records, boundary_split_infos):
+    record_specs = []
+    used_split_indices = set()
+
+    for record in seam_records or []:
+        live_boundary_edges = _live_bmesh_items(record.get('boundary_edges', set()))
+        live_corner_faces = _live_bmesh_items(record.get('corner_faces', set()))
+        chain = _ordered_chain_verts(live_boundary_edges)
+        if not chain or not live_corner_faces:
+            continue
+
+        anchor_position = chain[0].co.copy()
+        best_split_index = None
+        best_split_distance = None
+        for split_index, split_info in enumerate(boundary_split_infos):
+            if split_index in used_split_indices:
+                continue
+            distance = (split_info['anchor_home'] - anchor_position).length
+            if best_split_distance is None or distance < best_split_distance:
+                best_split_distance = distance
+                best_split_index = split_index
+
+        if best_split_index is None:
+            continue
+
+        used_split_indices.add(best_split_index)
+        record_specs.append({
+            'corner_faces': live_corner_faces,
+            'positions': [
+                cluster['position'].copy()
+                for cluster in boundary_split_infos[best_split_index].get('clusters', [])
+                if cluster.get('position') is not None
+            ],
+        })
+
+    return record_specs
+
+
+def _attached_outer_targetmap_from_seam_positions(bm, context, split_infos):
+    _section_split_infos, boundary_split_infos = _attached_split_infos_by_kind(split_infos)
+    if not boundary_split_infos:
+        return {}
+
+    record_specs = _attached_boundary_record_position_specs(
+        bm,
+        context.get('seam_records', []),
+        boundary_split_infos,
+    )
+    if not record_specs:
+        return {}
+
+    vert_lookup = _build_vert_position_lookup(bm)
+    targetmap = {}
+    for record_spec in record_specs:
+        corner_faces = record_spec['corner_faces']
+        for position in record_spec['positions']:
+            live_verts = _verts_at_position(
+                bm,
+                position,
+                lookup=vert_lookup,
+            )
+            if len(live_verts) < 2:
+                continue
+
+            outside_verts = [
+                vert for vert in live_verts
+                if any(face in corner_faces for face in vert.link_faces)
+            ]
+            if not outside_verts:
+                continue
+
+            target = outside_verts[0]
+            for vert in live_verts:
+                if vert is target or not getattr(vert, "is_valid", False):
+                    continue
+                targetmap[vert] = target
+
+    return targetmap
+
+
+def _attached_weld_outer_geometry(bm, context, split_infos):
+    boundary_targetmap = _attached_outer_targetmap_from_seam_positions(
+        bm,
+        context,
+        split_infos,
+    )
+    if not boundary_targetmap:
+        _section_split_infos, boundary_split_infos = _attached_split_infos_by_kind(split_infos)
+        if not boundary_split_infos:
+            return 0
+
+        boundary_targetmap = _targetmap_from_live_split_positions(
+            bm,
+            boundary_split_infos,
+        )
+    if not boundary_targetmap:
+        return 0
+
+    try:
+        bmesh.ops.weld_verts(bm, targetmap=boundary_targetmap)
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+        bm.normal_update()
+        return len(boundary_targetmap)
+    except Exception:
+        return 0
+
+
+def _attached_weld_selected_cross_section_cleanup(bm, context):
+    return _weld_selected_source_endpoint_seam_ids(
+        bm,
+        layer=context['source_endpoint_seam_layer'],
+    )
+
+
+def _attached_restore_source_loop_selection(bm, final_source_loop_positions):
+    if not final_source_loop_positions:
+        return
+
+    _log_unwelded_source_loop_verts(bm, final_source_loop_positions)
+    _select_loops_from_positions(bm, final_source_loop_positions)
+
+
+def _attached_select_outer_connection_verts(bm, context, split_infos):
+    _section_split_infos, boundary_split_infos = _attached_split_infos_by_kind(split_infos)
+    seam_records = context.get('seam_records', [])
+    if not seam_records and not boundary_split_infos:
+        return False
+
+    for face in bm.faces:
+        if face.is_valid:
+            face.select = False
+    for edge in bm.edges:
+        if edge.is_valid:
+            edge.select = False
+    for vert in bm.verts:
+        if vert.is_valid:
+            vert.select = False
+
+    vert_lookup = _build_vert_position_lookup(bm)
+    position_keys = set()
+    candidate_positions = []
+
+    def _add_position(position):
+        if position is None:
+            return
+        position_key = _position_key(position, _POSITION_TOLERANCE)
+        if position_key in position_keys:
+            return
+        position_keys.add(position_key)
+        candidate_positions.append(position.copy())
+
+    any_selected = False
+    seen_vert_indices = set()
+
+    for split_info in boundary_split_infos:
+        for cluster in split_info.get('clusters', []):
+            live_cluster_verts = [
+                vert for vert in cluster.get('verts', [])
+                if getattr(vert, "is_valid", False)
+            ]
+            if live_cluster_verts:
+                for vert in live_cluster_verts:
+                    _add_position(vert.co)
+            else:
+                _add_position(cluster.get('position'))
+
+    for record in seam_records:
+        for edge in _live_bmesh_items(record.get('boundary_edges', set())):
+            for vert in edge.verts:
+                if getattr(vert, "is_valid", False):
+                    _add_position(vert.co)
+
+    for position in candidate_positions:
+        for vert in _verts_at_position(bm, position, lookup=vert_lookup):
+            if not getattr(vert, "is_valid", False):
+                continue
+            if vert.index in seen_vert_indices:
+                continue
+            seen_vert_indices.add(vert.index)
+            vert.select = True
+            any_selected = True
+
+    for split_info in boundary_split_infos:
+        for cluster in split_info.get('clusters', []):
+            for vert in cluster.get('verts', []):
+                if not getattr(vert, "is_valid", False):
+                    continue
+                if vert.index in seen_vert_indices:
+                    continue
+                seen_vert_indices.add(vert.index)
+                vert.select = True
+                any_selected = True
+
+    for record in seam_records:
+        live_boundary_edges = _live_bmesh_items(record.get('boundary_edges', set()))
+        for edge in live_boundary_edges:
+            for vert in edge.verts:
+                if not getattr(vert, "is_valid", False):
+                    continue
+                if vert.index in seen_vert_indices:
+                    continue
+                seen_vert_indices.add(vert.index)
+                vert.select = True
+                any_selected = True
+
+    return any_selected
+
+
+def _attached_log_weld_leftovers(bm, split_infos):
+    _log_unwelded_split_verts(bm, split_infos)
+
+
+def _attached_restore_final_selection(bm, context, final_source_loop_positions=None):
+    if final_source_loop_positions and _select_loops_from_positions(
+        bm,
+        final_source_loop_positions,
+    ):
+        return
+
+    final_data = _attached_detect_open_strip_selection(bm)
+    final_groups = final_data.get('groups', []) if final_data else []
+    if _attached_select_source_loops(
+        bm,
+        final_groups,
+        context['source_loop_specs'],
+    ):
+        return
+
+    _restore_selection_state(bm, context['selection_state'])
+
+
+def _attached_finalize_execution(bm, obj, context):
+    _clear_source_endpoint_seam_ids(
+        bm,
+        layer=context['source_endpoint_seam_layer'],
+    )
+    _attached_restore_final_selection(bm, context)
+    bmesh.update_edit_mesh(obj.data)
+
+
+def _execute_attached_closed_corner_case(bm, obj, direction, report=None, data=None):
+    if data is None:
+        data = _detect_attached_closed_corner_case(bm)
+    if not data:
+        _trace_focus("Execute cancelled: detect returned no data.")
+        return {'CANCELLED'}
+
+    context = _attached_prepare_execution_context(bm, obj, data)
+    try:
+        resample_result = _attached_resample_middle_segments(
+            bm,
+            obj,
+            direction,
+            report,
+            context,
+            data.get('groups', []),
+        )
+        _attached_restore_final_selection(
+            bm,
+            context,
+            final_source_loop_positions=resample_result['final_source_loop_positions'],
+        )
+    finally:
+        _clear_source_endpoint_seam_ids(
+            bm,
+            layer=context['source_endpoint_seam_layer'],
+        )
+
+    if obj is not None:
+        bmesh.update_edit_mesh(obj.data)
+
+    if report is not None:
+        report(
+            {'INFO'},
+            "Closed loop bridge with corners resampled connected paths in place: "
+            f"groups={resample_result['resampled_segment_count']}, "
+            f"ends={len(context['end_sections'])}, corners={len(context['corner_sections'])}.",
+        )
+
+    return {'FINISHED'}
 
 
 def execute(bm, obj, direction, report=None, data=None):
@@ -4768,16 +6278,7 @@ def execute(bm, obj, direction, report=None, data=None):
         _trace_focus("Execute cancelled: detect returned no data.")
         return {'CANCELLED'}
 
-    if data.get('outside_geometry_case'):
-        return closed_loop_bridged_with_corners_attached_case.execute(
-            bm,
-            obj,
-            direction,
-            report=report,
-            data=data,
-        )
-
-    return closed_loop_bridged_with_corners_plain_case.execute(
+    return _execute_attached_closed_corner_case(
         bm,
         obj,
         direction,
