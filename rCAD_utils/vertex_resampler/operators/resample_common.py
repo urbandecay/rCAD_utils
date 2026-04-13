@@ -13,6 +13,7 @@ from ..seam_manager import (
     save_face_seam_anchors,
     match_face_seam_anchors,
     migrate_drifted_face_seams,
+    ensure_all_seam_edges,
 )
 from ..vert_deletion import find_safe_deletion_index, delete_at_index
 from ..vert_insertion import find_safe_insertion_index, insert_at_index
@@ -331,6 +332,11 @@ def execute_aligned_loops_logic(
         ) if edge_lengths else 0.1
         migrate_drifted_seams(bm, ring_group, seam_homes, threshold)
         _enforce_max_seams(bm, ring_group, max_seams)
+
+    # Final safety net — after all migration AND enforce_max_seams,
+    # guarantee every tracked seam still has an edge. Nothing runs after this.
+    if is_closed and migrate_seams:
+        ensure_all_seam_edges(bm, ring_group)
 
     ring_vert_set = set()
     for ring_info in ring_group.rings:

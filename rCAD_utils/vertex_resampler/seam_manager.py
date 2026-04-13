@@ -85,6 +85,48 @@ def match_seam_homes(ring_group, stored_homes, avg_edge_len):
     return seam_homes
 
 
+def _create_edge_robust(bm, v1, v2):
+    """Create an edge between v1 and v2 using the most reliable method.
+    Tries face_split first, then connect_verts, then raw edge creation.
+    Returns True if an edge exists between v1 and v2 after this call."""
+    if bm.edges.get([v1, v2]):
+        return True
+
+    # Try face_split on the largest shared face — most reliable
+    shared_face = None
+    max_verts = 0
+    for f in v1.link_faces:
+        if v2 in f.verts and len(f.verts) > max_verts:
+            max_verts = len(f.verts)
+            shared_face = f
+
+    if shared_face and len(shared_face.verts) >= 4:
+        try:
+            bmesh.utils.face_split(shared_face, v1, v2)
+        except Exception:
+            pass
+
+    if bm.edges.get([v1, v2]):
+        return True
+
+    # Fall back to connect_verts
+    try:
+        bmesh.ops.connect_verts(bm, verts=[v1, v2])
+    except Exception:
+        pass
+
+    if bm.edges.get([v1, v2]):
+        return True
+
+    # Last resort: raw edge creation — always works
+    try:
+        bm.edges.new([v1, v2])
+    except Exception:
+        pass
+
+    return bm.edges.get([v1, v2]) is not None
+
+
 def _primary_seam_edge(seam_vert, all_ring_verts):
     seam_edges = [
         edge for edge in seam_vert.link_edges
@@ -134,47 +176,89 @@ def match_face_seam_anchors(ring_group, stored_anchors, avg_edge_len):
 def _migrate_seam_vert(bm, old_sv, new_sv, all_ring_verts):
     """Migrate seam edges from old_sv to new_sv.
     Draws a new edge (new_sv -> non-ring vert) then dissolves the old one.
+    Returns True if new_sv has a non-ring edge after migration.
     Do NOT use face deletion — just draw + dissolve.
     """
     seam_edges = [e for e in old_sv.link_edges
                   if e.other_vert(old_sv) not in all_ring_verts]
     if not seam_edges:
-        return
+        return False
 
-    # Only migrate one primary outside connection. Prefer the main support edge,
-    # not a tiny side edge from surrounding triangulation.
     old_edge = max(seam_edges, key=lambda edge: edge.calc_length())
     non_ring_vert = old_edge.other_vert(old_sv)
 
-    if not bm.edges.get([new_sv, non_ring_vert]):
-        bmesh.ops.connect_verts(bm, verts=[new_sv, non_ring_vert])
-    if old_edge.is_valid:
-        bmesh.ops.dissolve_edges(bm, edges=[old_edge],
-                                 use_verts=False, use_face_split=False)
+    created = _create_edge_robust(bm, new_sv, non_ring_vert)
+
+    if created:
+        if old_edge.is_valid:
+            bmesh.ops.dissolve_edges(bm, edges=[old_edge],
+                                     use_verts=False, use_face_split=False)
+        return True
+
+    return False
 
 
 def _migrate_seam_vert_to_target(bm, old_sv, new_sv, target_non_ring_vert, all_ring_verts):
-    """Migrate a seam edge to a chosen ring vert and chosen outside endpoint."""
+    """Migrate a seam edge to a chosen ring vert and chosen outside endpoint.
+    Returns True if new_sv has a non-ring edge after migration."""
     if not (target_non_ring_vert and target_non_ring_vert.is_valid):
-        return
+        return False
 
     seam_edges = [
         edge for edge in old_sv.link_edges
         if edge.other_vert(old_sv) not in all_ring_verts
     ]
     if not seam_edges:
-        return
+        return False
 
     old_edge = max(seam_edges, key=lambda edge: edge.calc_length())
-    if not bm.edges.get([new_sv, target_non_ring_vert]):
-        bmesh.ops.connect_verts(bm, verts=[new_sv, target_non_ring_vert])
-    if old_edge.is_valid:
-        bmesh.ops.dissolve_edges(
-            bm,
-            edges=[old_edge],
-            use_verts=False,
-            use_face_split=False,
-        )
+    created = _create_edge_robust(bm, new_sv, target_non_ring_vert)
+
+    if created:
+        if old_edge.is_valid:
+            bmesh.ops.dissolve_edges(
+                bm,
+                edges=[old_edge],
+                use_verts=False,
+                use_face_split=False,
+            )
+        return True
+
+    return False
+
+
+def _ensure_seam_edge(bm, seam_vert, all_ring_verts):
+    """Guarantee seam_vert has a non-ring edge. If missing, draw one to the
+    nearest non-ring vert reachable via shared faces.
+    Returns True if an edge exists after this call."""
+    if _primary_seam_edge(seam_vert, all_ring_verts) is not None:
+        return True
+
+    # Candidates: non-ring verts sharing a face with seam_vert
+    seen = set()
+    candidates = []
+    for face in seam_vert.link_faces:
+        for v in face.verts:
+            if v.is_valid and v not in all_ring_verts and v != seam_vert and v not in seen:
+                seen.add(v)
+                candidates.append(v)
+
+    if not candidates:
+        return False
+
+    target = min(candidates, key=lambda v: (v.co - seam_vert.co).length)
+    _create_edge_robust(bm, seam_vert, target)
+
+    return _primary_seam_edge(seam_vert, all_ring_verts) is not None
+
+
+def ensure_all_seam_edges(bm, ring_group):
+    """Final safety net — guarantee every tracked seam vert has an edge.
+    Call this as the very last step before bmesh.update_edit_mesh."""
+    for ring_info in ring_group.rings:
+        for sv in list(ring_info.seam_verts):
+            if sv.is_valid:
+                _ensure_seam_edge(bm, sv, ring_group.all_ring_verts)
 
 
 def migrate_drifted_seams(bm, ring_group, seam_homes, threshold):
@@ -203,9 +287,17 @@ def migrate_drifted_seams(bm, ring_group, seam_homes, threshold):
                         best_dist = d
                         best = v
             if best:
-                _migrate_seam_vert(bm, seam_vert, best, ring_group.all_ring_verts)
-                ring_info.seam_verts.discard(seam_vert)
-                ring_info.seam_verts.add(best)
+                migrated = _migrate_seam_vert(bm, seam_vert, best, ring_group.all_ring_verts)
+                if migrated:
+                    ring_info.seam_verts.discard(seam_vert)
+                    ring_info.seam_verts.add(best)
+
+    # Verification pass — guarantee every tracked seam still has an edge.
+    # If anything slipped through, _ensure_seam_edge recreates it.
+    for ring_info in ring_group.rings:
+        for sv in list(ring_info.seam_verts):
+            if sv.is_valid:
+                _ensure_seam_edge(bm, sv, ring_group.all_ring_verts)
 
     bm.verts.ensure_lookup_table()
     bm.edges.ensure_lookup_table()
@@ -233,7 +325,10 @@ def migrate_drifted_face_seams(bm, ring_group, seam_anchors, threshold):
 
             ring_home, outer_home = seam_anchors[seam_vert]
             seam_edge = _primary_seam_edge(seam_vert, ring_group.all_ring_verts)
+
             if seam_edge is None:
+                # Seam edge was lost — recreate it now
+                _ensure_seam_edge(bm, seam_vert, ring_group.all_ring_verts)
                 continue
 
             outer_vert = seam_edge.other_vert(seam_vert)
@@ -260,15 +355,22 @@ def migrate_drifted_face_seams(bm, ring_group, seam_anchors, threshold):
                     target_outer_vert = candidate
 
             if best_ring_vert is not None:
-                _migrate_seam_vert_to_target(
+                migrated = _migrate_seam_vert_to_target(
                     bm,
                     seam_vert,
                     best_ring_vert,
                     target_outer_vert,
                     ring_group.all_ring_verts,
                 )
-                ring_info.seam_verts.discard(seam_vert)
-                ring_info.seam_verts.add(best_ring_vert)
+                if migrated:
+                    ring_info.seam_verts.discard(seam_vert)
+                    ring_info.seam_verts.add(best_ring_vert)
+
+    # Verification pass — guarantee every tracked seam still has an edge.
+    for ring_info in ring_group.rings:
+        for sv in list(ring_info.seam_verts):
+            if sv.is_valid:
+                _ensure_seam_edge(bm, sv, ring_group.all_ring_verts)
 
     bm.verts.ensure_lookup_table()
     bm.edges.ensure_lookup_table()
