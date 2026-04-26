@@ -9,6 +9,9 @@ from mathutils import Vector, kdtree
 from .debug import debug_log, vert_ref
 
 
+_VECTOR_TOLERANCE = 1.0e-9
+
+
 def _ring_vert_positions(ring_info):
     return {
         vert: index
@@ -56,11 +59,85 @@ def _seam_clearance_steps(ring_info):
     return 2 if len(ring_info.verts) >= 8 else 1
 
 
-def _seam_target_score(ring_info, vert, home, other_targets, clearance_steps, positions):
+def _safe_normalized(vector):
+    if vector.length <= _VECTOR_TOLERANCE:
+        return None
+    return vector.normalized()
+
+
+def _adjacent_ring_edge_dirs(ring_info, vert, positions):
+    index = positions.get(vert)
+    if index is None:
+        return []
+
+    loop = ring_info.verts
+    count = len(loop)
+    if count < 2:
+        return []
+
+    neighbor_indices = []
+    if ring_info.is_closed:
+        neighbor_indices.extend([
+            (index - 1) % count,
+            (index + 1) % count,
+        ])
+    else:
+        if index > 0:
+            neighbor_indices.append(index - 1)
+        if index < count - 1:
+            neighbor_indices.append(index + 1)
+
+    directions = []
+    for neighbor_index in neighbor_indices:
+        neighbor = loop[neighbor_index]
+        if not neighbor.is_valid:
+            continue
+        direction = _safe_normalized(neighbor.co - vert.co)
+        if direction is not None:
+            directions.append(direction)
+    return directions
+
+
+def _seam_perpendicular_error(ring_info, vert, non_ring_vert, positions):
+    if non_ring_vert is None or not non_ring_vert.is_valid:
+        return float('inf')
+
+    seam_direction = _safe_normalized(non_ring_vert.co - vert.co)
+    if seam_direction is None:
+        return float('inf')
+
+    ring_dirs = _adjacent_ring_edge_dirs(ring_info, vert, positions)
+    if not ring_dirs:
+        return float('inf')
+
+    return sum(abs(seam_direction.dot(direction)) for direction in ring_dirs) / len(ring_dirs)
+
+
+def _seam_target_score(
+    ring_info,
+    vert,
+    home,
+    other_targets,
+    clearance_steps,
+    positions,
+    non_ring_vert=None,
+):
     min_spacing = _min_ring_spacing(ring_info, vert, other_targets, positions)
     home_dist = (vert.co - home).length
+    perpendicular_error = _seam_perpendicular_error(
+        ring_info,
+        vert,
+        non_ring_vert,
+        positions,
+    )
     is_clear = min_spacing >= clearance_steps
-    return (0 if is_clear else 1, home_dist, -min_spacing, vert.index), min_spacing
+    return (
+        0 if is_clear else 1,
+        perpendicular_error,
+        home_dist,
+        -min_spacing,
+        vert.index,
+    ), min_spacing, perpendicular_error
 
 
 def _outside_edges_for_vert(vert, all_ring_verts):
@@ -68,6 +145,13 @@ def _outside_edges_for_vert(vert, all_ring_verts):
         edge for edge in vert.link_edges
         if edge.is_valid and edge.other_vert(vert) not in all_ring_verts
     ]
+
+
+def _primary_outside_edge_for_vert(vert, all_ring_verts):
+    seam_edges = _outside_edges_for_vert(vert, all_ring_verts)
+    if not seam_edges:
+        return None
+    return max(seam_edges, key=lambda edge: edge.calc_length())
 
 
 def _occupied_ring_seam_verts(ring_info, all_ring_verts):
@@ -231,13 +315,10 @@ def _migrate_seam_vert(bm, old_sv, new_sv, all_ring_verts):
     Draws a new edge (new_sv -> non-ring vert) then dissolves the old one.
     Do NOT use face deletion — just draw + dissolve.
     """
-    seam_edges = _outside_edges_for_vert(old_sv, all_ring_verts)
-    if not seam_edges:
+    old_edge = _primary_outside_edge_for_vert(old_sv, all_ring_verts)
+    if old_edge is None:
         return False
 
-    # Only migrate one primary outside connection. Prefer the main support edge,
-    # not a tiny side edge from surrounding triangulation.
-    old_edge = max(seam_edges, key=lambda edge: edge.calc_length())
     non_ring_vert = old_edge.other_vert(old_sv)
     old_len = old_edge.calc_length()
     new_len = (new_sv.co - non_ring_vert.co).length
@@ -277,6 +358,14 @@ def migrate_drifted_seams(bm, ring_group, seam_homes, threshold):
         for seam_vert in list(ring_info.seam_verts):
             if not seam_vert.is_valid or seam_vert not in seam_homes:
                 continue
+            primary_edge = _primary_outside_edge_for_vert(
+                seam_vert,
+                ring_group.all_ring_verts,
+            )
+            if primary_edge is None:
+                continue
+            non_ring_vert = primary_edge.other_vert(seam_vert)
+            old_len = primary_edge.calc_length()
             home = seam_homes[seam_vert]
             drift = (seam_vert.co - home).length
             occupied_targets = _occupied_ring_seam_verts(ring_info, ring_group.all_ring_verts)
@@ -293,23 +382,21 @@ def migrate_drifted_seams(bm, ring_group, seam_homes, threshold):
                 if vert.is_valid and vert != seam_vert
             )
 
-            current_score, current_spacing = _seam_target_score(
+            current_score, current_spacing, current_perpendicular_error = _seam_target_score(
                 ring_info,
                 seam_vert,
                 home,
                 blocked_targets,
                 clearance_steps,
                 positions,
+                non_ring_vert,
             )
             is_crowded = bool(blocked_targets) and current_spacing < clearance_steps
-
-            if drift <= threshold and not is_crowded:
-                reserved_targets.add(seam_vert)
-                continue
 
             best = None
             best_score = None
             best_spacing = None
+            best_perpendicular_error = None
 
             for v in ring_info.verts:
                 if not v.is_valid or v in blocked_targets:
@@ -317,6 +404,10 @@ def migrate_drifted_seams(bm, ring_group, seam_homes, threshold):
                 move_steps = _ring_move_steps(ring_info, seam_vert, v, positions)
                 if move_steps is not None and move_steps > horizon_steps:
                     continue
+                if v != seam_vert:
+                    new_len = (v.co - non_ring_vert.co).length
+                    if new_len > max(old_len * 2.0, old_len + 1e-6):
+                        continue
                 if not _candidate_in_home_sector(
                     ring_info,
                     v,
@@ -325,28 +416,32 @@ def migrate_drifted_seams(bm, ring_group, seam_homes, threshold):
                     positions,
                 ):
                     continue
-                candidate_score, candidate_spacing = _seam_target_score(
+                candidate_score, candidate_spacing, candidate_perpendicular_error = _seam_target_score(
                     ring_info,
                     v,
                     home,
                     blocked_targets,
                     clearance_steps,
                     positions,
+                    non_ring_vert,
                 )
                 if best_score is None or candidate_score < best_score:
                     best_score = candidate_score
                     best_spacing = candidate_spacing
+                    best_perpendicular_error = candidate_perpendicular_error
                     best = v
 
             if best is not None and best != seam_vert and best_score < current_score:
                 debug_log(
                     "seam_migrate",
-                    "Migrating seam away from drift/crowding to a better-spaced target.",
+                    "Migrating seam to a more normal local ring target.",
                     old_seam=vert_ref(seam_vert),
                     new_seam=vert_ref(best),
                     drift=round(drift, 6),
                     current_spacing=current_spacing,
                     new_spacing=best_spacing,
+                    current_perpendicular_error=round(current_perpendicular_error, 6),
+                    new_perpendicular_error=round(best_perpendicular_error, 6),
                     clearance_steps=clearance_steps,
                     horizon_steps=horizon_steps,
                     home_index=home_indices.get(seam_vert),
@@ -371,16 +466,22 @@ def migrate_drifted_seams(bm, ring_group, seam_homes, threshold):
             else:
                 debug_log(
                     "seam_migrate",
-                    "Kept seam in place because no better spaced target was available.",
+                    "Kept seam in place because no better local normal target was available.",
                     seam=vert_ref(seam_vert),
                     drift=round(drift, 6),
                     crowded=is_crowded,
                     current_spacing=current_spacing,
+                    current_perpendicular_error=round(current_perpendicular_error, 6),
                     clearance_steps=clearance_steps,
                     horizon_steps=horizon_steps,
                     home_index=home_indices.get(seam_vert),
                     best_candidate=vert_ref(best),
                     best_score=best_score,
+                    best_perpendicular_error=(
+                        round(best_perpendicular_error, 6)
+                        if best_perpendicular_error is not None
+                        else None
+                    ),
                     occupied_targets=[vert_ref(v) for v in sorted(occupied_targets, key=lambda vert: vert.index)],
                     blocked_targets=[vert_ref(v) for v in sorted(blocked_targets, key=lambda vert: vert.index)],
                 )
