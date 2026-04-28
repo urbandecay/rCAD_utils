@@ -482,8 +482,10 @@ def detect(bm, report=None):
         groups.append({
             'rings': ([ring], True),
             'use_seams': use_seams,
-            'migrate_seams': True,
-            'max_seams': 1,
+            'migrate_seams': False,
+            'max_seams': None,
+            'repair_topology': False,
+            'align_seams_to_ring_normals': True,
             'cleanup_edges': cleanup_edges,
             'cleanup_ring_edges': cleanup_ring_edges,
         })

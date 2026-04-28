@@ -113,6 +113,100 @@ def _seam_perpendicular_error(ring_info, vert, non_ring_vert, positions):
     return sum(abs(seam_direction.dot(direction)) for direction in ring_dirs) / len(ring_dirs)
 
 
+def _local_tangent_dirs(ring_info, vert, positions, sample_steps=2):
+    index = positions.get(vert)
+    if index is None:
+        return []
+
+    loop = ring_info.verts
+    count = len(loop)
+    if count < 3:
+        return []
+
+    directions = []
+    for step in range(1, sample_steps + 1):
+        if ring_info.is_closed:
+            prev_vert = loop[(index - step) % count]
+            next_vert = loop[(index + step) % count]
+        else:
+            prev_index = index - step
+            next_index = index + step
+            if prev_index < 0 or next_index >= count:
+                continue
+            prev_vert = loop[prev_index]
+            next_vert = loop[next_index]
+
+        if not (prev_vert.is_valid and next_vert.is_valid):
+            continue
+        direction = _safe_normalized(next_vert.co - prev_vert.co)
+        if direction is not None:
+            directions.append(direction)
+
+    if directions:
+        return directions
+
+    return _adjacent_ring_edge_dirs(ring_info, vert, positions)
+
+
+def _local_perpendicular_score(ring_info, vert, non_ring_vert, positions, sample_steps=2):
+    if non_ring_vert is None or not non_ring_vert.is_valid:
+        return (float('inf'), float('inf'))
+
+    seam_direction = _safe_normalized(non_ring_vert.co - vert.co)
+    if seam_direction is None:
+        return (float('inf'), float('inf'))
+
+    tangent_dirs = _local_tangent_dirs(
+        ring_info,
+        vert,
+        positions,
+        sample_steps=sample_steps,
+    )
+    if not tangent_dirs:
+        return (float('inf'), float('inf'))
+
+    tangent_error = (
+        sum(abs(seam_direction.dot(direction)) for direction in tangent_dirs)
+        / len(tangent_dirs)
+    )
+
+    direct_dirs = _adjacent_ring_edge_dirs(ring_info, vert, positions)
+    direct_error = (
+        sum(abs(seam_direction.dot(direction)) for direction in direct_dirs)
+        / len(direct_dirs)
+        if direct_dirs else tangent_error
+    )
+
+    return (tangent_error, direct_error)
+
+
+def _local_ring_candidates(ring_info, center_vert, positions, search_steps=2):
+    center_index = positions.get(center_vert)
+    if center_index is None:
+        return []
+
+    loop = ring_info.verts
+    count = len(loop)
+    candidates = []
+    seen = set()
+
+    for offset in range(-search_steps, search_steps + 1):
+        if ring_info.is_closed:
+            index = (center_index + offset) % count
+        else:
+            index = center_index + offset
+            if index < 0 or index >= count:
+                continue
+
+        vert = loop[index]
+        if not vert.is_valid or vert in seen:
+            continue
+        seen.add(vert)
+        candidates.append(vert)
+
+    return candidates
+
+
 def _seam_target_score(
     ring_info,
     vert,
@@ -339,6 +433,161 @@ def _migrate_seam_vert(bm, old_sv, new_sv, all_ring_verts):
         bmesh.ops.dissolve_edges(bm, edges=[old_edge],
                                  use_verts=False, use_face_split=False)
     return True
+
+
+def realign_seams_to_ring_normals(bm, ring_group, search_steps=2, sample_steps=2):
+    """Move seam edges to the local ring vertex closest to a 90-degree hit.
+
+    The candidate window is the current seam vertex plus `search_steps` verts
+    on both sides. Each candidate is scored against tangents sampled from one
+    and two verts on either side, which keeps face-hole connector edges from
+    landing diagonally after the ring is resampled.
+    """
+    any_migrated = False
+
+    for ring_info in ring_group.rings:
+        positions = _ring_vert_positions(ring_info)
+        reserved_targets = set()
+
+        for seam_vert in list(ring_info.seam_verts):
+            if not seam_vert.is_valid:
+                continue
+            primary_edge = _primary_outside_edge_for_vert(
+                seam_vert,
+                ring_group.all_ring_verts,
+            )
+            if primary_edge is None:
+                continue
+
+            non_ring_vert = primary_edge.other_vert(seam_vert)
+            old_len = primary_edge.calc_length()
+            occupied_targets = _occupied_ring_seam_verts(
+                ring_info,
+                ring_group.all_ring_verts,
+            )
+            blocked_targets = {
+                vert for vert in occupied_targets
+                if vert.is_valid and vert != seam_vert
+            }
+            blocked_targets.update(
+                vert for vert in reserved_targets
+                if vert.is_valid and vert != seam_vert
+            )
+
+            current_perpendicular_score = _local_perpendicular_score(
+                ring_info,
+                seam_vert,
+                non_ring_vert,
+                positions,
+                sample_steps=sample_steps,
+            )
+            current_score = (
+                current_perpendicular_score[0],
+                current_perpendicular_score[1],
+                0,
+                seam_vert.index,
+            )
+            best = seam_vert
+            best_score = current_score
+
+            for candidate in _local_ring_candidates(
+                ring_info,
+                seam_vert,
+                positions,
+                search_steps=search_steps,
+            ):
+                if candidate in blocked_targets:
+                    continue
+                if candidate != seam_vert:
+                    new_len = (candidate.co - non_ring_vert.co).length
+                    if new_len > max(old_len * 2.0, old_len + 1e-6):
+                        continue
+
+                move_steps = _ring_move_steps(
+                    ring_info,
+                    seam_vert,
+                    candidate,
+                    positions,
+                )
+                candidate_perpendicular_score = _local_perpendicular_score(
+                    ring_info,
+                    candidate,
+                    non_ring_vert,
+                    positions,
+                    sample_steps=sample_steps,
+                )
+                candidate_score = (
+                    candidate_perpendicular_score[0],
+                    candidate_perpendicular_score[1],
+                    move_steps if move_steps is not None else float('inf'),
+                    candidate.index,
+                )
+                if candidate_score < best_score:
+                    best = candidate
+                    best_score = candidate_score
+
+            if best is seam_vert:
+                debug_log(
+                    "seam_realign",
+                    "Kept seam at current local perpendicular target.",
+                    seam=vert_ref(seam_vert),
+                    score=tuple(
+                        round(item, 6) if isinstance(item, float) else item
+                        for item in current_score
+                    ),
+                    search_steps=search_steps,
+                    sample_steps=sample_steps,
+                )
+                reserved_targets.add(seam_vert)
+                continue
+
+            debug_log(
+                "seam_realign",
+                "Migrating seam to the most perpendicular local ring target.",
+                old_seam=vert_ref(seam_vert),
+                new_seam=vert_ref(best),
+                current_score=tuple(
+                    round(item, 6) if isinstance(item, float) else item
+                    for item in current_score
+                ),
+                new_score=tuple(
+                    round(item, 6) if isinstance(item, float) else item
+                    for item in best_score
+                ),
+                search_steps=search_steps,
+                sample_steps=sample_steps,
+                blocked_targets=[
+                    vert_ref(v)
+                    for v in sorted(blocked_targets, key=lambda vert: vert.index)
+                ],
+            )
+            migrated = _migrate_seam_vert(
+                bm,
+                seam_vert,
+                best,
+                ring_group.all_ring_verts,
+            )
+            if migrated:
+                ring_info.seam_verts.discard(seam_vert)
+                ring_info.seam_verts.add(best)
+                reserved_targets.add(best)
+                any_migrated = True
+            else:
+                debug_log(
+                    "seam_realign",
+                    "Rejected perpendicular seam target during edge migration.",
+                    old_seam=vert_ref(seam_vert),
+                    rejected_target=vert_ref(best),
+                )
+                reserved_targets.add(seam_vert)
+
+    if any_migrated:
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+        bm.normal_update()
+
+    return any_migrated
 
 
 def migrate_drifted_seams(bm, ring_group, seam_homes, threshold):

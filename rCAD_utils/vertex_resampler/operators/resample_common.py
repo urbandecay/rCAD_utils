@@ -11,6 +11,7 @@ from ..seam_manager import (
     save_seam_homes,
     match_seam_homes,
     migrate_drifted_seams,
+    realign_seams_to_ring_normals,
 )
 from ..vert_deletion import find_safe_deletion_index, delete_at_index
 from ..vert_insertion import find_safe_insertion_index, insert_at_index
@@ -318,6 +319,8 @@ def execute_aligned_loops_logic(
     stack_is_cyclic=False,
     forced_seam_verts=None,
     result_info=None,
+    repair_topology=True,
+    align_seams_to_ring_normals=False,
 ):
     loops, is_closed = data
 
@@ -448,7 +451,18 @@ def execute_aligned_loops_logic(
                     for item in neighbor_pairs
                 ],
             )
-            repair_after_dissolve(bm, neighbor_pairs)
+            if repair_topology:
+                repair_after_dissolve(bm, neighbor_pairs)
+            else:
+                debug_log(
+                    "aligned",
+                    "Skipped topology repair after deletion.",
+                    step=reduction_step,
+                    repair_items=[
+                        pair_ref(item["a"], item["b"]) if isinstance(item, dict) else pair_ref(*item)
+                        for item in neighbor_pairs
+                    ],
+                )
             debug_log(
                 "aligned",
                 "Finished reduction step.",
@@ -491,7 +505,15 @@ def execute_aligned_loops_logic(
                 break
             insertion_made = True
             insertion_steps += 1
-            repair_after_dissolve(bm, repair_pairs)
+            if repair_topology:
+                repair_after_dissolve(bm, repair_pairs)
+            else:
+                debug_log(
+                    "aligned",
+                    "Skipped topology repair after insertion.",
+                    step=insertion_steps,
+                    repair_items=[pair_ref(*item) for item in repair_pairs],
+                )
         if report is not None:
             _report(
                 report,
@@ -529,6 +551,15 @@ def execute_aligned_loops_logic(
             if loop[coord_index].is_valid:
                 loop[coord_index].co = target_coords[coord_index]
                 loop[coord_index].select = True
+
+    if is_closed and use_seams and align_seams_to_ring_normals:
+        realign_seams_to_ring_normals(
+            bm,
+            ring_group,
+            search_steps=2,
+            sample_steps=2,
+        )
+        _enforce_max_seams(bm, ring_group, max_seams)
 
     if is_closed and migrate_seams and seam_homes:
         edge_lengths = []

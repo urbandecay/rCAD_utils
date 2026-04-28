@@ -1,8 +1,11 @@
 # hole_in_mesh.py — Dispatch punched-hole resampling across supported hole types.
 
+import bmesh
+
 from . import hole_punch_face, hole_punch_solid
 from .resample_common import execute_aligned_loops_logic
 from ..debug import debug_log, edge_ref, mesh_stats, vert_ref
+from ..seam_manager import realign_seams_to_ring_normals
 
 
 def _safe_debug_attr(item, name, default=None):
@@ -229,6 +232,7 @@ def execute(bm, obj, direction, report=None, data=None):
         selected_verts=_selected_vert_refs(bm),
     )
 
+    final_realign_groups = []
     for group_index, group_data in enumerate(data['groups']):
         if any(
             not _debug_is_valid(vert)
@@ -257,6 +261,7 @@ def execute(bm, obj, direction, report=None, data=None):
             mesh=mesh_stats(bm),
             selected_verts=_selected_vert_refs(bm),
         )
+        result_info = {}
         result = execute_aligned_loops_logic(
             bm,
             obj,
@@ -266,7 +271,19 @@ def execute(bm, obj, direction, report=None, data=None):
             use_seams=group_data.get('use_seams', True),
             migrate_seams=group_data.get('migrate_seams'),
             max_seams=group_data.get('max_seams'),
+            repair_topology=group_data.get('repair_topology', True),
+            align_seams_to_ring_normals=group_data.get(
+                'align_seams_to_ring_normals',
+                False,
+            ),
+            result_info=result_info,
         )
+        if (
+            result == {'FINISHED'}
+            and group_data.get('align_seams_to_ring_normals', False)
+            and result_info.get('ring_group') is not None
+        ):
+            final_realign_groups.append(result_info['ring_group'])
         invalid_preserved = {
             vert for vert in preserved_non_ring_verts
             if not _debug_is_valid(vert)
@@ -298,4 +315,17 @@ def execute(bm, obj, direction, report=None, data=None):
             mesh=mesh_stats(bm),
             selected_verts=_selected_vert_refs(bm),
         )
+    if final_realign_groups:
+        for _pass_index in range(3):
+            moved = False
+            for ring_group in final_realign_groups:
+                moved = realign_seams_to_ring_normals(
+                    bm,
+                    ring_group,
+                    search_steps=2,
+                    sample_steps=2,
+                ) or moved
+            if not moved:
+                break
+        bmesh.update_edit_mesh(obj.data)
     return {'FINISHED'}
