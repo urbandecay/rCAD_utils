@@ -65,6 +65,52 @@ def _debug_report(report, message):
         report({'INFO'}, f"Hole debug: {message}")
 
 
+def _refresh_bmesh_indices(bm):
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    bm.verts.index_update()
+    bm.edges.index_update()
+    bm.faces.index_update()
+
+
+def _select_only_ring_edges(bm, ring_groups):
+    ring_verts = set()
+    ring_edges = set()
+
+    ring_groups = [ring_group for ring_group in ring_groups if ring_group is not None]
+    if not ring_groups:
+        return
+
+    for ring_group in ring_groups:
+        for ring_info in ring_group.rings:
+            loop = [vert for vert in ring_info.verts if _debug_is_valid(vert)]
+            if len(loop) < 2:
+                continue
+
+            ring_verts.update(loop)
+            count = len(loop)
+            edge_limit = count if ring_info.is_closed else count - 1
+            for index in range(edge_limit):
+                edge = bm.edges.get([loop[index], loop[(index + 1) % count]])
+                if edge is not None and _debug_is_valid(edge):
+                    ring_edges.add(edge)
+
+    for face in bm.faces:
+        face.select = False
+    for edge in bm.edges:
+        edge.select = False
+    for vert in bm.verts:
+        vert.select = False
+
+    for vert in ring_verts:
+        vert.select = True
+    for edge in ring_edges:
+        edge.select = True
+        for vert in edge.verts:
+            vert.select = True
+
+
 def _cleanup_selected_ring_edges(bm, cleanup_edges, ring_edges, report=None, group_index=None):
     group_label = "?" if group_index is None else group_index
     if not cleanup_edges:
@@ -233,6 +279,7 @@ def execute(bm, obj, direction, report=None, data=None):
     )
 
     final_realign_groups = []
+    successful_ring_groups = []
     for group_index, group_data in enumerate(data['groups']):
         if any(
             not _debug_is_valid(vert)
@@ -278,6 +325,9 @@ def execute(bm, obj, direction, report=None, data=None):
             ),
             result_info=result_info,
         )
+        _refresh_bmesh_indices(bm)
+        if result == {'FINISHED'} and result_info.get('ring_group') is not None:
+            successful_ring_groups.append(result_info['ring_group'])
         if (
             result == {'FINISHED'}
             and group_data.get('align_seams_to_ring_normals', False)
@@ -327,5 +377,9 @@ def execute(bm, obj, direction, report=None, data=None):
                 ) or moved
             if not moved:
                 break
+        _refresh_bmesh_indices(bm)
+    if successful_ring_groups:
+        _refresh_bmesh_indices(bm)
+        _select_only_ring_edges(bm, successful_ring_groups)
         bmesh.update_edit_mesh(obj.data)
     return {'FINISHED'}

@@ -428,7 +428,7 @@ def detect_shaft_face_groups(bm, require_embedded=None, report=None):
 
 def detect(bm, report=None):
     data = detect_shaft_face_groups(bm, require_embedded=True, report=report)
-    if data is not None and (data['groups'] or data['invalid_components']):
+    if data is not None and data['groups']:
         return data
 
     upper_ring_data = _upper_ring_hole_groups(bm)
@@ -436,5 +436,8 @@ def detect(bm, report=None):
         upper_ring_data['groups'] or upper_ring_data['invalid_components']
     ):
         return upper_ring_data
+
+    if data is not None and data['invalid_components']:
+        return data
 
     return None
