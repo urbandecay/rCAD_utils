@@ -32,7 +32,7 @@ class RCAD_PT_VertexResampler(Panel):
     bl_idname = "RCAD_PT_VertexResampler"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'rCAD'
+    bl_category = 'rCAD Utils'
     bl_parent_id = 'RCAD_PT_Main'
     bl_options = {'DEFAULT_CLOSED'}
 

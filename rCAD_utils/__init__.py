@@ -3,7 +3,7 @@ bl_info = {
     "author": "RobbieK",
     "version": (1, 0, 0),
     "blender": (2, 80, 0),
-    "location": "View3D > Sidebar > rCAD",
+    "location": "View3D > Sidebar > rCAD Utils",
     "description": "Container addon housing rCAD mesh tools",
     "category": "Mesh",
 }

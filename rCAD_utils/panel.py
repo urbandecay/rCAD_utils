@@ -6,7 +6,7 @@ class RCAD_PT_Main(bpy.types.Panel):
     bl_idname = "RCAD_PT_Main"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "rCAD"
+    bl_category = "rCAD Utils"
 
     def draw(self, context):
         pass
@@ -16,7 +16,7 @@ class RCAD_PT_ExtrudeAlongPath(bpy.types.Panel):
     bl_label = "Extrude Along Path"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "rCAD"
+    bl_category = "rCAD Utils"
     bl_parent_id = "RCAD_PT_Main"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -56,7 +56,7 @@ class RCAD_PT_PlaceProfile(bpy.types.Panel):
     bl_label = "Place Profile"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "rCAD"
+    bl_category = "rCAD Utils"
     bl_parent_id = "RCAD_PT_Main"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -80,7 +80,7 @@ class RCAD_PT_CoolBool(bpy.types.Panel):
     bl_label = "Cool Bool"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "rCAD"
+    bl_category = "rCAD Utils"
     bl_parent_id = "RCAD_PT_Main"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -103,7 +103,7 @@ class RCAD_PT_MeshTiler(bpy.types.Panel):
     bl_label = "Mesh Tiler"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "rCAD"
+    bl_category = "rCAD Utils"
     bl_parent_id = "RCAD_PT_Main"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -119,7 +119,7 @@ class RCAD_PT_MirrorAlongPlane(bpy.types.Panel):
     bl_label = "Mirror Across Plane"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "rCAD"
+    bl_category = "rCAD Utils"
     bl_parent_id = "RCAD_PT_Main"
     bl_options = {'DEFAULT_CLOSED'}
 

@@ -57,7 +57,7 @@ class RCAD_PT_1DTools(Panel):
     bl_idname = "RCAD_PT_1DTools"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'rCAD'
+    bl_category = 'rCAD Utils'
     bl_parent_id = 'RCAD_PT_Main'
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -71,7 +71,7 @@ class RCAD_PT_SpreadLoop(Panel):
     bl_label = "Spread Loop"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'rCAD'
+    bl_category = 'rCAD Utils'
     bl_parent_id = 'RCAD_PT_1DTools'
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -100,7 +100,7 @@ class RCAD_PT_CreateBArc(Panel):
     bl_label = "Create B-Arc"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'rCAD'
+    bl_category = 'rCAD Utils'
     bl_parent_id = 'RCAD_PT_1DTools'
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -120,7 +120,7 @@ class RCAD_PT_CornerEdges(Panel):
     bl_label = "Corner Edges"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'rCAD'
+    bl_category = 'rCAD Utils'
     bl_parent_id = 'RCAD_PT_1DTools'
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -141,7 +141,7 @@ class RCAD_PT_SelectLoose(Panel):
     bl_label = "Select Loose"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'rCAD'
+    bl_category = 'rCAD Utils'
     bl_parent_id = 'RCAD_PT_1DTools'
     bl_options = {'DEFAULT_CLOSED'}
 
