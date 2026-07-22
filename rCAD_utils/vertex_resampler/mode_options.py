@@ -1,6 +1,7 @@
 # mode_options.py — Manual mode options for the vertex resampler UI.
 
 MODE_ITEMS = [
+    ('RE_BEVEL', "Re-Bevel", "Rebuild a connected Blender bevel with one more or one fewer segment"),
     ('CORNER', "Corner", ""),
     ('PIPE', "Pipe", ""),
     ('SOLID_HOLE_PUNCH', "Solid Hole Punch", ""),

@@ -14,6 +14,7 @@ from . import (
     hole_punch_solid,
     open_loop,
     pipe,
+    rebevel,
 )
 from .. import anchor_overlay
 from ..mode_options import MODE_LABELS
@@ -73,6 +74,11 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
 
             if mode == 'PIPE':
                 return pipe.execute(
+                    bm, obj, self.direction, report=self.report
+                )
+
+            if mode == 'RE_BEVEL':
+                return rebevel.execute(
                     bm, obj, self.direction, report=self.report
                 )
 
