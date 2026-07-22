@@ -141,6 +141,20 @@ def _sanitize_chain_verts(verts, closed):
     return get_sorted_verts_after_edit(valid_verts, closed)
 
 
+def _is_surface_attached_island(island):
+    """Return whether an island has topology whose alignment must be preserved."""
+    return any(vert.link_faces for vert in island['verts'])
+
+
+def _floating_island_sort_key(island):
+    # A loose wire loop has no surrounding topology to twist, so it must not
+    # become the alignment/count reference while a face-connected loop exists.
+    return (
+        1 if _is_surface_attached_island(island) else 0,
+        get_centroid(island['verts']).z,
+    )
+
+
 def _outside_edge_score(vert, all_ring_verts):
     lengths = [
         edge.calc_length()
@@ -667,7 +681,7 @@ def execute_floating_logic(bm, obj, direction, islands=None):
         islands = get_selected_islands(bm)
     if not islands:
         return {'CANCELLED'}
-    islands.sort(key=lambda x: get_centroid(x['verts']).z, reverse=True)
+    islands.sort(key=_floating_island_sort_key, reverse=True)
     align_islands_to_boss(islands)
     boss_island = islands[0]
     boss_verts = boss_island['verts']
