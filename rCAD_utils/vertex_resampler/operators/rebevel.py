@@ -1,9 +1,9 @@
 """Rebuild an existing all-edge bevel with a new segment count.
 
-This intentionally starts with the topology Blender's bevel operator produces
-for a closed manifold whose edges were beveled together. Recovering that base
-solid lets Blender rebuild both the edge profiles and its parity-sensitive
-corner VMesh instead of trying to patch the corner grid a row at a time.
+This starts with the topology Blender's bevel operator produces and recovers
+the original hard-edge cage.  Closed all-edge bevels and open three-face
+corners use the same rebuild path, so a partial cube does not have to be capped
+or temporarily completed before its bevel segment count can be changed.
 """
 
 import bmesh
@@ -68,7 +68,7 @@ def _other_face(edge, face):
     return others[0]
 
 
-def _support_faces(component):
+def _support_faces(component, minimum=4):
     supports = set()
     for face in component:
         neighbors = _face_neighbors(face)
@@ -78,12 +78,20 @@ def _support_faces(component):
         if face.calc_area() >= largest_neighbor * _SUPPORT_AREA_RATIO:
             supports.add(face)
 
-    if len(supports) < 4:
+    if len(supports) < minimum:
         raise ReBevelError(
             "Could not identify the original flat faces. Select the corner patch "
             "and its connecting bevel strips, as shown in the example."
         )
     return supports
+
+
+def _single_other_face(edge, face):
+    """Return the face across an edge, or None at an open boundary."""
+    others = [candidate for candidate in edge.link_faces if candidate is not face]
+    if len(others) > 1:
+        raise ReBevelError("Re-Bevel does not support non-manifold edges.")
+    return others[0] if others else None
 
 
 def _opposite_quad_edge(face, edge):
@@ -147,6 +155,40 @@ def _build_strips(supports, component):
     strips = list(strips_by_key.values())
     if len(strips) < 6:
         raise ReBevelError("Too few connected bevel strips were found.")
+    return strips, strip_by_boundary
+
+
+def _build_open_strips(supports, component):
+    """Trace only genuine support-to-support profiles on an open surface."""
+    strips_by_key = {}
+    strip_by_boundary = {}
+
+    for support in sorted(supports, key=lambda face: face.index):
+        for edge in support.edges:
+            if len(edge.link_faces) != 2:
+                continue
+            other = _single_other_face(edge, support)
+            if other is None or other in supports:
+                continue
+            try:
+                traced = _trace_strip(support, edge, supports, component)
+            except ReBevelError:
+                continue
+            key = frozenset(traced['faces'])
+            if not key:
+                continue
+            strip = strips_by_key.get(key)
+            if strip is None:
+                strip = traced
+                strip['index'] = len(strips_by_key)
+                strips_by_key[key] = strip
+            strip_by_boundary[(support, edge)] = strip
+
+    strips = list(strips_by_key.values())
+    if len(strips) < 3:
+        raise ReBevelError(
+            "Could not find the three bevel strips of the open corner."
+        )
     return strips, strip_by_boundary
 
 
@@ -256,6 +298,148 @@ def _base_corner_coordinates(corner_components, strips, supports):
             )
         coordinates.append(_intersect_support_planes(incident_supports))
     return coordinates
+
+
+def _build_open_corners(component, supports, strips):
+    """Find real corner patches and the boundary end of each open strip."""
+    strip_faces = {
+        face
+        for strip in strips
+        for face in strip['faces']
+    }
+    leftovers = component - supports - strip_faces
+    if not leftovers:
+        raise ReBevelError("No bevel corner patch was found.")
+
+    corner_components = _face_components(leftovers)
+    corner_by_face = {
+        face: corner_index
+        for corner_index, faces in enumerate(corner_components)
+        for face in faces
+    }
+    incident_strips = {index: set() for index in range(len(corner_components))}
+
+    for strip in strips:
+        endpoint_corners = set()
+        boundary_edges = set()
+        for index, face in enumerate(strip['faces']):
+            rail_edges = {strip['rails'][index], strip['rails'][index + 1]}
+            for edge in face.edges:
+                if edge in rail_edges:
+                    continue
+                neighbor = _single_other_face(edge, face)
+                if neighbor is None:
+                    boundary_edges.add(edge)
+                    continue
+                corner_index = corner_by_face.get(neighbor)
+                if corner_index is not None:
+                    endpoint_corners.add(corner_index)
+
+        if len(endpoint_corners) != 1 or not boundary_edges:
+            raise ReBevelError(
+                "Each partial-cube bevel strip must connect one corner patch "
+                "to one open boundary."
+            )
+        strip['real_corners'] = tuple(endpoint_corners)
+        strip['open_boundary_edges'] = tuple(boundary_edges)
+        for corner_index in endpoint_corners:
+            incident_strips[corner_index].add(strip['index'])
+
+    if any(len(indices) < 3 for indices in incident_strips.values()):
+        raise ReBevelError(
+            "A detected open corner has fewer than three beveled edges."
+        )
+    return corner_components, incident_strips
+
+
+def _open_base_geometry(
+    supports,
+    strips,
+    strip_by_boundary,
+    corner_components,
+):
+    """Recover hard-corner and untouched boundary vertices for an open cage."""
+    # Real corner coordinates still come from three or more support planes.
+    for strip in strips:
+        strip['corners'] = strip['real_corners']
+    corner_coords = _base_corner_coordinates(
+        corner_components,
+        strips,
+        supports,
+    )
+    base_coords = [coordinate.copy() for coordinate in corner_coords]
+
+    # The boundary profile vertices all share the original edge-end parameter.
+    # Projecting their centroid onto the recovered hard-edge line restores that
+    # endpoint without inventing a cap face or an artificial fourth plane.
+    for strip in strips:
+        real_corner = strip['real_corners'][0]
+        line_origin = corner_coords[real_corner]
+        normal_a = strip['support_a'].normal.normalized()
+        normal_b = strip['support_b'].normal.normalized()
+        line_direction = normal_a.cross(normal_b)
+        if line_direction.length <= _EPSILON:
+            raise ReBevelError("Two bevel support planes are parallel.")
+        line_direction.normalize()
+
+        boundary_verts = {
+            vert
+            for edge in strip['open_boundary_edges']
+            for vert in edge.verts
+        }
+        centroid = sum((vert.co for vert in boundary_verts), Vector())
+        centroid /= len(boundary_verts)
+        endpoint = line_origin + line_direction * (
+            centroid - line_origin
+        ).dot(line_direction)
+        open_node = len(base_coords)
+        base_coords.append(endpoint)
+        strip['open_node'] = open_node
+        strip['corners'] = (real_corner, open_node)
+
+    untouched_nodes = {}
+
+    def untouched_node(vert):
+        node = untouched_nodes.get(vert)
+        if node is None:
+            node = len(base_coords)
+            base_coords.append(vert.co.copy())
+            untouched_nodes[vert] = node
+        return node
+
+    support_orders = {}
+    for support in supports:
+        order = []
+        for loop in support.loops:
+            current_strip = strip_by_boundary.get((support, loop.edge))
+            previous_strip = strip_by_boundary.get(
+                (support, loop.link_loop_prev.edge)
+            )
+            if current_strip is not None and previous_strip is not None:
+                common = set(current_strip['real_corners']).intersection(
+                    previous_strip['real_corners']
+                )
+                if len(common) != 1:
+                    raise ReBevelError(
+                        "Could not recover the open support's beveled corner."
+                    )
+                node = common.pop()
+            elif current_strip is not None:
+                node = current_strip['open_node']
+            elif previous_strip is not None:
+                node = previous_strip['open_node']
+            else:
+                node = untouched_node(loop.vert)
+            if not order or order[-1] != node:
+                order.append(node)
+
+        if len(order) > 1 and order[0] == order[-1]:
+            order.pop()
+        if len(order) < 3 or len(set(order)) != len(order):
+            raise ReBevelError("A recovered open support face is degenerate.")
+        support_orders[support] = order
+
+    return base_coords, support_orders
 
 
 def _ordered_face_corners(support, strip_by_boundary):
@@ -412,8 +596,22 @@ def _analyze(bm):
     component = _face_component(min(selected_faces, key=lambda face: face.index))
     if not selected_faces.issubset(component):
         raise ReBevelError("Re-Bevel handles one connected beveled solid at a time.")
-    if any(len(edge.link_faces) != 2 for face in component for edge in face.edges):
-        raise ReBevelError("Re-Bevel needs a closed manifold solid.")
+    has_open_boundary = any(
+        len(edge.link_faces) == 1
+        for face in component
+        for edge in face.edges
+    )
+    if any(
+        len(edge.link_faces) > 2
+        for face in component
+        for edge in face.edges
+    ):
+        raise ReBevelError("Re-Bevel does not support non-manifold edges.")
+    if has_open_boundary:
+        return _analyze_open_partial(
+            component,
+            selected_faces,
+        )
 
     supports = _support_faces(component)
     strips, strip_by_boundary = _build_strips(supports, component)
@@ -453,6 +651,50 @@ def _analyze(bm):
         'offset': offset,
         'profile': profile,
         'selected_corner_co': corner_coords[selected_corner_index].copy(),
+        'is_open_partial': False,
+    }
+
+
+def _analyze_open_partial(component, selected_faces):
+    supports = _support_faces(component, minimum=3)
+    strips, strip_by_boundary = _build_open_strips(supports, component)
+    corner_components, _incident = _build_open_corners(
+        component,
+        supports,
+        strips,
+    )
+    selected_corner_index = _validate_selection(
+        selected_faces,
+        strips,
+        corner_components,
+    )
+
+    segment_counts = {len(strip['faces']) for strip in strips}
+    if len(segment_counts) != 1:
+        raise ReBevelError(
+            "All connected bevel edges must use the same segment count."
+        )
+    segment_count = segment_counts.pop()
+    base_coords, support_orders = _open_base_geometry(
+        supports,
+        strips,
+        strip_by_boundary,
+        corner_components,
+    )
+    offset = _infer_offset(strips, base_coords)
+    profile = _infer_profile(strips, base_coords)
+
+    return {
+        'component': component,
+        'supports': supports,
+        'strips': strips,
+        'corner_coords': base_coords,
+        'support_corner_orders': support_orders,
+        'segment_count': segment_count,
+        'offset': offset,
+        'profile': profile,
+        'selected_corner_co': base_coords[selected_corner_index].copy(),
+        'is_open_partial': True,
     }
 
 
@@ -470,11 +712,23 @@ def _probe_rebuild(data, target_segments):
         # Recalculate the recovered cage as one closed shell before beveling.
         bmesh.ops.recalc_face_normals(probe, faces=list(probe.faces))
         probe.normal_update()
-        edges = list(probe.edges)
-        if len(edges) != len(data['strips']):
+        edge_keys = {
+            frozenset(strip['corners'])
+            for strip in data['strips']
+        }
+        vertex_index = {vert: index for index, vert in enumerate(verts)}
+        edges = [
+            edge
+            for edge in probe.edges
+            if frozenset(vertex_index[vert] for vert in edge.verts) in edge_keys
+        ]
+        if len(edges) != len(edge_keys):
             raise ReBevelError("The recovered hard-edge graph is incomplete.")
         if target_segments == 0:
-            if any(len(edge.link_faces) != 2 for edge in edges):
+            if (
+                not data.get('is_open_partial')
+                and any(len(edge.link_faces) != 2 for edge in edges)
+            ):
                 raise ReBevelError(
                     "The recovered sharp-corner solid is not closed and manifold."
                 )
@@ -500,8 +754,12 @@ def _probe_rebuild(data, target_segments):
         result_faces = [face for face in result.get('faces', []) if face.is_valid]
         if not result_faces:
             raise ReBevelError("Blender's bevel probe did not return any faces.")
-        for vert in probe.verts:
-            vert.select = True
+        for face in result_faces:
+            face.select = True
+            for edge in face.edges:
+                edge.select = True
+                for vert in edge.verts:
+                    vert.select = True
         rebuilt = _analyze(probe)
         if rebuilt['segment_count'] != target_segments:
             raise ReBevelError("The rebuilt bevel did not pass its topology check.")
@@ -554,12 +812,22 @@ def _rebuild(bm, data, target_segments):
 
     bm.verts.ensure_lookup_table()
     bm.edges.ensure_lookup_table()
-    base_edges = list({edge for face in base_faces for edge in face.edges})
-    if len(base_edges) != len(data['strips']):
+    all_base_edges = list({edge for face in base_faces for edge in face.edges})
+    corner_index = {vert: index for index, vert in enumerate(corner_verts)}
+    bevel_edge_keys = {
+        frozenset(strip['corners'])
+        for strip in data['strips']
+    }
+    base_edges = [
+        edge
+        for edge in all_base_edges
+        if frozenset(corner_index[vert] for vert in edge.verts)
+        in bevel_edge_keys
+    ]
+    if len(base_edges) != len(bevel_edge_keys):
         bmesh.ops.delete(bm, geom=corner_verts, context='VERTS')
         raise ReBevelError("The recovered hard-edge graph is incomplete.")
 
-    corner_index = {vert: index for index, vert in enumerate(corner_verts)}
     for edge in base_edges:
         key = frozenset(corner_index[vert] for vert in edge.verts)
         seam, smooth = edge_specs.get(key, (False, True))
@@ -632,6 +900,28 @@ def _rebuild(bm, data, target_segments):
     operator_faces = [face for face in result.get('faces', []) if face.is_valid]
     if not operator_faces:
         raise ReBevelError("Blender rebuilt the bevel without returning any faces.")
+    if data.get('is_open_partial'):
+        selected_edges = {
+            edge
+            for face in operator_faces
+            for edge in face.edges
+        }
+        selected_verts = {
+            vert
+            for edge in selected_edges
+            for vert in edge.verts
+        }
+        for vert in selected_verts:
+            vert.select = True
+        for edge in selected_edges:
+            edge.select = True
+        if 'FACE' in bm.select_mode:
+            for face in operator_faces:
+                face.select = True
+        bm.select_flush_mode()
+        bm.normal_update()
+        return
+
     rebuilt_component = _face_component(operator_faces[0])
     rebuilt_supports = _support_faces(rebuilt_component)
     rebuilt_strips, _strip_by_boundary = _build_strips(
