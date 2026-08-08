@@ -948,6 +948,71 @@ def detect_open_strip_selection(bm):
     return None
 
 
+def _attached_detect_open_strip_selection(bm):
+    selected_verts = {vert for vert in bm.verts if vert.select}
+    _trace_detect(
+        "Starting attached-case open strip detection.",
+        selected_vert_count=len(selected_verts),
+    )
+    if not selected_verts:
+        return None
+
+    endpoint_seed_data = _detect_open_strip_from_endpoint_seed(selected_verts)
+    if endpoint_seed_data is not None:
+        return endpoint_seed_data
+
+    selected_faces = _selected_face_set(bm, selected_verts)
+    if selected_faces:
+        groups = []
+        components = []
+        has_extra_selected_faces = False
+        has_outside_side_faces = False
+        covered_verts = set()
+
+        for face_component in _face_components(selected_faces):
+            candidates = _strip_candidates(face_component)
+            match, _reason = _choose_strip_candidate(candidates)
+            if match is None:
+                return None
+
+            groups.append(match['group'])
+            components.append({
+                'group': match['group'],
+                'component_faces': set(face_component),
+                'shaft_faces': set(match['shaft_faces']),
+                'extra_faces': set(match['extra_faces']),
+                'outside_side_faces': set(match['outside_side_faces']),
+                'face_count': match['face_count'],
+                'loop_size': match['loop_size'],
+            })
+            if match['extra_faces']:
+                has_extra_selected_faces = True
+            if match['outside_side_faces']:
+                has_outside_side_faces = True
+            covered_verts.update(vert for face in face_component for vert in face.verts)
+
+        if covered_verts != selected_verts:
+            return None
+
+        return {
+            'groups': groups,
+            'components': components,
+            'has_extra_selected_faces': has_extra_selected_faces,
+            'has_outside_side_faces': has_outside_side_faces,
+        }
+
+    strip_groups = _detect_open_strips_from_selected_verts(bm)
+    if strip_groups and _matches_selected_verts(strip_groups, selected_verts):
+        return {
+            'groups': strip_groups,
+            'components': [],
+            'has_extra_selected_faces': False,
+            'has_outside_side_faces': False,
+        }
+
+    return None
+
+
 def _attached_detect_closed_strip_selection(bm):
     selected_verts = {vert for vert in bm.verts if vert.select}
     _trace_detect(
