@@ -473,6 +473,16 @@ def _probe_rebuild(data, target_segments):
         edges = list(probe.edges)
         if len(edges) != len(data['strips']):
             raise ReBevelError("The recovered hard-edge graph is incomplete.")
+        if target_segments == 0:
+            if any(len(edge.link_faces) != 2 for edge in edges):
+                raise ReBevelError(
+                    "The recovered sharp-corner solid is not closed and manifold."
+                )
+            if any(face.calc_area() <= _EPSILON for face in probe.faces):
+                raise ReBevelError(
+                    "The recovered sharp-corner solid contains a collapsed face."
+                )
+            return
         result = bmesh.ops.bevel(
             probe,
             geom=edges,
@@ -567,6 +577,36 @@ def _rebuild(bm, data, target_segments):
     if orphaned_component_verts:
         bmesh.ops.delete(bm, geom=orphaned_component_verts, context='VERTS')
 
+    if target_segments == 0:
+        for vert in bm.verts:
+            vert.select = False
+        for edge in bm.edges:
+            edge.select = False
+        for face in bm.faces:
+            face.select = False
+
+        selected_corner_index = min(
+            range(len(corner_verts)),
+            key=lambda index: (
+                corner_verts[index].co - data['selected_corner_co']
+            ).length_squared,
+        )
+        selected_corner = corner_verts[selected_corner_index]
+        selected_corner.select = True
+        selected_edges = [
+            edge for edge in base_edges
+            if selected_corner in edge.verts
+        ]
+        for edge in selected_edges:
+            edge.select = True
+        if 'FACE' in bm.select_mode:
+            for face in base_faces:
+                if selected_corner in face.verts:
+                    face.select = True
+        bm.select_flush_mode()
+        bm.normal_update()
+        return
+
     result = bmesh.ops.bevel(
         bm,
         geom=base_edges,
@@ -641,7 +681,7 @@ def execute(bm, obj, direction, report=None):
     try:
         data = _analyze(bm)
         target_segments = data['segment_count'] + direction
-        if target_segments < 1:
+        if target_segments < 0:
             _report(report, {'WARNING'}, "Can't remove any more bevel segments.")
             return {'CANCELLED'}
         if direction == 0:
@@ -654,13 +694,18 @@ def execute(bm, obj, direction, report=None):
         # otherwise the viewport can keep drawing stale loop triangles until a
         # later face edit (such as Flip or Delete) happens to refresh the cache.
         bmesh.update_edit_mesh(obj.data, loop_triangles=True, destructive=True)
-        _report(
-            report,
-            {'INFO'},
-            "Re-Bevel finished: "
-            f"segments {data['segment_count']} -> {target_segments}, "
-            f"offset {data['offset']:.4g}, profile {data['profile']:.3f}.",
-        )
+        if target_segments == 0:
+            message = (
+                "Re-Bevel finished: chamfer removed and sharp corners restored "
+                f"(segments {data['segment_count']} -> 0)."
+            )
+        else:
+            message = (
+                "Re-Bevel finished: "
+                f"segments {data['segment_count']} -> {target_segments}, "
+                f"offset {data['offset']:.4g}, profile {data['profile']:.3f}."
+            )
+        _report(report, {'INFO'}, message)
         return {'FINISHED'}
     except ReBevelError as exc:
         _report(report, {'WARNING'}, str(exc))
