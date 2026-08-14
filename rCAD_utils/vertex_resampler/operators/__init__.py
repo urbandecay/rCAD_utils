@@ -134,8 +134,8 @@ class RCAD_OT_Tangify(bpy.types.Operator):
     bl_idname = "rcad.tangify"
     bl_label = "Tangify"
     bl_description = (
-        "Rearrange existing vertices so selected lines or closed curves "
-        "share tangent contacts"
+        "Rearrange existing vertices so selected lines become tangent or "
+        "normal to curves, or closed curves share contacts"
     )
     bl_options = {'REGISTER', 'UNDO'}
 

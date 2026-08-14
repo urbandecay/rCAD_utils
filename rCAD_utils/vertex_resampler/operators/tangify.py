@@ -464,44 +464,128 @@ def _build_curves(islands):
 
 
 def _match_guide(guide, curves):
-    start = guide['verts'][0].co
-    end = guide['verts'][-1].co
+    matches = []
+    for endpoint_index in (0, -1):
+        point = guide['verts'][endpoint_index].co
+        candidates = []
+        for curve_index, curve in enumerate(curves):
+            parameter, _point, distance = curve['spline'].project(point)
+            candidates.append((distance, curve_index, parameter))
+        if not candidates:
+            return None
+        matches.append(min(candidates, key=lambda item: item[0]))
+
+    start_match, end_match = matches
+    if start_match[1] == end_match[1]:
+        return None
+
+    # A line is considered connected when both endpoints are near separate
+    # interpolated curves.  This prevents a free endpoint from being treated
+    # as a second curve merely because it is the closest available geometry.
+    start_tolerance = max(
+        1.0e-4,
+        _spline_scale(curves[start_match[1]]['spline']) * 0.12,
+    )
+    end_tolerance = max(
+        1.0e-4,
+        _spline_scale(curves[end_match[1]]['spline']) * 0.12,
+    )
+    if start_match[0] > start_tolerance or end_match[0] > end_tolerance:
+        return None
+    return {
+        'index_a': start_match[1],
+        'index_b': end_match[1],
+        't_a': start_match[2],
+        't_b': end_match[2],
+        'distance_a': start_match[0],
+        'distance_b': end_match[0],
+        'score': start_match[0] + end_match[0],
+    }
+
+
+def _match_single_guide(guide, curves):
     best = None
-    for index_a, curve_a in enumerate(curves):
-        t_a, _point_a, distance_a = curve_a['spline'].project(start)
-        for index_b, curve_b in enumerate(curves):
-            if index_a == index_b:
-                continue
-            t_b, _point_b, distance_b = curve_b['spline'].project(end)
-            score = distance_a + distance_b
-            if best is None or score < best['score']:
-                best = {
-                    'index_a': index_a,
-                    'index_b': index_b,
-                    't_a': t_a,
-                    't_b': t_b,
-                    'distance_a': distance_a,
-                    'distance_b': distance_b,
-                    'score': score,
-                }
-    return best
+    for endpoint_index in (0, -1):
+        point = guide['verts'][endpoint_index].co
+        for curve_index, curve in enumerate(curves):
+            parameter, _point, distance = curve['spline'].project(point)
+            candidate = {
+                'endpoint_index': endpoint_index,
+                'curve_index': curve_index,
+                't': parameter,
+                'distance': distance,
+                'point': point.copy(),
+            }
+            if best is None or distance < best['distance']:
+                best = candidate
+    if best is None:
+        return None
+    tolerance = max(
+        1.0e-4,
+        _spline_scale(curves[best['curve_index']]['spline']) * 0.12,
+    )
+    return best if best['distance'] <= tolerance else None
 
 
-def _guide_target_coords(guide, start, end):
-    verts = guide['verts']
-    if len(verts) == 2:
-        return [start.copy(), end.copy()]
+def _single_curve_solution(spline, seed, direction):
+    seed_tangent = spline.tangent_global(seed)
+    if seed_tangent.length_squared <= _LENGTH_EPSILON * _LENGTH_EPSILON:
+        return None
+    seed_dot = abs(seed_tangent.dot(direction))
+    relation = 'TANGENT' if seed_dot >= 0.70710678 else 'NORMAL'
+    count = float(len(spline.segments))
+    window = min(count * 0.20, max(1.0, count * 0.08))
 
-    lengths = [0.0]
-    for first, second in zip(verts, verts[1:]):
-        lengths.append(lengths[-1] + (second.co - first.co).length)
-    total_length = lengths[-1]
-    if total_length <= _LENGTH_EPSILON:
-        return [
-            start.lerp(end, index / (len(verts) - 1))
-            for index in range(len(verts))
-        ]
-    return [start.lerp(end, length / total_length) for length in lengths]
+    def score(parameter):
+        tangent = spline.tangent_global(parameter)
+        if tangent.length_squared <= _LENGTH_EPSILON * _LENGTH_EPSILON:
+            return float('inf')
+        dot = max(-1.0, min(1.0, abs(tangent.dot(direction))))
+        alignment = (1.0 - dot * dot) if relation == 'TANGENT' else dot * dot
+        drift = _parameter_distance(spline, parameter, seed) / window
+        return alignment + 0.001 * drift * drift
+
+    best_t = seed
+    best_score = float('inf')
+    coarse_steps = 16
+    for index in range(coarse_steps + 1):
+        raw = seed - window + 2.0 * window * index / coarse_steps
+        parameter = _clamp_local_parameter(spline, raw, seed, window)
+        candidate_score = score(parameter)
+        if candidate_score < best_score:
+            best_t = parameter
+            best_score = candidate_score
+
+    step = 2.0 * window / coarse_steps
+    for _iteration in range(48):
+        candidate_t = best_t
+        candidate_score = best_score
+        for offset in (-step, 0.0, step):
+            parameter = _clamp_local_parameter(
+                spline,
+                best_t + offset,
+                seed,
+                window,
+            )
+            candidate = score(parameter)
+            if candidate < candidate_score:
+                candidate_t = parameter
+                candidate_score = candidate
+        moved = _parameter_distance(spline, candidate_t, best_t) > 1.0e-12
+        best_t = candidate_t
+        best_score = candidate_score
+        if not moved:
+            step *= 0.5
+            if step <= 1.0e-9:
+                break
+
+    point = spline.eval_global(best_t)
+    return {
+        't': best_t,
+        'point': point,
+        'relation': relation,
+        'alignment_error': best_score,
+    }
 
 
 def _prepare_curve_targets(curves, report=None):
@@ -539,11 +623,18 @@ def execute(bm, obj, report=None):
     curves = _build_curves(islands)
     guides = [island for island in islands if _is_straight_open_chain(island)]
 
-    if len(curves) < 2:
+    if not curves:
         _report(
             report,
             {'WARNING'},
-            "Tangify needs at least two selected closed edge curves.",
+            "Tangify needs at least one selected closed edge curve.",
+        )
+        return {'CANCELLED'}
+    if not guides and len(curves) < 2:
+        _report(
+            report,
+            {'WARNING'},
+            "Tangify contact mode needs at least two selected closed curves.",
         )
         return {'CANCELLED'}
 
@@ -595,13 +686,6 @@ def execute(bm, obj, report=None):
     else:
         for guide_number, guide in enumerate(guides, start=1):
             match = _match_guide(guide, curves)
-            if match is None:
-                _report(
-                    report,
-                    {'WARNING'},
-                    f"Tangify could not pair line {guide_number} with two curves.",
-                )
-                return {'CANCELLED'}
 
             start = guide['verts'][0].co
             end = guide['verts'][-1].co
@@ -615,13 +699,53 @@ def execute(bm, obj, report=None):
                 return {'CANCELLED'}
             direction.normalize()
 
-            curve_a = curves[match['index_a']]
-            curve_b = curves[match['index_b']]
-            solution = _common_tangent(
-                curve_a['spline'],
-                curve_b['spline'],
-                match['t_a'],
-                match['t_b'],
+            if match is not None:
+                curve_a = curves[match['index_a']]
+                curve_b = curves[match['index_b']]
+                solution = _common_tangent(
+                    curve_a['spline'],
+                    curve_b['spline'],
+                    match['t_a'],
+                    match['t_b'],
+                    direction,
+                )
+                if solution is None:
+                    _report(
+                        report,
+                        {'WARNING'},
+                        f"Tangify could not solve line {guide_number}.",
+                    )
+                    return {'CANCELLED'}
+
+                curve_a['anchors'].append({
+                    # The guide endpoint is fixed geometry.  Use its spline
+                    # projection as the sample parameter so the anchor point
+                    # and the arc-length distribution share the same place.
+                    't': match['t_a'],
+                    'co': start.copy(),
+                    'touching': True,
+                })
+                curve_b['anchors'].append({
+                    't': match['t_b'],
+                    'co': end.copy(),
+                    'touching': True,
+                })
+                prepared_guides.append((guide, solution))
+                continue
+
+            single_match = _match_single_guide(guide, curves)
+            if single_match is None:
+                _report(
+                    report,
+                    {'WARNING'},
+                    f"Tangify could not find a curve contact for line {guide_number}.",
+                )
+                return {'CANCELLED'}
+
+            curve = curves[single_match['curve_index']]
+            solution = _single_curve_solution(
+                curve['spline'],
+                single_match['t'],
                 direction,
             )
             if solution is None:
@@ -631,15 +755,16 @@ def execute(bm, obj, report=None):
                     f"Tangify could not solve line {guide_number}.",
                 )
                 return {'CANCELLED'}
-
-            curve_a['anchors'].append({
-                't': solution['t_a'],
-                'co': solution['point_a'].copy(),
-                'touching': True,
-            })
-            curve_b['anchors'].append({
-                't': solution['t_b'],
-                'co': solution['point_b'].copy(),
+            curve['anchors'].append({
+                # Keep the stationary line endpoint on the Catmull-Rom
+                # curve.  The solver selects the relation branch; the
+                # projection is the authoritative fixed contact parameter.
+                't': single_match['t'],
+                'co': (
+                    start.copy()
+                    if single_match['endpoint_index'] == 0
+                    else end.copy()
+                ),
                 'touching': True,
             })
             prepared_guides.append((guide, solution))
@@ -652,16 +777,6 @@ def execute(bm, obj, report=None):
     # never leaves the Edit Mesh half modified.
     for verts, target_coords in prepared_curves:
         for vert, coordinate in zip(verts, target_coords):
-            vert.co = coordinate
-            vert.select = True
-
-    for guide, solution in prepared_guides:
-        target_coords = _guide_target_coords(
-            guide,
-            solution['point_a'],
-            solution['point_b'],
-        )
-        for vert, coordinate in zip(guide['verts'], target_coords):
             vert.co = coordinate
             vert.select = True
 
