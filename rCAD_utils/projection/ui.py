@@ -34,26 +34,13 @@ class RCAD_PT_Projection(bpy.types.Panel):
         box = layout.box()
 
         row = box.row(align=True)
-        row.label(text="1. Source")
-        row.operator("mesh.rcad_store_projection_source", text="Store Source")
-        if projection_state.has_source():
-            count = projection_state.vertex_count
-            objects = projection_state.source_object_count
-            noun = "vertex" if count == 1 else "vertices"
-            object_note = "" if objects == 1 else f" on {objects} objects"
-            box.label(text=f"Stored: {count} {noun}{object_note}", icon='CHECKMARK')
-        else:
-            box.label(text="Select source vertices in Edit Mode.", icon='INFO')
-
-        box.separator()
-        row = box.row(align=True)
+        row.operator("mesh.rcad_store_projection_source", text="Store")
         project = row.row(align=True)
         project.enabled = (
             context.mode == 'EDIT_MESH'
             and projection_state.has_source()
         )
         project.operator("mesh.rcad_project_stored_geometry", text="Project")
-        row.operator("mesh.rcad_clear_projection_state", text="", icon='X')
 
         direction_box = box.box()
         direction_box.prop(context.scene, "rcad_projection_direction", text="Direction")
