@@ -185,6 +185,64 @@ def _evaluated_polygon_soup(context, obj):
         evaluated_obj.to_mesh_clear()
 
 
+def _append_polygon_soup(vertices, polygons, new_vertices, new_polygons):
+    offset = len(vertices)
+    vertices.extend(new_vertices)
+    polygons.extend(
+        tuple(offset + index for index in polygon)
+        for polygon in new_polygons
+    )
+
+
+def _object_is_visible(context, obj):
+    if obj.hide_viewport or obj.hide_get():
+        return False
+    try:
+        return obj.visible_get(
+            view_layer=context.view_layer,
+            viewport=context.space_data,
+        )
+    except TypeError:
+        return obj.visible_get(view_layer=context.view_layer)
+
+
+def _visible_target_polygon_soup(context):
+    source_ids = {id(entry.obj) for entry in projection_state.source_entries}
+    vertices = []
+    polygons = []
+    for obj in context.view_layer.objects:
+        if obj.type != 'MESH' or id(obj) in source_ids or not _object_is_visible(context, obj):
+            continue
+        if obj.mode == 'EDIT':
+            bm = _prepare_bmesh(obj)
+            matrix = obj.matrix_world
+            new_vertices = [matrix @ vert.co for vert in bm.verts]
+            new_polygons = [
+                tuple(vert.index for vert in face.verts)
+                for face in bm.faces
+                if face.is_valid and not face.hide and len(face.verts) >= 3
+            ]
+        else:
+            new_vertices, new_polygons = _evaluated_polygon_soup(context, obj)
+        _append_polygon_soup(vertices, polygons, new_vertices, new_polygons)
+    if not polygons:
+        raise ProjectionError("No visible mesh target is available for view projection.")
+    return vertices, polygons
+
+
+def _orthographic_view_direction(context):
+    space = context.space_data
+    region_3d = getattr(space, "region_3d", None) if space else None
+    if region_3d is None:
+        raise ProjectionError("View projection must be run from a 3D View.")
+    if region_3d.is_perspective:
+        raise ProjectionError("View projection requires an Orthographic view.")
+    direction = -region_3d.view_matrix.inverted_safe().col[2].to_3d()
+    if direction.length <= _MATRIX_EPSILON:
+        raise ProjectionError("The Orthographic view has no valid projection direction.")
+    return direction.normalized()
+
+
 def _selected_target_faces(context):
     selections = []
     for obj in _edit_mesh_objects(context):
@@ -495,13 +553,8 @@ class RCAD_OT_ProjectStoredGeometry(bpy.types.Operator):
             self.report({'WARNING'}, message)
             return {'CANCELLED'}
         target = _selected_target_faces(context)
-        if not target:
-            if not projection_state.has_target():
-                self.report(
-                    {'WARNING'},
-                    "Select target faces after storing the source, then press Project.",
-                )
-                return {'CANCELLED'}
+        view_projection = not target and not projection_state.has_target()
+        if not target and not view_projection:
             valid, message = _validate_target()
             if not valid:
                 self.report({'WARNING'}, message)
@@ -509,18 +562,26 @@ class RCAD_OT_ProjectStoredGeometry(bpy.types.Operator):
             target = projection_state.target
 
         try:
-            target_vertices, target_polygons, target_is_explicit_faces = _target_polygon_soup(
-                context,
-                target,
-            )
+            if view_projection:
+                target_vertices, target_polygons = _visible_target_polygon_soup(context)
+                target_is_explicit_faces = False
+            else:
+                target_vertices, target_polygons, target_is_explicit_faces = _target_polygon_soup(
+                    context,
+                    target,
+                )
             components = build_surface_components(target_vertices, target_polygons)
             records, source_locations = _source_world_points()
-            direction = _projection_direction(
-                context,
-                source_locations,
-                components,
-                target_is_explicit_faces,
-                target_vertices,
+            direction = (
+                _orthographic_view_direction(context)
+                if view_projection
+                else _projection_direction(
+                    context,
+                    source_locations,
+                    components,
+                    target_is_explicit_faces,
+                    target_vertices,
+                )
             )
             result = project_points_coherently(source_locations, components, direction)
 
