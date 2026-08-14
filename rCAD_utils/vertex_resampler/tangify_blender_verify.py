@@ -99,12 +99,79 @@ def verify_two_loops_two_lines():
         assert right_dot >= 0.999, right_dot
 
 
+def verify_four_loop_contacts():
+    count = 32
+    circles = [
+        _circle_points(0.0, 0.0, 2.0, count),
+        _circle_points(-2.8, 0.0, 0.8, count),
+        _circle_points(2.8, 0.0, 0.8, count),
+        _circle_points(0.0, -2.8, 0.8, count),
+    ]
+    vertices = [point for circle in circles for point in circle]
+    edges = [
+        edge
+        for circle_index in range(len(circles))
+        for edge in _loop_edges(circle_index * count, count)
+    ]
+
+    mesh = bpy.data.meshes.new("TangifyContactsVerifyMesh")
+    mesh.from_pydata(vertices, edges, [])
+    mesh.update()
+    obj = bpy.data.objects.new("TangifyContactsVerify", mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+
+    bm = bmesh.from_edit_mesh(mesh)
+    before_counts = (len(bm.verts), len(bm.edges), len(bm.faces))
+    assert bpy.ops.rcad.tangify() == {'FINISHED'}
+
+    bm = bmesh.from_edit_mesh(mesh)
+    bm.verts.ensure_lookup_table()
+    after_counts = (len(bm.verts), len(bm.edges), len(bm.faces))
+    assert after_counts == before_counts, (before_counts, after_counts)
+    loop_coords = [
+        [bm.verts[offset + index].co.copy() for index in range(count)]
+        for offset in range(0, len(vertices), count)
+    ]
+
+    # The minimum spanning contacts should connect the large central loop to
+    # each of the three surrounding loops.
+    for outer_index in (1, 2, 3):
+        closest = min(
+            (
+                (first - second).length,
+                first,
+                second,
+            )
+            for first in loop_coords[0]
+            for second in loop_coords[outer_index]
+        )
+        distance, point_a, point_b = closest
+        assert distance <= 1.0e-6, distance
+        tangent_a = math_engine.CatmullRomSpline(
+            loop_coords[0], is_closed=True
+        ).tangent_global(
+            math_engine.CatmullRomSpline(loop_coords[0], is_closed=True).project(point_a)[0]
+        )
+        tangent_b = math_engine.CatmullRomSpline(
+            loop_coords[outer_index], is_closed=True
+        ).tangent_global(
+            math_engine.CatmullRomSpline(loop_coords[outer_index], is_closed=True).project(point_b)[0]
+        )
+        assert abs(tangent_a.dot(tangent_b)) >= 0.999, (outer_index, tangent_a, tangent_b)
+
+
 if __name__ == "__main__":
     bpy.utils.register_class(panel.RCAD_PT_Main)
     operators.register()
     ui.register()
     try:
         verify_two_loops_two_lines()
+        bpy.ops.object.mode_set(mode='OBJECT')
+        verify_four_loop_contacts()
         print("Tangify Blender verification passed")
     finally:
         ui.unregister()

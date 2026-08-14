@@ -1,10 +1,11 @@
-"""Rephase selected faceted loops onto selected common tangent lines.
+"""Rephase selected faceted loops onto selected contacts and tangent lines.
 
 Tangify keeps the selected topology intact.  Each selected open edge chain is
 treated as a tangent guide between two selected closed loops.  The guide's
 nearby common tangent is solved on the same Catmull-Rom interpolation used by
 Kissing mode, then the existing loop vertices are redistributed with the
-tangent points as mandatory anchors.
+tangent points as mandatory anchors.  When no guides are selected, the nearest
+closed-loop relationships are used as shared contact anchors instead.
 """
 
 import math
@@ -13,7 +14,11 @@ import bmesh
 
 from ..math_engine import CatmullRomSpline
 from .detection_utils import get_selected_islands
-from .kissing import _closed_target_coords, _deduplicate_anchors
+from .kissing import (
+    _closed_target_coords,
+    _deduplicate_anchors,
+    _minimum_spanning_pairs,
+)
 
 
 _LENGTH_EPSILON = 1.0e-10
@@ -328,6 +333,36 @@ def _guide_target_coords(guide, start, end):
     return [start.lerp(end, length / total_length) for length in lengths]
 
 
+def _prepare_curve_targets(curves, report=None):
+    prepared_curves = []
+    for curve in curves:
+        if not curve['anchors']:
+            continue
+        anchors = _deduplicate_anchors(curve['anchors'], curve['spline'])
+        target_count = len(curve['island']['verts'])
+        if len(anchors) > target_count:
+            _report(
+                report,
+                {'WARNING'},
+                "Tangify found more contacts than available curve vertices.",
+            )
+            return None
+        target_coords = _closed_target_coords(
+            curve['spline'],
+            anchors,
+            target_count,
+        )
+        if len(target_coords) != target_count:
+            _report(
+                report,
+                {'ERROR'},
+                "Tangify generated an invalid curve sample count.",
+            )
+            return None
+        prepared_curves.append((curve['island']['verts'], target_coords))
+    return prepared_curves
+
+
 def execute(bm, obj, report=None):
     islands = get_selected_islands(bm)
     curves = _build_curves(islands)
@@ -340,92 +375,97 @@ def execute(bm, obj, report=None):
             "Tangify needs at least two selected closed edge curves.",
         )
         return {'CANCELLED'}
-    if not guides:
-        _report(
-            report,
-            {'WARNING'},
-            "Tangify needs at least one selected open tangent line.",
-        )
-        return {'CANCELLED'}
 
     prepared_guides = []
-    for guide_number, guide in enumerate(guides, start=1):
-        match = _match_guide(guide, curves)
-        if match is None:
+    contact_count = 0
+    if not guides:
+        if len(curves) != len(islands):
             _report(
                 report,
                 {'WARNING'},
-                f"Tangify could not pair line {guide_number} with two curves.",
+                "Tangify only supports closed curves in contact-only mode.",
             )
             return {'CANCELLED'}
 
-        start = guide['verts'][0].co
-        end = guide['verts'][-1].co
-        direction = end - start
-        if direction.length_squared <= _LENGTH_EPSILON * _LENGTH_EPSILON:
+        splines = [curve['spline'] for curve in curves]
+        chosen_pairs = _minimum_spanning_pairs(splines)
+        if len(chosen_pairs) != len(curves) - 1:
             _report(
                 report,
                 {'WARNING'},
-                f"Tangify line {guide_number} has no usable length.",
+                "Tangify could not establish all curve contact relationships.",
             )
             return {'CANCELLED'}
-        direction.normalize()
+        for index_a, index_b, solution in chosen_pairs:
+            shared_point = (solution['point_a'] + solution['point_b']) * 0.5
+            curve_a = curves[index_a]
+            curve_b = curves[index_b]
+            curve_a['anchors'].append({
+                't': solution['t_a'],
+                'co': shared_point.copy(),
+                'touching': True,
+            })
+            curve_b['anchors'].append({
+                't': solution['t_b'],
+                'co': shared_point.copy(),
+                'touching': True,
+            })
+        contact_count = len(chosen_pairs)
+    else:
+        for guide_number, guide in enumerate(guides, start=1):
+            match = _match_guide(guide, curves)
+            if match is None:
+                _report(
+                    report,
+                    {'WARNING'},
+                    f"Tangify could not pair line {guide_number} with two curves.",
+                )
+                return {'CANCELLED'}
 
-        curve_a = curves[match['index_a']]
-        curve_b = curves[match['index_b']]
-        solution = _common_tangent(
-            curve_a['spline'],
-            curve_b['spline'],
-            match['t_a'],
-            match['t_b'],
-            direction,
-        )
-        if solution is None:
-            _report(
-                report,
-                {'WARNING'},
-                f"Tangify could not solve line {guide_number}.",
-            )
-            return {'CANCELLED'}
+            start = guide['verts'][0].co
+            end = guide['verts'][-1].co
+            direction = end - start
+            if direction.length_squared <= _LENGTH_EPSILON * _LENGTH_EPSILON:
+                _report(
+                    report,
+                    {'WARNING'},
+                    f"Tangify line {guide_number} has no usable length.",
+                )
+                return {'CANCELLED'}
+            direction.normalize()
 
-        curve_a['anchors'].append({
-            't': solution['t_a'],
-            'co': solution['point_a'].copy(),
-            'touching': True,
-        })
-        curve_b['anchors'].append({
-            't': solution['t_b'],
-            'co': solution['point_b'].copy(),
-            'touching': True,
-        })
-        prepared_guides.append((guide, solution))
+            curve_a = curves[match['index_a']]
+            curve_b = curves[match['index_b']]
+            solution = _common_tangent(
+                curve_a['spline'],
+                curve_b['spline'],
+                match['t_a'],
+                match['t_b'],
+                direction,
+            )
+            if solution is None:
+                _report(
+                    report,
+                    {'WARNING'},
+                    f"Tangify could not solve line {guide_number}.",
+                )
+                return {'CANCELLED'}
 
-    prepared_curves = []
-    for curve in curves:
-        if not curve['anchors']:
-            continue
-        anchors = _deduplicate_anchors(curve['anchors'], curve['spline'])
-        target_count = len(curve['island']['verts'])
-        if len(anchors) > target_count:
-            _report(
-                report,
-                {'WARNING'},
-                "Tangify found more tangent contacts than available curve vertices.",
-            )
-            return {'CANCELLED'}
-        target_coords = _closed_target_coords(
-            curve['spline'],
-            anchors,
-            target_count,
-        )
-        if len(target_coords) != target_count:
-            _report(
-                report,
-                {'ERROR'},
-                "Tangify generated an invalid curve sample count.",
-            )
-            return {'CANCELLED'}
-        prepared_curves.append((curve['island']['verts'], target_coords))
+            curve_a['anchors'].append({
+                't': solution['t_a'],
+                'co': solution['point_a'].copy(),
+                'touching': True,
+            })
+            curve_b['anchors'].append({
+                't': solution['t_b'],
+                'co': solution['point_b'].copy(),
+                'touching': True,
+            })
+            prepared_guides.append((guide, solution))
+
+    prepared_curves = _prepare_curve_targets(curves, report=report)
+    if prepared_curves is None:
+        return {'CANCELLED'}
 
     # All validation and solving happens before this point so a failed solve
     # never leaves the Edit Mesh half modified.
@@ -445,12 +485,18 @@ def execute(bm, obj, report=None):
             vert.select = True
 
     bmesh.update_edit_mesh(obj.data)
-    _report(
-        report,
-        {'INFO'},
-        f"Tangified {len(prepared_guides)} line"
-        f"{'s' if len(prepared_guides) != 1 else ''} across "
-        f"{len(prepared_curves)} curve"
-        f"{'s' if len(prepared_curves) != 1 else ''}; vertex counts unchanged.",
-    )
+    if guides:
+        message = (
+            f"Tangified {len(prepared_guides)} line"
+            f"{'s' if len(prepared_guides) != 1 else ''} across "
+            f"{len(prepared_curves)} curve"
+            f"{'s' if len(prepared_curves) != 1 else ''}"
+        )
+    else:
+        message = (
+            f"Tangified {contact_count} curve contact"
+            f"{'s' if contact_count != 1 else ''} across "
+            f"{len(prepared_curves)} curves"
+        )
+    _report(report, {'INFO'}, message + "; vertex counts unchanged.")
     return {'FINISHED'}
