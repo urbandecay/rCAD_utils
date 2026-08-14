@@ -16,6 +16,7 @@ from ..math_engine import CatmullRomSpline
 from .detection_utils import get_selected_islands
 from .kissing import (
     _closed_target_coords,
+    _closest_spline_pair,
     _deduplicate_anchors,
     _minimum_spanning_pairs,
 )
@@ -93,6 +94,176 @@ def _tangent_alignment_error(spline_a, spline_b, t_a, t_b):
     dot_b = max(-1.0, min(1.0, tangent_b.dot(direction)))
     error = (1.0 - dot_a * dot_a) + (1.0 - dot_b * dot_b)
     return error, point_a, point_b
+
+
+def _contact_alignment_error(spline_a, spline_b, t_a, t_b):
+    point_a = spline_a.eval_global(t_a)
+    point_b = spline_b.eval_global(t_b)
+    tangent_a = spline_a.tangent_global(t_a)
+    tangent_b = spline_b.tangent_global(t_b)
+    if (
+        tangent_a.length_squared <= _LENGTH_EPSILON * _LENGTH_EPSILON
+        or tangent_b.length_squared <= _LENGTH_EPSILON * _LENGTH_EPSILON
+    ):
+        return float('inf'), point_a, point_b
+    dot = max(-1.0, min(1.0, tangent_a.dot(tangent_b)))
+    return 1.0 - dot * dot, point_a, point_b
+
+
+def _spline_scale(spline):
+    samples = [
+        spline.eval_global(index)
+        for index in range(len(spline.segments))
+    ]
+    if not samples:
+        return 1.0
+    minimum = samples[0].copy()
+    maximum = samples[0].copy()
+    for point in samples[1:]:
+        minimum.x = min(minimum.x, point.x)
+        minimum.y = min(minimum.y, point.y)
+        minimum.z = min(minimum.z, point.z)
+        maximum.x = max(maximum.x, point.x)
+        maximum.y = max(maximum.y, point.y)
+        maximum.z = max(maximum.z, point.z)
+    return max((maximum - minimum).length, 1.0e-6)
+
+
+def _contact_score(
+    spline_a,
+    spline_b,
+    t_a,
+    t_b,
+    seed_a,
+    seed_b,
+    window_a,
+    window_b,
+    scale,
+):
+    alignment, point_a, point_b = _contact_alignment_error(
+        spline_a,
+        spline_b,
+        t_a,
+        t_b,
+    )
+    if not math.isfinite(alignment):
+        return float('inf')
+    distance_error = (point_a - point_b).length / scale
+    drift_a = _parameter_distance(spline_a, t_a, seed_a) / window_a
+    drift_b = _parameter_distance(spline_b, t_b, seed_b) / window_b
+    # Tangency is the important part of a contact.  The distance term keeps
+    # the search at the closest intended relationship when the faceted source
+    # curves overlap or leave a tiny gap.
+    return (
+        alignment
+        + distance_error * distance_error
+        + 0.001 * (drift_a * drift_a + drift_b * drift_b)
+    )
+
+
+def _tangent_contact(spline_a, spline_b):
+    seed = _closest_spline_pair(spline_a, spline_b)
+    if seed is None:
+        return None
+
+    count_a = float(len(spline_a.segments))
+    count_b = float(len(spline_b.segments))
+    window_a = min(count_a * 0.12, max(0.75, count_a * 0.04))
+    window_b = min(count_b * 0.12, max(0.75, count_b * 0.04))
+    scale = max(_spline_scale(spline_a), _spline_scale(spline_b))
+    best_t_a = seed['t_a']
+    best_t_b = seed['t_b']
+    best_score = float('inf')
+
+    coarse_steps = 12
+    for index_a in range(coarse_steps + 1):
+        raw_a = seed['t_a'] - window_a + 2.0 * window_a * index_a / coarse_steps
+        t_a = _clamp_local_parameter(spline_a, raw_a, seed['t_a'], window_a)
+        for index_b in range(coarse_steps + 1):
+            raw_b = seed['t_b'] - window_b + 2.0 * window_b * index_b / coarse_steps
+            t_b = _clamp_local_parameter(spline_b, raw_b, seed['t_b'], window_b)
+            score = _contact_score(
+                spline_a,
+                spline_b,
+                t_a,
+                t_b,
+                seed['t_a'],
+                seed['t_b'],
+                window_a,
+                window_b,
+                scale,
+            )
+            if score < best_score:
+                best_score = score
+                best_t_a = t_a
+                best_t_b = t_b
+
+    step_a = 2.0 * window_a / coarse_steps
+    step_b = 2.0 * window_b / coarse_steps
+    for _iteration in range(48):
+        candidate_t_a = best_t_a
+        candidate_t_b = best_t_b
+        candidate_score = best_score
+        for offset_a in (-step_a, 0.0, step_a):
+            t_a = _clamp_local_parameter(
+                spline_a,
+                best_t_a + offset_a,
+                seed['t_a'],
+                window_a,
+            )
+            for offset_b in (-step_b, 0.0, step_b):
+                t_b = _clamp_local_parameter(
+                    spline_b,
+                    best_t_b + offset_b,
+                    seed['t_b'],
+                    window_b,
+                )
+                score = _contact_score(
+                    spline_a,
+                    spline_b,
+                    t_a,
+                    t_b,
+                    seed['t_a'],
+                    seed['t_b'],
+                    window_a,
+                    window_b,
+                    scale,
+                )
+                if score < candidate_score:
+                    candidate_score = score
+                    candidate_t_a = t_a
+                    candidate_t_b = t_b
+
+        moved = (
+            _parameter_distance(spline_a, candidate_t_a, best_t_a) > 1.0e-12
+            or _parameter_distance(spline_b, candidate_t_b, best_t_b) > 1.0e-12
+        )
+        best_t_a = candidate_t_a
+        best_t_b = candidate_t_b
+        best_score = candidate_score
+        if not moved:
+            step_a *= 0.5
+            step_b *= 0.5
+            if max(step_a, step_b) <= 1.0e-9:
+                break
+
+    _alignment, point_a, point_b = _contact_alignment_error(
+        spline_a,
+        spline_b,
+        best_t_a,
+        best_t_b,
+    )
+    if not math.isfinite(_alignment):
+        return None
+    shared_point = (point_a + point_b) * 0.5
+    return {
+        't_a': best_t_a,
+        't_b': best_t_b,
+        'point_a': shared_point,
+        'point_b': shared_point.copy(),
+        'distance': (point_a - point_b).length,
+        'alignment': _alignment,
+    }
 
 
 def _guided_score(
@@ -397,17 +568,27 @@ def execute(bm, obj, report=None):
             )
             return {'CANCELLED'}
         for index_a, index_b, solution in chosen_pairs:
-            shared_point = (solution['point_a'] + solution['point_b']) * 0.5
             curve_a = curves[index_a]
             curve_b = curves[index_b]
+            solution = _tangent_contact(
+                curve_a['spline'],
+                curve_b['spline'],
+            )
+            if solution is None:
+                _report(
+                    report,
+                    {'WARNING'},
+                    "Tangify could not solve a Catmull-Rom curve contact.",
+                )
+                return {'CANCELLED'}
             curve_a['anchors'].append({
                 't': solution['t_a'],
-                'co': shared_point.copy(),
+                'co': solution['point_a'].copy(),
                 'touching': True,
             })
             curve_b['anchors'].append({
                 't': solution['t_b'],
-                'co': shared_point.copy(),
+                'co': solution['point_b'].copy(),
                 'touching': True,
             })
         contact_count = len(chosen_pairs)
