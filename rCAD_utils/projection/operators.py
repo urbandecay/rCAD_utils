@@ -251,6 +251,8 @@ def _projection_direction(context, source_locations, components, target_is_expli
         raise ProjectionError(
             "Horizontal projection needs a horizontal separation between source and target."
         )
+    if getattr(context.scene, "rcad_projection_direction", 'NORMAL') == 'VERTICAL':
+        return Vector((0.0, 0.0, 1.0))
 
     if target_is_explicit_faces:
         normal_sum = Vector((0.0, 0.0, 0.0))

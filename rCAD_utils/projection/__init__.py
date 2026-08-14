@@ -15,7 +15,8 @@ def register():
         description="Direction used to project stored vertices onto the target",
         items=(
             ('NORMAL', "Face Normal", "Project along the target face normal"),
-            ('HORIZONTAL', "Horizontal", "Project along a fixed world horizontal axis"),
+            ('HORIZONTAL', "Horizontal", "Project toward the target in the world horizontal plane"),
+            ('VERTICAL', "Vertical", "Project along the global vertical axis"),
         ),
         default='NORMAL',
     )

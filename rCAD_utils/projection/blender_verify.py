@@ -79,6 +79,18 @@ def verify_horizontal_surface():
     assert_near(result.locations[1], (0, 0.75, -1.5), "horizontal point 1")
 
 
+def verify_vertical_surface():
+    vertices = [(-2, -2, 0), (2, -2, 0), (2, 2, 0), (-2, 2, 0)]
+    components = build_surface_components(vertices, [(0, 1, 2, 3)])
+    result = project_points_coherently(
+        [(-0.5, 1.25, 3), (0.75, -1.5, -2)],
+        components,
+        Vector((0, 0, 1)),
+    )
+    assert_near(result.locations[0], (-0.5, 1.25, 0), "vertical point 0")
+    assert_near(result.locations[1], (0.75, -1.5, 0), "vertical point 1")
+
+
 def verify_separated_surfaces_are_coherent():
     vertices = [
         (-3, -1, 0), (-1, -1, 0), (-1, 1, 0), (-3, 1, 0),
@@ -359,6 +371,7 @@ def main():
         verify_flat_surface()
         verify_angled_surface()
         verify_horizontal_surface()
+        verify_vertical_surface()
         verify_separated_surfaces_are_coherent()
         verify_multifaced_bevel_surface()
         verify_invalid_engine_inputs()
