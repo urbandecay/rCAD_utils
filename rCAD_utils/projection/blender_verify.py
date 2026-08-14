@@ -10,6 +10,7 @@ import sys
 
 import bmesh
 import bpy
+from bpy.props import BoolProperty, PointerProperty
 from mathutils import Vector
 
 
@@ -24,6 +25,8 @@ from rCAD_utils.projection.engine import (  # noqa: E402
 )
 from rCAD_utils.projection import operators  # noqa: E402
 from rCAD_utils.projection.storage import projection_state  # noqa: E402
+from rCAD_utils.weld_tools.ui import FuseGeometryProps  # noqa: E402
+from rCAD_utils.weld_tools import face_weld_op, heavy_weld_op, x_weld_op  # noqa: E402
 
 
 TOLERANCE = 1.0e-5
@@ -404,12 +407,53 @@ def verify_topology_change_is_rejected():
     assert_near(bm.verts[0].co, (0, 0, 2), "rejected projection changed source")
 
 
+def verify_projection_weld_sequence():
+    """The projection owns the fixed Heavy -> X -> Square orchestration."""
+    clear_scene()
+    obj = mesh_object(
+        "ProjectionWeld",
+        [
+            (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
+            (-3, -3, 0), (3, -3, 0), (3, 3, 0), (-3, 3, 0),
+        ],
+        [(0, 1, 2, 3), (4, 5, 6, 7)],
+    )
+    select_only(obj)
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='DESELECT')
+    bm = bmesh.from_edit_mesh(obj.data)
+    bm.verts.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    bm.faces[0].select_set(True)
+    for vertex in bm.faces[0].verts:
+        vertex.select_set(True)
+    bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+    assert bpy.ops.mesh.rcad_store_projection_source() == {'FINISHED'}
+
+    bm = bmesh.from_edit_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+    bm.faces[1].select_set(True)
+    bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+
+    bpy.context.scene.rcad_projection_weld = True
+    assert bpy.ops.mesh.rcad_project_stored_geometry() == {'FINISHED'}
+    # The projection's final reselection must leave the result selected even
+    # though every weld operator clears its own welded elements.
+    bm = bmesh.from_edit_mesh(obj.data)
+    assert any(vertex.select for vertex in bm.verts)
+
+
 def main():
     registered = []
     try:
         for cls in operators.classes:
             bpy.utils.register_class(cls)
             registered.append(cls)
+        bpy.types.Scene.rcad_projection_weld = BoolProperty(default=False)
+        bpy.utils.register_class(FuseGeometryProps)
+        bpy.types.Scene.super_fuse = PointerProperty(type=FuseGeometryProps)
+        for module in (heavy_weld_op, x_weld_op, face_weld_op):
+            module.register()
         verify_flat_surface()
         verify_angled_surface()
         verify_horizontal_surface()
@@ -424,9 +468,17 @@ def main():
         verify_select_target_then_project_workflow()
         verify_separate_face_target_returns_to_source()
         verify_topology_change_is_rejected()
+        verify_projection_weld_sequence()
         print("PROJECTION_VERIFICATION_OK")
     finally:
         projection_state.clear()
+        for module in (face_weld_op, x_weld_op, heavy_weld_op):
+            module.unregister()
+        if hasattr(bpy.types.Scene, "super_fuse"):
+            del bpy.types.Scene.super_fuse
+        bpy.utils.unregister_class(FuseGeometryProps)
+        if hasattr(bpy.types.Scene, "rcad_projection_weld"):
+            del bpy.types.Scene.rcad_projection_weld
         for cls in reversed(registered):
             bpy.utils.unregister_class(cls)
 

@@ -15,6 +15,7 @@ from .storage import SourceEntry, TargetEntry, projection_state
 _MATRIX_EPSILON = 1.0e-12
 _MOVE_EPSILON_SQUARED = 1.0e-20
 _PROJECTABLE_OBJECT_TYPES = {'MESH', 'CURVE', 'SURFACE', 'FONT', 'META'}
+_WELD_TARGET_LAYER_NAME = "_rcad_projection_weld_target"
 
 
 def _edit_mesh_objects(context):
@@ -283,6 +284,59 @@ def _selected_target_faces(context):
     return selections
 
 
+def _infer_view_target_face_specs(context, locations):
+    """Find same-object target faces for the optional Square stage.
+
+    View projection intentionally accepts an unselected visible target.  If
+    that target is another object, Square cannot consume it because the weld
+    operator works on one active Edit Mesh.  For a shared mesh, however, the
+    projected points identify the visible target faces well enough to restore
+    that selection automatically.
+    """
+    source_indices = {
+        id(entry.obj): set(entry.vertex_indices)
+        for entry in projection_state.source_entries
+    }
+    candidates = []
+    for obj in _edit_mesh_objects(context):
+        if not _object_is_visible(context, obj):
+            continue
+        bm = _prepare_bmesh(obj)
+        matrix = obj.matrix_world
+        for face in bm.faces:
+            if (
+                face.hide
+                or len(face.verts) < 3
+                or any(vertex.index in source_indices.get(id(obj), set()) for vertex in face.verts)
+            ):
+                continue
+            normal = matrix.to_3x3().inverted_safe().transposed() @ face.normal
+            if normal.length <= _MATRIX_EPSILON:
+                continue
+            normal.normalize()
+            center = matrix @ face.calc_center_median()
+            radius = max((matrix @ vertex.co - center).length for vertex in face.verts)
+            candidates.append((obj, face.index, center, normal, max(radius, 1.0e-6)))
+
+    selected = {}
+    for point in locations:
+        best = None
+        for candidate in candidates:
+            obj, index, center, normal, radius = candidate
+            plane_distance = abs((Vector(point) - center).dot(normal))
+            tolerance = max(1.0e-4, radius * 1.0e-4)
+            if plane_distance > tolerance:
+                continue
+            score = (plane_distance, (Vector(point) - center).length_squared)
+            if best is None or score < best[0]:
+                best = (score, candidate)
+        if best is not None:
+            obj, index, _center, _normal, _radius = best[1]
+            selected.setdefault(id(obj), (obj, set()))[1].add(index)
+
+    return tuple((obj, tuple(sorted(indices))) for obj, indices in selected.values())
+
+
 def _selected_faces_polygon_soup(selections):
     vertices = []
     polygons = []
@@ -413,6 +467,257 @@ def _restore_source_selection(context):
 
     for obj in edit_objects:
         bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+
+
+def _weld_seed_data(records, locations):
+    """Keep stable projection seeds for the topology-changing weld stages."""
+    by_object = {}
+    for (entry, vertex_index), location in zip(records, locations):
+        data = by_object.setdefault(
+            id(entry.obj),
+            {"obj": entry.obj, "points": [], "vertices": []},
+        )
+        data["points"].append(Vector(location))
+        try:
+            bm = _prepare_bmesh(entry.obj)
+            data["vertices"].append(bm.verts[vertex_index])
+        except (IndexError, ReferenceError, RuntimeError):
+            pass
+    return tuple(by_object.values())
+
+
+def _select_connected_source_islands(context, seed_data, clear=True):
+    """Select every edge/face/vertex in each projected source island.
+
+    Weld operators intentionally change selection as they work.  This helper
+    reselects from the projected source seeds after each stage, using the
+    surviving BMVerts where possible and projected world positions as a
+    fallback after a topology rebuild.
+    """
+    edit_objects = _edit_mesh_objects(context)
+    if clear:
+        for obj in edit_objects:
+            _deselect_bmesh(_prepare_bmesh(obj))
+
+    selected = 0
+    for data in seed_data:
+        obj = data["obj"]
+        if obj not in edit_objects:
+            continue
+        bm = _prepare_bmesh(obj)
+        target_layer = bm.verts.layers.int.get(_WELD_TARGET_LAYER_NAME)
+        seeds = []
+        for vertex in data.get("vertices", ()):
+            try:
+                if (
+                    vertex.is_valid
+                    and vertex in bm.verts
+                    and (target_layer is None or not vertex[target_layer])
+                ):
+                    seeds.append(vertex)
+            except (ReferenceError, RuntimeError):
+                continue
+
+        # Heavy/X normally preserve the original vertices.  If an operator
+        # rebuilt the edit mesh, pick the nearest surviving vertex to each
+        # projected seed so the island can still be recovered.
+        if not seeds:
+            for point in data.get("points", ()):
+                nearest = None
+                nearest_distance = float("inf")
+                for vertex in bm.verts:
+                    if (
+                        vertex.hide
+                        or not vertex.is_valid
+                        or (target_layer is not None and vertex[target_layer])
+                    ):
+                        continue
+                    distance = ((obj.matrix_world @ vertex.co) - point).length_squared
+                    if distance < nearest_distance:
+                        nearest = vertex
+                        nearest_distance = distance
+                if nearest is not None:
+                    seeds.append(nearest)
+
+        visited = set()
+        stack = list(seeds)
+        while stack:
+            vertex = stack.pop()
+            try:
+                if not vertex.is_valid or id(vertex) in visited:
+                    continue
+                if target_layer is not None and vertex[target_layer]:
+                    continue
+                visited.add(id(vertex))
+                vertex.select_set(True)
+                selected += 1
+                for edge in vertex.link_edges:
+                    if not edge.is_valid or edge.hide:
+                        continue
+                    edge.select_set(True)
+                    other = edge.other_vert(vertex)
+                    if other.is_valid and id(other) not in visited:
+                        stack.append(other)
+                for face in vertex.link_faces:
+                    if face.is_valid and not face.hide:
+                        face.select_set(True)
+            except (ReferenceError, RuntimeError):
+                continue
+
+        bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+    return selected
+
+
+def _mark_weld_target_vertices(target):
+    """Tag explicit target vertices so source reselection survives Heavy/X."""
+    marked_objects = []
+    for obj, face_indices in _projection_target_face_specs(target):
+        if obj.mode != 'EDIT' or obj.type != 'MESH':
+            continue
+        bm = _prepare_bmesh(obj)
+        layer = bm.verts.layers.int.get(_WELD_TARGET_LAYER_NAME)
+        if layer is None:
+            layer = bm.verts.layers.int.new(_WELD_TARGET_LAYER_NAME)
+        for index in face_indices:
+            if 0 <= index < len(bm.faces):
+                for vertex in bm.faces[index].verts:
+                    vertex[layer] = 1
+        bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+        marked_objects.append(obj)
+    return tuple(marked_objects)
+
+
+def _clear_weld_target_marks(objects):
+    for obj in objects:
+        try:
+            bm = _prepare_bmesh(obj)
+            layer = bm.verts.layers.int.get(_WELD_TARGET_LAYER_NAME)
+            if layer is not None:
+                bm.verts.layers.int.remove(layer)
+                bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+        except (ReferenceError, RuntimeError):
+            continue
+
+
+def _select_marked_target_geometry(context):
+    """Fallback final selection when Square consumed every source vertex."""
+    selected = 0
+    for obj in _edit_mesh_objects(context):
+        bm = _prepare_bmesh(obj)
+        layer = bm.verts.layers.int.get(_WELD_TARGET_LAYER_NAME)
+        if layer is None:
+            continue
+        for vertex in bm.verts:
+            if vertex.hide or not vertex.is_valid or not vertex[layer]:
+                continue
+            vertex.select_set(True)
+            selected += 1
+            for edge in vertex.link_edges:
+                if edge.is_valid and not edge.hide:
+                    edge.select_set(True)
+            for face in vertex.link_faces:
+                if face.is_valid and not face.hide:
+                    face.select_set(True)
+        bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+    return selected
+
+
+def _projection_target_face_specs(target):
+    """Return target face selections that Square can consume."""
+    if isinstance(target, list):
+        return tuple((obj, tuple(indices)) for obj, indices in target)
+    if target is not None and target.face_indices is not None:
+        return ((target.obj, tuple(target.face_indices)),)
+    return tuple()
+
+
+def _select_square_inputs(context, seed_data, target):
+    target_specs = _projection_target_face_specs(target)
+    if not target_specs:
+        return False, "Square needs an explicit target face selection."
+    space = getattr(context, "space_data", None)
+    if space is None or getattr(space, "type", None) != 'VIEW_3D':
+        return False, "Square needs to run from a 3D View."
+
+    source_objects = {id(data["obj"]) for data in seed_data}
+    target_objects = {id(obj) for obj, _indices in target_specs}
+    if len(source_objects) != 1 or source_objects != target_objects:
+        return False, "Square needs the projected source and target faces on one mesh object."
+
+    _select_connected_source_islands(context, seed_data, clear=True)
+    obj = seed_data[0]["obj"]
+    if obj not in _edit_mesh_objects(context):
+        return False, "The projected source object is no longer in Edit Mode."
+    context.view_layer.objects.active = obj
+    obj.select_set(True)
+    bm = _prepare_bmesh(obj)
+    for target_obj, face_indices in target_specs:
+        if target_obj is not obj:
+            continue
+        for index in face_indices:
+            if 0 <= index < len(bm.faces):
+                face = bm.faces[index]
+                if face.hide:
+                    continue
+                face.select_set(True)
+                for edge in face.edges:
+                    edge.select_set(True)
+                for vertex in face.verts:
+                    vertex.select_set(True)
+    bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+    return True, ""
+
+
+def _invoke_projection_weld_operator(operator_name):
+    try:
+        operator = getattr(bpy.ops.mesh, operator_name)
+    except AttributeError:
+        return False, f"Weld operator {operator_name} is not registered."
+    try:
+        if not operator.poll():
+            return False, f"Weld operator {operator_name} is not available in the current Edit Mode context."
+        result = operator('EXEC_DEFAULT')
+    except (ReferenceError, RuntimeError, ValueError) as exc:
+        return False, f"Weld operator {operator_name} failed: {exc}"
+    if 'FINISHED' not in result:
+        return False, f"Weld operator {operator_name} cancelled."
+    return True, ""
+
+
+def _run_projection_weld_sequence(context, seed_data, target):
+    """Run this tool's fixed Heavy → X → Square weld pipeline."""
+    if not seed_data:
+        return "Weld skipped: no projected source island."
+
+    marked_targets = _mark_weld_target_vertices(target)
+    try:
+        # Heavy and X operate on the projected island only.  Re-selection after
+        # each call is essential because both original weld operators deliberately
+        # clear their welded vertices.
+        for operator_name in ("super_fuse_heavy", "super_fuse_x"):
+            _select_connected_source_islands(context, seed_data, clear=True)
+            ok, message = _invoke_projection_weld_operator(operator_name)
+            if not ok:
+                # A no-op (for example, a source with no crossings) is harmless;
+                # an unavailable operator should be visible to the user.
+                if "cancelled" not in message.lower():
+                    return f"Weld stopped before {operator_name}: {message}"
+            _select_connected_source_islands(context, seed_data, clear=True)
+
+        ready, message = _select_square_inputs(context, seed_data, target)
+        if not ready:
+            return f"Weld completed Heavy → X; Square skipped: {message}"
+        ok, message = _invoke_projection_weld_operator("super_fuse_square")
+        selected = _select_connected_source_islands(context, seed_data, clear=True)
+        if ok and selected == 0:
+            _select_marked_target_geometry(context)
+        if not ok and "cancelled" not in message.lower():
+            return f"Weld completed Heavy → X; Square failed: {message}"
+        if not ok:
+            return "Weld completed Heavy → X; Square had no applicable weld."
+        return "Welded projection with Heavy → X → Square."
+    finally:
+        _clear_weld_target_marks(marked_targets)
 
 
 def _return_to_source_edit_mode(context):
@@ -584,6 +889,7 @@ class RCAD_OT_ProjectStoredGeometry(bpy.types.Operator):
             return {'CANCELLED'}
         target = _selected_target_faces(context)
         view_projection = not target and not projection_state.has_target()
+        weld_enabled = bool(getattr(context.scene, "rcad_projection_weld", False))
         if not target and not view_projection:
             valid, message = _validate_target()
             if not valid:
@@ -612,6 +918,10 @@ class RCAD_OT_ProjectStoredGeometry(bpy.types.Operator):
                     target_vertices,
                 )
             result = project_points_coherently(source_locations, components, direction)
+            weld_target = target
+            if view_projection and weld_enabled:
+                weld_target = _infer_view_target_face_specs(context, result.locations)
+            weld_seed_data = _weld_seed_data(records, result.locations)
 
             inverse_matrices = {
                 id(entry): entry.obj.matrix_world.inverted()
@@ -669,18 +979,29 @@ class RCAD_OT_ProjectStoredGeometry(bpy.types.Operator):
             self.report({'ERROR'}, f"Projection failed without changing the source: {exc}")
             return {'CANCELLED'}
 
+        weld_note = ""
+        if weld_enabled:
+            try:
+                weld_note = _run_projection_weld_sequence(
+                    context,
+                    weld_seed_data,
+                    weld_target,
+                )
+            except (ReferenceError, RuntimeError, ValueError) as exc:
+                weld_note = f"Weld failed after projection: {exc}"
+
         component_note = ""
         if len(components) > 1 and result.component_index >= 0:
             component_note = f" using target surface {result.component_index + 1} of {len(components)}"
         elif len(components) > 1 and result.component_index == -1:
             component_note = " across disconnected target surfaces"
         if moved:
-            self.report(
-                {'INFO'},
-                f"Projected {len(records)} vertices{component_note}; {moved} moved.",
-            )
+            report = f"Projected {len(records)} vertices{component_note}; {moved} moved."
         else:
-            self.report({'INFO'}, f"All {len(records)} source vertices were already on the target.")
+            report = f"All {len(records)} source vertices were already on the target."
+        if weld_note:
+            report = f"{report} {weld_note}"
+        self.report({'INFO'}, report)
         return {'FINISHED'}
 
 

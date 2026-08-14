@@ -1,7 +1,7 @@
 """Explicit, viewport-independent mesh surface projection feature."""
 
 import bpy
-from bpy.props import EnumProperty
+from bpy.props import BoolProperty, EnumProperty
 
 from . import operators, ui
 from .storage import projection_state
@@ -20,11 +20,18 @@ def register():
         ),
         default='NORMAL',
     )
+    bpy.types.Scene.rcad_projection_weld = BoolProperty(
+        name="Weld",
+        description="After projection, run Heavy (..), X, and Square welds in that order",
+        default=False,
+    )
 
 
 def unregister():
     if hasattr(bpy.types.Scene, "rcad_projection_direction"):
         del bpy.types.Scene.rcad_projection_direction
+    if hasattr(bpy.types.Scene, "rcad_projection_weld"):
+        del bpy.types.Scene.rcad_projection_weld
     projection_state.clear()
     for cls in reversed(operators.classes + ui.classes):
         bpy.utils.unregister_class(cls)

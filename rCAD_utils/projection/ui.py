@@ -48,5 +48,8 @@ class RCAD_PT_Projection(bpy.types.Panel):
         direction_row.label(text="Direction:")
         direction_row.prop(context.scene, "rcad_projection_direction", text="")
 
+        weld_row = box.row(align=True)
+        weld_row.prop(context.scene, "rcad_projection_weld", text="Weld")
+
 
 classes = (RCAD_PT_Projection,)
