@@ -1,12 +1,19 @@
+"""Blender operators for the explicit source/target projection workflow."""
+
+import hashlib
+import math
+import struct
+
 import bmesh
 import bpy
-from mathutils.bvhtree import BVHTree
+from mathutils import Vector
 
-from .storage import SourceEntry, projection_source
+from .engine import ProjectionError, build_surface_components, project_points_coherently
+from .storage import SourceEntry, TargetEntry, projection_state
 
 
-_RAY_EPSILON = 1.0e-5
-_MAX_RAY_DISTANCE = 1.0e30
+_MATRIX_EPSILON = 1.0e-12
+_MOVE_EPSILON_SQUARED = 1.0e-20
 
 
 def _edit_mesh_objects(context):
@@ -30,6 +37,45 @@ def _prepare_bmesh(obj):
     return bm
 
 
+def _canonical_face(indices):
+    values = tuple(indices)
+    if not values:
+        return values
+    rotations = []
+    for sequence in (values, tuple(reversed(values))):
+        minimum = min(sequence)
+        rotations.extend(
+            sequence[offset:] + sequence[:offset]
+            for offset, value in enumerate(sequence)
+            if value == minimum
+        )
+    return min(rotations)
+
+
+def _topology_signature(obj):
+    """Create a compact fingerprint that detects index-invalidating edits."""
+    if obj.mode == 'EDIT':
+        bm = _prepare_bmesh(obj)
+        vertex_count = len(bm.verts)
+        edges = [tuple(sorted((edge.verts[0].index, edge.verts[1].index))) for edge in bm.edges]
+        faces = [_canonical_face(tuple(vert.index for vert in face.verts)) for face in bm.faces]
+    else:
+        mesh = obj.data
+        vertex_count = len(mesh.vertices)
+        edges = [tuple(sorted(edge.vertices)) for edge in mesh.edges]
+        faces = [_canonical_face(tuple(face.vertices)) for face in mesh.polygons]
+
+    digest = hashlib.blake2b(digest_size=16)
+    digest.update(struct.pack("<QQQ", vertex_count, len(edges), len(faces)))
+    for first, second in sorted(edges):
+        digest.update(struct.pack("<QQ", first, second))
+    for face in sorted(faces):
+        digest.update(struct.pack("<Q", len(face)))
+        for index in face:
+            digest.update(struct.pack("<Q", index))
+    return vertex_count, len(edges), len(faces), digest.digest()
+
+
 def _deselect_bmesh(bm):
     for face in bm.faces:
         face.select_set(False)
@@ -40,243 +86,178 @@ def _deselect_bmesh(bm):
     bm.select_history.clear()
 
 
-def _stored_entries_are_valid():
-    if not projection_source.has_source():
-        return False, "No source geometry stored. Select geometry and press Store first."
+def _selection_history(bm):
+    history = []
+    for element in bm.select_history:
+        if not element.is_valid or not element.select:
+            continue
+        if isinstance(element, bmesh.types.BMVert):
+            kind = 'VERT'
+        elif isinstance(element, bmesh.types.BMEdge):
+            kind = 'EDGE'
+        elif isinstance(element, bmesh.types.BMFace):
+            kind = 'FACE'
+        else:
+            continue
+        history.append((kind, element.index))
+    return tuple(history)
 
-    for entry in projection_source.entries:
-        try:
-            obj = entry.obj
-            if obj.type != 'MESH' or obj.data != entry.mesh:
-                return False, "Stored source geometry is no longer available. Store it again."
-            if obj.mode != 'EDIT':
-                return False, "Stored source objects must remain in Edit Mode."
 
-            bm = _prepare_bmesh(obj)
-            current_counts = (len(bm.verts), len(bm.edges), len(bm.faces))
-            stored_counts = (entry.vertex_count, entry.edge_count, entry.face_count)
-            if current_counts != stored_counts:
-                return False, "Source topology changed after Store. Store the source geometry again."
-            if any(index < 0 or index >= len(bm.verts) for index in entry.vertex_indices):
-                return False, "Stored source vertices are no longer valid. Store them again."
-        except (ReferenceError, RuntimeError):
-            return False, "Stored source geometry is no longer available. Store it again."
+def _validate_object_reference(obj, mesh):
+    try:
+        return obj is not None and obj.type == 'MESH' and obj.data == mesh
+    except (ReferenceError, RuntimeError):
+        return False
 
+
+def _validate_source(context):
+    if not projection_state.has_source():
+        return False, "No source is stored. Select source vertices and press Store Source."
+
+    current_edit_ids = {id(obj) for obj in _edit_mesh_objects(context)}
+    for entry in projection_state.source_entries:
+        if not _validate_object_reference(entry.obj, entry.mesh):
+            return False, "A stored source object is no longer available. Store the source again."
+        if entry.obj.mode != 'EDIT':
+            return False, "Return the stored source object(s) to Edit Mode before projecting."
+        if id(entry.obj) not in current_edit_ids:
+            return False, "All stored source objects must be in the current Edit Mode session."
+        if _topology_signature(entry.obj) != entry.topology_signature:
+            return False, "Source topology changed after it was stored. Store the source again."
+        bm = _prepare_bmesh(entry.obj)
+        if any(index < 0 or index >= len(bm.verts) for index in entry.vertex_indices):
+            return False, "Stored source vertex indices are no longer valid. Store the source again."
+        determinant = entry.obj.matrix_world.determinant()
+        if not math.isfinite(determinant) or abs(determinant) <= _MATRIX_EPSILON:
+            return False, f'Source object "{entry.obj.name}" has a singular world transform.'
     return True, ""
 
 
-def _selected_target_faces(context):
-    selected = {}
-    for obj in _edit_mesh_objects(context):
-        bm = _prepare_bmesh(obj)
-        face_indices = {
-            face.index for face in bm.faces
-            if face.select and not face.hide
-        }
-
-        if not face_indices:
-            selected_edges = [edge for edge in bm.edges if edge.select and not edge.hide]
-            if selected_edges:
-                face_indices.update(
-                    face.index
-                    for edge in selected_edges
-                    for face in edge.link_faces
-                    if not face.hide
-                )
-            else:
-                selected_verts = [vert for vert in bm.verts if vert.select and not vert.hide]
-                face_indices.update(
-                    face.index
-                    for vert in selected_verts
-                    for face in vert.link_faces
-                    if not face.hide
-                )
-
-        if face_indices:
-            selected[obj] = tuple(sorted(face_indices))
-    return selected
+def _validate_target():
+    target = projection_state.target
+    if target is None:
+        return False, "No target is stored. Select a target object or target faces and press Store Target."
+    if not _validate_object_reference(target.obj, target.mesh):
+        return False, "The stored target object is no longer available. Store the target again."
+    if _topology_signature(target.obj) != target.topology_signature:
+        return False, "Target topology changed after it was stored. Store the target again."
+    if target.face_indices is not None:
+        face_count = (
+            len(_prepare_bmesh(target.obj).faces)
+            if target.obj.mode == 'EDIT'
+            else len(target.obj.data.polygons)
+        )
+        if any(index < 0 or index >= face_count for index in target.face_indices):
+            return False, "Stored target face indices are no longer valid. Store the target again."
+    return True, ""
 
 
-def _append_bmesh_faces(vertices, polygons, obj, face_indices=None):
-    bm = _prepare_bmesh(obj)
+def _base_mesh_polygon_soup(obj, face_indices=None):
     matrix = obj.matrix_world
-    vertex_map = {}
-
-    if face_indices is None:
-        faces = (face for face in bm.faces if not face.hide)
+    if obj.mode == 'EDIT':
+        bm = _prepare_bmesh(obj)
+        vertices = [matrix @ vert.co for vert in bm.verts]
+        faces = bm.faces if face_indices is None else (bm.faces[index] for index in face_indices)
+        polygons = [tuple(vert.index for vert in face.verts) for face in faces]
     else:
-        faces = (
-            bm.faces[index] for index in face_indices
-            if 0 <= index < len(bm.faces)
-        )
-
-    for face in faces:
-        if not face.is_valid or face.hide:
-            continue
-        polygon = []
-        for vert in face.verts:
-            mapped_index = vertex_map.get(vert.index)
-            if mapped_index is None:
-                mapped_index = len(vertices)
-                vertex_map[vert.index] = mapped_index
-                vertices.append(matrix @ vert.co)
-            polygon.append(mapped_index)
-        if len(polygon) >= 3:
-            polygons.append(polygon)
+        mesh = obj.data
+        vertices = [matrix @ vert.co for vert in mesh.vertices]
+        faces = mesh.polygons if face_indices is None else (mesh.polygons[index] for index in face_indices)
+        polygons = [tuple(face.vertices) for face in faces]
+    return vertices, polygons
 
 
-def _append_evaluated_mesh(vertices, polygons, obj, depsgraph):
+def _evaluated_polygon_soup(context, obj):
+    depsgraph = context.evaluated_depsgraph_get()
     evaluated_obj = obj.evaluated_get(depsgraph)
-    mesh = evaluated_obj.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
-    if mesh is None:
-        return
-
+    evaluated_mesh = evaluated_obj.to_mesh(
+        preserve_all_data_layers=False,
+        depsgraph=depsgraph,
+    )
+    if evaluated_mesh is None:
+        raise ProjectionError("The stored target object has no evaluated mesh.")
     try:
-        offset = len(vertices)
         matrix = evaluated_obj.matrix_world
-        vertices.extend(matrix @ vert.co for vert in mesh.vertices)
-        polygons.extend(
-            [offset + index for index in polygon.vertices]
-            for polygon in mesh.polygons
-            if len(polygon.vertices) >= 3
-        )
+        vertices = [matrix @ vertex.co for vertex in evaluated_mesh.vertices]
+        polygons = [tuple(polygon.vertices) for polygon in evaluated_mesh.polygons]
+        return vertices, polygons
     finally:
         evaluated_obj.to_mesh_clear()
 
 
-def _object_is_visible(context, obj):
-    if obj.hide_viewport or obj.hide_get():
-        return False
-    try:
-        return obj.visible_get(view_layer=context.view_layer, viewport=context.space_data)
-    except TypeError:
-        return obj.visible_get(view_layer=context.view_layer)
+def _target_polygon_soup(context):
+    target = projection_state.target
+    if target.face_indices is not None:
+        # Explicit geometry always means the exact edit-cage faces the user stored.
+        return _base_mesh_polygon_soup(target.obj, target.face_indices)
+    if target.obj.mode == 'EDIT':
+        return _base_mesh_polygon_soup(target.obj)
+    # A whole-object target includes its current modifier result and ignores visibility.
+    return _evaluated_polygon_soup(context, target.obj)
 
 
-def _build_target_tree(context, selected_faces):
-    vertices = []
-    polygons = []
-
-    if selected_faces:
-        for obj, face_indices in selected_faces.items():
-            _append_bmesh_faces(vertices, polygons, obj, face_indices)
-    else:
-        depsgraph = context.evaluated_depsgraph_get()
-        for obj in context.view_layer.objects:
-            if obj.type != 'MESH' or not _object_is_visible(context, obj):
-                continue
-            if obj.mode == 'EDIT':
-                _append_bmesh_faces(vertices, polygons, obj)
-            else:
-                _append_evaluated_mesh(vertices, polygons, obj, depsgraph)
-
-    if not polygons:
-        return None
-    return BVHTree.FromPolygons(vertices, polygons, all_triangles=False, epsilon=0.0)
+def _source_world_points():
+    records = []
+    locations = []
+    for entry in projection_state.source_entries:
+        bm = _prepare_bmesh(entry.obj)
+        matrix = entry.obj.matrix_world
+        for index in entry.vertex_indices:
+            records.append((entry, index))
+            locations.append(matrix @ bm.verts[index].co)
+    return records, locations
 
 
-def _build_selected_target_surfaces(selected_faces):
-    """Build one ray-cast surface per explicitly selected edit-mode face.
+def _projection_direction(context, source_locations, components):
+    """Choose a shared direction from target geometry, never from the view."""
+    if getattr(context.scene, "rcad_projection_direction", 'NORMAL') == 'HORIZONTAL':
+        axis = getattr(context.scene, "rcad_projection_horizontal_axis", 'Y')
+        return Vector((1.0, 0.0, 0.0)) if axis == 'X' else Vector((0.0, 1.0, 0.0))
 
-    Keeping each face separate lets explicit projection follow that face's
-    normal, matching the plane-intersection behavior of the legacy tool.
-    """
-    surfaces = []
-    for obj, face_indices in selected_faces.items():
-        bm = _prepare_bmesh(obj)
-        bm.normal_update()
-        matrix = obj.matrix_world
-        normal_matrix = matrix.to_3x3().inverted_safe().transposed()
+    target = projection_state.target
+    if target is not None and target.face_indices is not None:
+        normal_sum = Vector((0.0, 0.0, 0.0))
+        for component in components:
+            normal_sum += component.reference_normal * component.normal_weight
+        if normal_sum.length > _MATRIX_EPSILON:
+            return normal_sum.normalized()
 
-        for index in face_indices:
-            if index < 0 or index >= len(bm.faces):
-                continue
-            face = bm.faces[index]
-            if not face.is_valid or face.hide or len(face.verts) < 3:
-                continue
+    centroid = Vector((0.0, 0.0, 0.0))
+    for location in source_locations:
+        centroid += location
+    centroid /= len(source_locations)
 
-            vertices = [matrix @ vert.co for vert in face.verts]
-            normal = normal_matrix @ face.normal
-            if normal.length_squared == 0.0:
-                continue
-            normal.normalize()
-
-            tree = BVHTree.FromPolygons(
-                vertices,
-                [list(range(len(vertices)))],
-                all_triangles=False,
-                epsilon=0.0,
-            )
-            surfaces.append((tree, normal))
-
-    return surfaces
-
-
-def _view_projection(context):
-    space = context.space_data
-    region_3d = getattr(space, "region_3d", None) if space else None
-    if region_3d is None:
-        return None
-
-    view_inverse = region_3d.view_matrix.inverted_safe()
-    into_view = -view_inverse.col[2].to_3d()
-    if into_view.length_squared == 0.0:
-        return None
-
-    return region_3d.is_perspective, view_inverse.translation.copy(), into_view.normalized()
-
-
-def _closest_view_line_hit(target_tree, source_world, direction):
-    closest_location = None
-    closest_distance_squared = float('inf')
-
-    for ray_direction in (direction, -direction):
-        ray_origin = source_world + ray_direction * _RAY_EPSILON
-        location, _normal, _face_index, _distance = target_tree.ray_cast(
-            ray_origin,
-            ray_direction,
-            _MAX_RAY_DISTANCE,
-        )
-        if location is None:
+    closest = None
+    for component_index, component in enumerate(components):
+        location, normal, _face_index, distance = component.tree.find_nearest(centroid)
+        if location is None or distance is None or not math.isfinite(distance):
             continue
+        candidate = (distance, component_index, location, normal)
+        if closest is None or candidate[:2] < closest[:2]:
+            closest = candidate
 
-        distance_squared = (location - source_world).length_squared
-        if distance_squared < closest_distance_squared:
-            closest_location = location.copy()
-            closest_distance_squared = distance_squared
+    if closest is not None:
+        _distance, component_index, location, normal = closest
+        if normal is not None and normal.length > _MATRIX_EPSILON:
+            return normal.normalized()
+        toward_surface = location - centroid
+        if toward_surface.length > _MATRIX_EPSILON:
+            return toward_surface.normalized()
+        return components[component_index].reference_normal
 
-    return closest_location
-
-
-def _closest_target_normal_hit(target_surfaces, source_world):
-    closest_location = None
-    closest_distance_squared = float('inf')
-
-    for target_tree, normal in target_surfaces:
-        for direction in (normal, -normal):
-            ray_origin = source_world + direction * _RAY_EPSILON
-            location, _normal, _face_index, _distance = target_tree.ray_cast(
-                ray_origin,
-                direction,
-                _MAX_RAY_DISTANCE,
-            )
-            if location is None:
-                continue
-
-            distance_squared = (location - source_world).length_squared
-            if distance_squared < closest_distance_squared:
-                closest_location = location.copy()
-                closest_distance_squared = distance_squared
-
-    return closest_location
+    raise ProjectionError("The target does not provide a valid projection direction.")
 
 
 def _restore_source_selection(context):
     edit_objects = _edit_mesh_objects(context)
+    edit_object_ids = {id(obj) for obj in edit_objects}
+    if any(id(entry.obj) not in edit_object_ids for entry in projection_state.source_entries):
+        raise ProjectionError("All stored source objects must be in the current Edit Mode session.")
+
     for obj in edit_objects:
         _deselect_bmesh(_prepare_bmesh(obj))
 
-    for entry in projection_source.entries:
+    for entry in projection_state.source_entries:
         bm = _prepare_bmesh(entry.obj)
         for index in entry.vertex_indices:
             bm.verts[index].select_set(True)
@@ -287,16 +268,58 @@ def _restore_source_selection(context):
             if 0 <= index < len(bm.faces):
                 bm.faces[index].select_set(True)
 
+        bm.select_history.clear()
+        for kind, index in entry.selection_history:
+            sequence = {
+                'VERT': bm.verts,
+                'EDGE': bm.edges,
+                'FACE': bm.faces,
+            }.get(kind)
+            if sequence is not None and 0 <= index < len(sequence):
+                element = sequence[index]
+                if element.select:
+                    bm.select_history.add(element)
+
+    active = projection_state.source_active_object
+    if active is not None and id(active) in edit_object_ids:
+        context.view_layer.objects.active = active
+
     for obj in edit_objects:
-        bm = _prepare_bmesh(obj)
-        bm.select_flush_mode()
         bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+
+
+def _return_to_source_edit_mode(context):
+    """After storing any target, make the source ready for Project."""
+    source_objects = [entry.obj for entry in projection_state.source_entries]
+    if not source_objects or any(obj.name not in context.view_layer.objects for obj in source_objects):
+        return False
+    try:
+        current_edit_ids = {id(obj) for obj in _edit_mesh_objects(context)}
+        if context.mode == 'EDIT_MESH' and all(id(obj) in current_edit_ids for obj in source_objects):
+            active = projection_state.source_active_object
+            if active in source_objects:
+                context.view_layer.objects.active = active
+            return True
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        for obj in source_objects:
+            obj.select_set(True)
+        active = projection_state.source_active_object
+        if active not in source_objects:
+            active = source_objects[0]
+        context.view_layer.objects.active = active
+        bpy.ops.object.mode_set(mode='EDIT')
+        return all(obj.mode == 'EDIT' for obj in source_objects)
+    except (RuntimeError, ReferenceError):
+        return False
 
 
 class RCAD_OT_StoreProjectionSource(bpy.types.Operator):
     bl_idname = "mesh.rcad_store_projection_source"
-    bl_label = "Store"
-    bl_description = "Store selected edit-mode geometry as the projection source"
+    bl_label = "Store Source"
+    bl_description = "Store the selected edit-mode vertices as the projection source"
     bl_options = {'REGISTER'}
 
     @classmethod
@@ -306,134 +329,231 @@ class RCAD_OT_StoreProjectionSource(bpy.types.Operator):
     def execute(self, context):
         entries = []
         edit_objects = _edit_mesh_objects(context)
-
         for obj in edit_objects:
             bm = _prepare_bmesh(obj)
-            vertex_indices = tuple(vert.index for vert in bm.verts if vert.select)
+            vertex_indices = tuple(vertex.index for vertex in bm.verts if vertex.select)
             if not vertex_indices:
                 continue
-
             entries.append(SourceEntry(
                 obj=obj,
                 mesh=obj.data,
                 vertex_indices=vertex_indices,
                 edge_indices=tuple(edge.index for edge in bm.edges if edge.select),
                 face_indices=tuple(face.index for face in bm.faces if face.select),
-                vertex_count=len(bm.verts),
-                edge_count=len(bm.edges),
-                face_count=len(bm.faces),
+                selection_history=_selection_history(bm),
+                topology_signature=_topology_signature(obj),
             ))
 
         if not entries:
-            self.report({'WARNING'}, "Select source vertices, edges, or faces in Edit Mode.")
+            self.report({'WARNING'}, "Select at least one source vertex in Edit Mode.")
             return {'CANCELLED'}
 
-        projection_source.store(entries)
+        active = context.view_layer.objects.active
+        if active not in [entry.obj for entry in entries]:
+            active = entries[0].obj
+        projection_state.store_source(entries, active_object=active)
+        projection_state.clear_target()
+
         for obj in edit_objects:
-            bm = _prepare_bmesh(obj)
-            _deselect_bmesh(bm)
+            _deselect_bmesh(_prepare_bmesh(obj))
             bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
 
         self.report(
             {'INFO'},
-            f"Stored {projection_source.vertex_count} source vertices. Select target geometry or press Project in Orthographic view.",
+            f"Stored {projection_state.vertex_count} source vertices. Now store a target object or selected faces.",
         )
+        return {'FINISHED'}
+
+
+class RCAD_OT_StoreProjectionTarget(bpy.types.Operator):
+    bl_idname = "mesh.rcad_store_projection_target"
+    bl_label = "Store Target"
+    bl_description = "Store selected Edit Mode faces, or one selected Object Mode mesh, as the target"
+    bl_options = {'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        return projection_state.has_source() and context.mode in {'EDIT_MESH', 'OBJECT'}
+
+    def execute(self, context):
+        if not projection_state.has_source():
+            self.report({'WARNING'}, "Store source vertices first.")
+            return {'CANCELLED'}
+
+        if context.mode == 'EDIT_MESH':
+            selections = []
+            for obj in _edit_mesh_objects(context):
+                bm = _prepare_bmesh(obj)
+                indices = tuple(face.index for face in bm.faces if face.select and not face.hide)
+                if indices:
+                    selections.append((obj, indices))
+            if not selections:
+                self.report({'WARNING'}, "Select one or more target faces in Edit Mode.")
+                return {'CANCELLED'}
+            if len(selections) != 1:
+                self.report({'WARNING'}, "Target faces must belong to exactly one mesh object.")
+                return {'CANCELLED'}
+
+            obj, face_indices = selections[0]
+            projection_state.store_target(TargetEntry(
+                obj=obj,
+                mesh=obj.data,
+                face_indices=face_indices,
+                topology_signature=_topology_signature(obj),
+            ))
+            for edit_obj in _edit_mesh_objects(context):
+                _deselect_bmesh(_prepare_bmesh(edit_obj))
+                bmesh.update_edit_mesh(edit_obj.data, loop_triangles=False, destructive=False)
+            returned = _return_to_source_edit_mode(context)
+            suffix = " Source is ready in Edit Mode." if returned else " Return the source to Edit Mode, then Project."
+            self.report(
+                {'INFO'},
+                f'Stored {len(face_indices)} target faces from "{obj.name}".{suffix}',
+            )
+            return {'FINISHED'}
+
+        selected_objects = list(context.selected_objects)
+        if len(selected_objects) != 1 or selected_objects[0].type != 'MESH':
+            self.report({'WARNING'}, "Select exactly one mesh object as the target.")
+            return {'CANCELLED'}
+        obj = selected_objects[0]
+        source_objects = [entry.obj for entry in projection_state.source_entries]
+        if obj in source_objects:
+            self.report(
+                {'WARNING'},
+                "A complete target object cannot also be a source object; select its target faces in Edit Mode instead.",
+            )
+            return {'CANCELLED'}
+
+        projection_state.store_target(TargetEntry(
+            obj=obj,
+            mesh=obj.data,
+            face_indices=None,
+            topology_signature=_topology_signature(obj),
+        ))
+        returned = _return_to_source_edit_mode(context)
+        suffix = " Returned to the source in Edit Mode." if returned else " Return the source to Edit Mode, then Project."
+        self.report({'INFO'}, f'Stored target object "{obj.name}".{suffix}')
         return {'FINISHED'}
 
 
 class RCAD_OT_ProjectStoredGeometry(bpy.types.Operator):
     bl_idname = "mesh.rcad_project_stored_geometry"
     bl_label = "Project"
-    bl_description = "Project stored geometry onto selected target geometry, or through the view onto visible meshes in Orthographic view"
+    bl_description = "Project all stored source vertices onto the stored target surface"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        return context.mode == 'EDIT_MESH' and projection_source.has_source()
+        return (
+            context.mode == 'EDIT_MESH'
+            and projection_state.has_source()
+            and projection_state.has_target()
+        )
 
     def execute(self, context):
-        valid, message = _stored_entries_are_valid()
+        valid, message = _validate_source(context)
+        if not valid:
+            self.report({'WARNING'}, message)
+            return {'CANCELLED'}
+        valid, message = _validate_target()
         if not valid:
             self.report({'WARNING'}, message)
             return {'CANCELLED'}
 
-        view_projection = _view_projection(context)
-        if view_projection is None:
-            self.report({'ERROR'}, "Projection must be run from a 3D View.")
-            return {'CANCELLED'}
+        try:
+            target_vertices, target_polygons = _target_polygon_soup(context)
+            components = build_surface_components(target_vertices, target_polygons)
+            records, source_locations = _source_world_points()
+            direction = _projection_direction(context, source_locations, components)
+            result = project_points_coherently(source_locations, components, direction)
 
-        is_perspective, view_origin, ortho_direction = view_projection
-        selected_faces = _selected_target_faces(context)
-        if is_perspective and not selected_faces:
-            self.report({'WARNING'}, "Perspective projection requires selected target geometry.")
-            return {'CANCELLED'}
-
-        target_tree = _build_target_tree(context, selected_faces)
-        if target_tree is None:
-            target_description = "selected target geometry" if selected_faces else "visible mesh faces"
-            self.report({'WARNING'}, f"No {target_description} are available for projection.")
-            return {'CANCELLED'}
-        target_surfaces = _build_selected_target_surfaces(selected_faces)
-
-        hits = []
-        missed = 0
-        for entry in projection_source.entries:
-            bm = _prepare_bmesh(entry.obj)
-            matrix = entry.obj.matrix_world
-            for index in entry.vertex_indices:
-                source_world = matrix @ bm.verts[index].co
-                if is_perspective:
-                    direction = source_world - view_origin
-                    if direction.length_squared == 0.0:
-                        missed += 1
-                        continue
-                    direction.normalize()
-                else:
-                    direction = ortho_direction
-
-                if selected_faces:
-                    location = _closest_target_normal_hit(target_surfaces, source_world)
-                else:
-                    location = _closest_view_line_hit(target_tree, source_world, direction)
-
-                if location is None and selected_faces:
-                    nearest_location, _normal, _face_index, _distance = target_tree.find_nearest(
-                        source_world
+            inverse_matrices = {
+                id(entry): entry.obj.matrix_world.inverted()
+                for entry in projection_state.source_entries
+            }
+            bmeshes = {
+                id(entry): _prepare_bmesh(entry.obj)
+                for entry in projection_state.source_entries
+            }
+            originals = [
+                (entry, vertex_index, bmeshes[id(entry)].verts[vertex_index].co.copy())
+                for entry, vertex_index in records
+            ]
+            try:
+                moved = 0
+                for (entry, vertex_index), old_location, new_location in zip(
+                    records,
+                    source_locations,
+                    result.locations,
+                ):
+                    if (new_location - old_location).length_squared > _MOVE_EPSILON_SQUARED:
+                        moved += 1
+                    bmeshes[id(entry)].verts[vertex_index].co = (
+                        inverse_matrices[id(entry)] @ new_location
                     )
-                    if nearest_location is not None:
-                        location = nearest_location.copy()
-                if location is None:
-                    missed += 1
-                    continue
-                hits.append((entry, index, location))
 
-        if not hits:
-            self.report({'WARNING'}, "No stored vertices intersected a target face along the view line.")
+                for entry in projection_state.source_entries:
+                    bmesh.update_edit_mesh(
+                        entry.obj.data,
+                        loop_triangles=False,
+                        destructive=False,
+                    )
+                _restore_source_selection(context)
+            except Exception:
+                # Projection is atomic even if Blender rejects an update late.
+                for entry, vertex_index, coordinate in originals:
+                    try:
+                        bmeshes[id(entry)].verts[vertex_index].co = coordinate
+                    except (ReferenceError, RuntimeError, IndexError):
+                        pass
+                for entry in projection_state.source_entries:
+                    try:
+                        bmesh.update_edit_mesh(
+                            entry.obj.data,
+                            loop_triangles=False,
+                            destructive=False,
+                        )
+                    except (ReferenceError, RuntimeError):
+                        pass
+                raise
+        except ProjectionError as exc:
+            self.report({'WARNING'}, str(exc))
+            return {'CANCELLED'}
+        except (ReferenceError, RuntimeError, ValueError) as exc:
+            self.report({'ERROR'}, f"Projection failed without changing the source: {exc}")
             return {'CANCELLED'}
 
-        inverse_matrices = {
-            id(entry): entry.obj.matrix_world.inverted_safe()
-            for entry in projection_source.entries
-        }
-        changed_objects = set()
-        for entry, index, location in hits:
-            bm = _prepare_bmesh(entry.obj)
-            bm.verts[index].co = inverse_matrices[id(entry)] @ location
-            changed_objects.add(entry.obj)
-
-        for obj in changed_objects:
-            bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
-
-        _restore_source_selection(context)
-
-        if missed:
-            self.report({'WARNING'}, f"Projected {len(hits)} vertices; {missed} had no target hit.")
+        component_note = ""
+        if len(components) > 1 and result.component_index >= 0:
+            component_note = f" using target surface {result.component_index + 1} of {len(components)}"
+        elif len(components) > 1 and result.component_index == -1:
+            component_note = " across disconnected target surfaces"
+        if moved:
+            self.report(
+                {'INFO'},
+                f"Projected {len(records)} vertices{component_note}; {moved} moved.",
+            )
         else:
-            self.report({'INFO'}, f"Projected {len(hits)} vertices.")
+            self.report({'INFO'}, f"All {len(records)} source vertices were already on the target.")
+        return {'FINISHED'}
+
+
+class RCAD_OT_ClearProjectionState(bpy.types.Operator):
+    bl_idname = "mesh.rcad_clear_projection_state"
+    bl_label = "Clear"
+    bl_description = "Forget the stored projection source and target"
+    bl_options = {'REGISTER'}
+
+    def execute(self, _context):
+        projection_state.clear()
+        self.report({'INFO'}, "Cleared stored projection source and target.")
         return {'FINISHED'}
 
 
 classes = (
     RCAD_OT_StoreProjectionSource,
+    RCAD_OT_StoreProjectionTarget,
     RCAD_OT_ProjectStoredGeometry,
+    RCAD_OT_ClearProjectionState,
 )
