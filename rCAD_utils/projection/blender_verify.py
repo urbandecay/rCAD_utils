@@ -263,6 +263,37 @@ def verify_explicit_face_target_workflow():
     assert not bm.faces[0].select, "Target face remained selected instead of restoring source"
 
 
+def verify_select_target_then_project_workflow():
+    clear_scene()
+    obj = mesh_object(
+        "DirectSelection",
+        [(-1, 0, 2), (0, 0, 2), (1, 0, 2),
+         (-3, -3, 0), (3, -3, 0), (3, 3, 0), (-3, 3, 0)],
+        [(3, 4, 5, 6)],
+    )
+    select_only(obj)
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='DESELECT')
+    bm = bmesh.from_edit_mesh(obj.data)
+    bm.verts.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    for index in (0, 1, 2):
+        bm.verts[index].select_set(True)
+    bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+    assert bpy.ops.mesh.rcad_store_projection_source() == {'FINISHED'}
+
+    bm = bmesh.from_edit_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+    bm.faces[0].select_set(True)
+    bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+    # No Store Target call: Project consumes the current target-face selection.
+    assert bpy.ops.mesh.rcad_project_stored_geometry() == {'FINISHED'}
+    bm = bmesh.from_edit_mesh(obj.data)
+    bm.verts.ensure_lookup_table()
+    for index in (0, 1, 2):
+        assert_near(bm.verts[index].co, (index - 1, 0, 0), f"direct target point {index}")
+
+
 def verify_separate_face_target_returns_to_source():
     clear_scene()
     source = mesh_object("FaceSource", [(-0.5, 0, 1), (0.5, 0, 1)], [])
@@ -333,6 +364,7 @@ def main():
         verify_invalid_engine_inputs()
         verify_operator_workflow_and_undo()
         verify_explicit_face_target_workflow()
+        verify_select_target_then_project_workflow()
         verify_separate_face_target_returns_to_source()
         verify_topology_change_is_rejected()
         print("PROJECTION_VERIFICATION_OK")

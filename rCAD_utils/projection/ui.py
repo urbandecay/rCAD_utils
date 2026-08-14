@@ -48,19 +48,7 @@ class RCAD_PT_Projection(bpy.types.Panel):
         box.separator()
         row = box.row(align=True)
         row.label(text="2. Target")
-        target_row = row.row(align=True)
-        target_row.enabled = projection_state.has_source()
-        target_row.operator("mesh.rcad_store_projection_target", text="Store Target")
-        box.label(
-            text=_target_label(),
-            icon='CHECKMARK' if projection_state.has_target() else 'INFO',
-        )
-        if context.mode == 'OBJECT':
-            box.label(text="Object Mode: select exactly one mesh object.")
-        elif context.mode == 'EDIT_MESH':
-            box.label(text="Edit Mode: select target faces on one object.")
-        else:
-            box.label(text="Use Object Mode or Mesh Edit Mode.")
+        row.label(text="Select target faces", icon='INFO')
 
         box.separator()
         row = box.row(align=True)
@@ -68,13 +56,9 @@ class RCAD_PT_Projection(bpy.types.Panel):
         project.enabled = (
             context.mode == 'EDIT_MESH'
             and projection_state.has_source()
-            and projection_state.has_target()
         )
-        project.operator("mesh.rcad_project_stored_geometry", text="3. Project")
+        project.operator("mesh.rcad_project_stored_geometry", text="2. Project")
         row.operator("mesh.rcad_clear_projection_state", text="", icon='X')
-
-        if projection_state.has_target() and context.mode != 'EDIT_MESH':
-            box.label(text="Return the source to Edit Mode to Project.", icon='ERROR')
 
         direction_box = box.box()
         direction_box.prop(context.scene, "rcad_projection_direction", text="Direction")

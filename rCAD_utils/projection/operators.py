@@ -185,15 +185,46 @@ def _evaluated_polygon_soup(context, obj):
         evaluated_obj.to_mesh_clear()
 
 
-def _target_polygon_soup(context):
-    target = projection_state.target
+def _selected_target_faces(context):
+    selections = []
+    for obj in _edit_mesh_objects(context):
+        bm = _prepare_bmesh(obj)
+        face_indices = tuple(face.index for face in bm.faces if face.select and not face.hide)
+        if face_indices:
+            selections.append((obj, face_indices))
+    return selections
+
+
+def _selected_faces_polygon_soup(selections):
+    vertices = []
+    polygons = []
+    for obj, face_indices in selections:
+        bm = _prepare_bmesh(obj)
+        used_indices = sorted({
+            vert.index
+            for index in face_indices
+            for vert in bm.faces[index].verts
+        })
+        offset = len(vertices)
+        remap = {index: offset + local_index for local_index, index in enumerate(used_indices)}
+        vertices.extend(obj.matrix_world @ bm.verts[index].co for index in used_indices)
+        polygons.extend(
+            tuple(remap[vert.index] for vert in bm.faces[index].verts)
+            for index in face_indices
+        )
+    return vertices, polygons
+
+
+def _target_polygon_soup(context, target):
+    if isinstance(target, list):
+        return (*_selected_faces_polygon_soup(target), True)
     if target.face_indices is not None:
-        # Explicit geometry always means the exact edit-cage faces the user stored.
-        return _base_mesh_polygon_soup(target.obj, target.face_indices)
+        # Explicit stored geometry means the exact edit-cage faces.
+        return (*_base_mesh_polygon_soup(target.obj, target.face_indices), True)
     if target.obj.mode == 'EDIT':
-        return _base_mesh_polygon_soup(target.obj)
+        return (*_base_mesh_polygon_soup(target.obj), False)
     # A whole-object target includes its current modifier result and ignores visibility.
-    return _evaluated_polygon_soup(context, target.obj)
+    return (*_evaluated_polygon_soup(context, target.obj), False)
 
 
 def _source_world_points():
@@ -208,14 +239,20 @@ def _source_world_points():
     return records, locations
 
 
-def _projection_direction(context, source_locations, components):
+def _projection_direction(context, source_locations, components, target_is_explicit_faces, target_vertices):
     """Choose a shared direction from target geometry, never from the view."""
     if getattr(context.scene, "rcad_projection_direction", 'NORMAL') == 'HORIZONTAL':
-        axis = getattr(context.scene, "rcad_projection_horizontal_axis", 'Y')
-        return Vector((1.0, 0.0, 0.0)) if axis == 'X' else Vector((0.0, 1.0, 0.0))
+        source_centroid = sum(source_locations, Vector((0.0, 0.0, 0.0))) / len(source_locations)
+        target_centroid = sum(target_vertices, Vector((0.0, 0.0, 0.0))) / len(target_vertices)
+        horizontal = target_centroid - source_centroid
+        horizontal.z = 0.0
+        if horizontal.length > _MATRIX_EPSILON:
+            return horizontal.normalized()
+        raise ProjectionError(
+            "Horizontal projection needs a horizontal separation between source and target."
+        )
 
-    target = projection_state.target
-    if target is not None and target.face_indices is not None:
+    if target_is_explicit_faces:
         normal_sum = Vector((0.0, 0.0, 0.0))
         for component in components:
             normal_sum += component.reference_normal * component.normal_weight
@@ -360,7 +397,7 @@ class RCAD_OT_StoreProjectionSource(bpy.types.Operator):
 
         self.report(
             {'INFO'},
-            f"Stored {projection_state.vertex_count} source vertices. Now store a target object or selected faces.",
+            f"Stored {projection_state.vertex_count} source vertices. Select target faces, then press Project.",
         )
         return {'FINISHED'}
 
@@ -440,7 +477,7 @@ class RCAD_OT_StoreProjectionTarget(bpy.types.Operator):
 class RCAD_OT_ProjectStoredGeometry(bpy.types.Operator):
     bl_idname = "mesh.rcad_project_stored_geometry"
     bl_label = "Project"
-    bl_description = "Project all stored source vertices onto the stored target surface"
+    bl_description = "Project stored source vertices onto the currently selected target faces"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -448,7 +485,6 @@ class RCAD_OT_ProjectStoredGeometry(bpy.types.Operator):
         return (
             context.mode == 'EDIT_MESH'
             and projection_state.has_source()
-            and projection_state.has_target()
         )
 
     def execute(self, context):
@@ -456,16 +492,34 @@ class RCAD_OT_ProjectStoredGeometry(bpy.types.Operator):
         if not valid:
             self.report({'WARNING'}, message)
             return {'CANCELLED'}
-        valid, message = _validate_target()
-        if not valid:
-            self.report({'WARNING'}, message)
-            return {'CANCELLED'}
+        target = _selected_target_faces(context)
+        if not target:
+            if not projection_state.has_target():
+                self.report(
+                    {'WARNING'},
+                    "Select target faces after storing the source, then press Project.",
+                )
+                return {'CANCELLED'}
+            valid, message = _validate_target()
+            if not valid:
+                self.report({'WARNING'}, message)
+                return {'CANCELLED'}
+            target = projection_state.target
 
         try:
-            target_vertices, target_polygons = _target_polygon_soup(context)
+            target_vertices, target_polygons, target_is_explicit_faces = _target_polygon_soup(
+                context,
+                target,
+            )
             components = build_surface_components(target_vertices, target_polygons)
             records, source_locations = _source_world_points()
-            direction = _projection_direction(context, source_locations, components)
+            direction = _projection_direction(
+                context,
+                source_locations,
+                components,
+                target_is_explicit_faces,
+                target_vertices,
+            )
             result = project_points_coherently(source_locations, components, direction)
 
             inverse_matrices = {

@@ -19,20 +19,9 @@ def register():
         ),
         default='NORMAL',
     )
-    bpy.types.Scene.rcad_projection_horizontal_axis = EnumProperty(
-        name="Horizontal Axis",
-        description="World axis used for horizontal projection",
-        items=(
-            ('X', "World X", "Project along the global X axis"),
-            ('Y', "World Y", "Project along the global Y axis"),
-        ),
-        default='Y',
-    )
 
 
 def unregister():
-    if hasattr(bpy.types.Scene, "rcad_projection_horizontal_axis"):
-        del bpy.types.Scene.rcad_projection_horizontal_axis
     if hasattr(bpy.types.Scene, "rcad_projection_direction"):
         del bpy.types.Scene.rcad_projection_direction
     projection_state.clear()
