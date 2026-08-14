@@ -47,17 +47,12 @@ class RCAD_PT_Projection(bpy.types.Panel):
 
         box.separator()
         row = box.row(align=True)
-        row.label(text="2. Target")
-        row.label(text="Select target faces", icon='INFO')
-
-        box.separator()
-        row = box.row(align=True)
         project = row.row(align=True)
         project.enabled = (
             context.mode == 'EDIT_MESH'
             and projection_state.has_source()
         )
-        project.operator("mesh.rcad_project_stored_geometry", text="2. Project")
+        project.operator("mesh.rcad_project_stored_geometry", text="Project")
         row.operator("mesh.rcad_clear_projection_state", text="", icon='X')
 
         direction_box = box.box()
