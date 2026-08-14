@@ -33,19 +33,20 @@ class RCAD_PT_Projection(bpy.types.Panel):
         layout = self.layout
         box = layout.box()
 
-        row = box.row(align=True)
-        row.operator("mesh.rcad_store_projection_source", text="Store")
-        project = row.row(align=True)
+        source_row = box.row(align=True)
+        source_row.label(text="Source:")
+        source_row.operator("mesh.rcad_store_projection_source", text="Store")
+
+        project = box.row(align=True)
         project.enabled = (
             context.mode == 'EDIT_MESH'
             and projection_state.has_source()
         )
         project.operator("mesh.rcad_project_stored_geometry", text="Project")
 
-        direction_box = box.box()
-        direction_box.prop(context.scene, "rcad_projection_direction", text="Direction")
-        if context.scene.rcad_projection_direction == 'HORIZONTAL':
-            direction_box.prop(context.scene, "rcad_projection_horizontal_axis", text="Axis")
+        direction_row = box.row(align=True)
+        direction_row.label(text="Direction:")
+        direction_row.prop(context.scene, "rcad_projection_direction", text="")
 
 
 classes = (RCAD_PT_Projection,)
