@@ -186,6 +186,48 @@ def edit_vertex_locations(obj):
     return [vertex.co.copy() for vertex in bm.verts]
 
 
+def verify_visible_object_target_discovery():
+    clear_scene()
+    source = mesh_object("VisibleSource", [(0, 0, 2)], [])
+    mesh_object(
+        "VisibleObjectTarget",
+        [(-2, -2, 0), (2, -2, 0), (2, 2, 0), (-2, 2, 0)],
+        [(0, 1, 2, 3)],
+    )
+    select_only(source)
+    bpy.ops.object.mode_set(mode='EDIT')
+    bm = bmesh.from_edit_mesh(source.data)
+    bm.verts.ensure_lookup_table()
+    bm.verts[0].select_set(True)
+    bmesh.update_edit_mesh(source.data, loop_triangles=False, destructive=False)
+    assert bpy.ops.mesh.rcad_store_projection_source() == {'FINISHED'}
+
+    vertices, polygons = operators._visible_target_polygon_soup(bpy.context)
+    assert len(vertices) == 4
+    assert polygons == [(0, 1, 2, 3)]
+
+
+def verify_same_object_unselected_target_discovery():
+    clear_scene()
+    obj = mesh_object(
+        "SharedSourceAndTarget",
+        [(0, 0, 2), (-2, -2, 0), (2, -2, 0), (2, 2, 0), (-2, 2, 0)],
+        [(1, 2, 3, 4)],
+    )
+    select_only(obj)
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='DESELECT')
+    bm = bmesh.from_edit_mesh(obj.data)
+    bm.verts.ensure_lookup_table()
+    bm.verts[0].select_set(True)
+    bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+    assert bpy.ops.mesh.rcad_store_projection_source() == {'FINISHED'}
+
+    vertices, polygons = operators._visible_target_polygon_soup(bpy.context)
+    assert len(vertices) == 4
+    assert polygons == [(0, 1, 2, 3)]
+
+
 def verify_operator_workflow_and_undo():
     clear_scene()
     source = mesh_object("Source", [(-1, -0.5, 2), (0, 0.5, 2), (1, -0.5, 2)], [])
@@ -375,6 +417,8 @@ def main():
         verify_separated_surfaces_are_coherent()
         verify_multifaced_bevel_surface()
         verify_invalid_engine_inputs()
+        verify_visible_object_target_discovery()
+        verify_same_object_unselected_target_discovery()
         verify_operator_workflow_and_undo()
         verify_explicit_face_target_workflow()
         verify_select_target_then_project_workflow()

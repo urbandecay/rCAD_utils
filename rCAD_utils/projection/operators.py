@@ -14,6 +14,7 @@ from .storage import SourceEntry, TargetEntry, projection_state
 
 _MATRIX_EPSILON = 1.0e-12
 _MOVE_EPSILON_SQUARED = 1.0e-20
+_PROJECTABLE_OBJECT_TYPES = {'MESH', 'CURVE', 'SURFACE', 'FONT', 'META'}
 
 
 def _edit_mesh_objects(context):
@@ -197,36 +198,63 @@ def _append_polygon_soup(vertices, polygons, new_vertices, new_polygons):
 def _object_is_visible(context, obj):
     if obj.hide_viewport or obj.hide_get():
         return False
-    try:
-        return obj.visible_get(
-            view_layer=context.view_layer,
-            viewport=context.space_data,
-        )
-    except TypeError:
-        return obj.visible_get(view_layer=context.view_layer)
+    space = getattr(context, "space_data", None)
+    if space is not None and getattr(space, "type", None) == 'VIEW_3D':
+        try:
+            return obj.visible_get(view_layer=context.view_layer, viewport=space)
+        except (TypeError, RuntimeError):
+            pass
+    return obj.visible_get(view_layer=context.view_layer)
 
 
 def _visible_target_polygon_soup(context):
-    source_ids = {id(entry.obj) for entry in projection_state.source_entries}
+    source_indices = {
+        id(entry.obj): set(entry.vertex_indices)
+        for entry in projection_state.source_entries
+    }
     vertices = []
     polygons = []
     for obj in context.view_layer.objects:
-        if obj.type != 'MESH' or id(obj) in source_ids or not _object_is_visible(context, obj):
+        if (
+            obj.type not in _PROJECTABLE_OBJECT_TYPES
+            or not _object_is_visible(context, obj)
+        ):
             continue
-        if obj.mode == 'EDIT':
+        if obj.type == 'MESH' and obj.mode == 'EDIT':
             bm = _prepare_bmesh(obj)
             matrix = obj.matrix_world
-            new_vertices = [matrix @ vert.co for vert in bm.verts]
-            new_polygons = [
-                tuple(vert.index for vert in face.verts)
+            stored_indices = source_indices.get(id(obj), set())
+            target_faces = [
+                face
                 for face in bm.faces
-                if face.is_valid and not face.hide and len(face.verts) >= 3
+                if (
+                    face.is_valid
+                    and not face.hide
+                    and len(face.verts) >= 3
+                    and not any(vert.index in stored_indices for vert in face.verts)
+                )
+            ]
+            used_indices = sorted({
+                vert.index
+                for face in target_faces
+                for vert in face.verts
+            })
+            remap = {index: local_index for local_index, index in enumerate(used_indices)}
+            new_vertices = [matrix @ bm.verts[index].co for index in used_indices]
+            new_polygons = [
+                tuple(remap[vert.index] for vert in face.verts)
+                for face in target_faces
             ]
         else:
-            new_vertices, new_polygons = _evaluated_polygon_soup(context, obj)
+            if id(obj) in source_indices:
+                continue
+            try:
+                new_vertices, new_polygons = _evaluated_polygon_soup(context, obj)
+            except (RuntimeError, TypeError):
+                continue
         _append_polygon_soup(vertices, polygons, new_vertices, new_polygons)
     if not polygons:
-        raise ProjectionError("No visible mesh target is available for view projection.")
+        raise ProjectionError("No visible target surface is available for view projection.")
     return vertices, polygons
 
 
@@ -236,7 +264,9 @@ def _orthographic_view_direction(context):
     if region_3d is None:
         raise ProjectionError("View projection must be run from a 3D View.")
     if region_3d.is_perspective:
-        raise ProjectionError("View projection requires an Orthographic view.")
+        raise ProjectionError(
+            "Switch to Orthographic view to project without a selected target."
+        )
     direction = -region_3d.view_matrix.inverted_safe().col[2].to_3d()
     if direction.length <= _MATRIX_EPSILON:
         raise ProjectionError("The Orthographic view has no valid projection direction.")
@@ -457,7 +487,7 @@ class RCAD_OT_StoreProjectionSource(bpy.types.Operator):
 
         self.report(
             {'INFO'},
-            f"Stored {projection_state.vertex_count} source vertices. Select target faces, then press Project.",
+            f"Stored {projection_state.vertex_count} source vertices.",
         )
         return {'FINISHED'}
 
@@ -563,6 +593,7 @@ class RCAD_OT_ProjectStoredGeometry(bpy.types.Operator):
 
         try:
             if view_projection:
+                direction = _orthographic_view_direction(context)
                 target_vertices, target_polygons = _visible_target_polygon_soup(context)
                 target_is_explicit_faces = False
             else:
@@ -572,17 +603,14 @@ class RCAD_OT_ProjectStoredGeometry(bpy.types.Operator):
                 )
             components = build_surface_components(target_vertices, target_polygons)
             records, source_locations = _source_world_points()
-            direction = (
-                _orthographic_view_direction(context)
-                if view_projection
-                else _projection_direction(
+            if not view_projection:
+                direction = _projection_direction(
                     context,
                     source_locations,
                     components,
                     target_is_explicit_faces,
                     target_vertices,
                 )
-            )
             result = project_points_coherently(source_locations, components, direction)
 
             inverse_matrices = {
