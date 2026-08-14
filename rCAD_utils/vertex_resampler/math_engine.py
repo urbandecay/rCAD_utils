@@ -114,3 +114,75 @@ class CatmullRomSpline:
                 min_dist = d
                 best_t = t
         return best_t
+
+    def project(self, point, samples_per_segment=8, refine_steps=18):
+        """Return the closest spline parameter, point, and distance to *point*.
+
+        The tangent drawing tools use the same coarse-search/refine pattern.
+        Searching every segment first avoids refining the wrong local minimum,
+        which matters for closed and strongly concave curves.
+        """
+        if not self.segments:
+            zero = Vector((0, 0, 0))
+            return 0.0, zero, float('inf')
+
+        num_segs = len(self.segments)
+        samples_per_segment = max(2, int(samples_per_segment))
+        best_t = 0.0
+        best_dist_sq = float('inf')
+
+        for segment_index in range(num_segs):
+            for sample_index in range(samples_per_segment + 1):
+                fraction = sample_index / samples_per_segment
+                t = segment_index + fraction
+                if self.is_closed and t >= num_segs:
+                    t = 0.0
+                pos = self.eval_global(t)
+                dist_sq = (pos - point).length_squared
+                if dist_sq < best_dist_sq:
+                    best_dist_sq = dist_sq
+                    best_t = t
+
+        half_window = 1.0 / samples_per_segment
+        low = best_t - half_window
+        high = best_t + half_window
+        if not self.is_closed:
+            low = max(0.0, low)
+            high = min(float(num_segs), high)
+
+        for _ in range(max(1, int(refine_steps))):
+            third = (high - low) / 3.0
+            t1 = low + third
+            t2 = high - third
+            d1 = (self.eval_global(t1) - point).length_squared
+            d2 = (self.eval_global(t2) - point).length_squared
+            if d1 <= d2:
+                high = t2
+            else:
+                low = t1
+
+        best_t = (low + high) * 0.5
+        if self.is_closed:
+            best_t %= num_segs
+        else:
+            best_t = max(0.0, min(float(num_segs), best_t))
+        best_pos = self.eval_global(best_t)
+        return best_t, best_pos, (best_pos - point).length
+
+    def tangent_global(self, t, step=1e-4):
+        """Evaluate a normalized numerical tangent at global parameter *t*."""
+        if not self.segments:
+            return Vector((0, 0, 0))
+
+        num_segs = float(len(self.segments))
+        if self.is_closed:
+            before = self.eval_global((t - step) % num_segs)
+            after = self.eval_global((t + step) % num_segs)
+        else:
+            before = self.eval_global(max(0.0, t - step))
+            after = self.eval_global(min(num_segs, t + step))
+
+        tangent = after - before
+        if tangent.length_squared <= 1e-20:
+            return Vector((0, 0, 0))
+        return tangent.normalized()

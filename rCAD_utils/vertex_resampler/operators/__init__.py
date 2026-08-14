@@ -12,17 +12,15 @@ from . import (
     hole_in_mesh,
     hole_punch_face,
     hole_punch_solid,
+    kissing,
     open_loop,
     pipe,
     rebevel,
+    tangify,
 )
 from .. import anchor_overlay
 from ..mode_options import MODE_LABELS
 from .resample_common import execute_anchored_logic
-from .detection_utils import (
-    get_selected_islands,
-    get_kissing_chains,
-)
 
 
 class RCAD_OT_ResampleCurve(bpy.types.Operator):
@@ -119,17 +117,11 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
                 )
 
             if mode == 'KISSING':
-                islands = get_selected_islands(bm)
-                kissing_chains = get_kissing_chains(
-                    bm,
-                    single_mode=(len(islands) == 1),
-                )
-                return execute_anchored_logic(
+                return kissing.execute(
                     bm,
                     obj,
                     self.direction,
-                    mode='KISSING',
-                    precalc_chains=kissing_chains,
+                    report=self.report,
                 )
 
             self.report({'ERROR'}, f"Unsupported mesh type: {mode}")
@@ -138,7 +130,32 @@ class RCAD_OT_ResampleCurve(bpy.types.Operator):
             anchor_overlay.end_capture()
 
 
-classes = (RCAD_OT_ResampleCurve,)
+class RCAD_OT_Tangify(bpy.types.Operator):
+    bl_idname = "rcad.tangify"
+    bl_label = "Tangify"
+    bl_description = (
+        "Rearrange existing vertices so selected lines become tangent to "
+        "selected closed curves"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.edit_object
+        return obj is not None and obj.type == 'MESH'
+
+    def execute(self, context):
+        obj = context.edit_object
+        bm = bmesh.from_edit_mesh(obj.data)
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+        return tangify.execute(bm, obj, report=self.report)
+
+
+classes = (
+    RCAD_OT_ResampleCurve,
+    RCAD_OT_Tangify,
+)
 
 
 def register():

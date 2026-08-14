@@ -75,9 +75,27 @@ class RCAD_PT_VertexResampler(Panel):
         col.operator("rcad.clear_anchor_overlay", text="Clear Overlay", icon='X')
 
 
+class RCAD_PT_Tangify(Panel):
+    bl_label = "Tangify"
+    bl_idname = "RCAD_PT_Tangify"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'rCAD Utils'
+    bl_parent_id = 'RCAD_PT_Main'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        box = layout.box()
+        row = box.row(align=True)
+        row.enabled = context.mode == 'EDIT_MESH'
+        row.operator("rcad.tangify", text="Tangify")
+
+
 classes = (
     RCAD_OT_SetResamplerMode,
     RCAD_PT_VertexResampler,
+    RCAD_PT_Tangify,
 )
 
 

@@ -10,7 +10,11 @@ MODE_ITEMS = [
     ('OPEN_LOOP', "Open Loop", ""),
     ('JUNCTION', "Junction", ""),
     ('ANCHORED', "Anchored", ""),
-    ('KISSING', "Kissing", ""),
+    (
+        'KISSING',
+        "Kissing",
+        "Resample selected curves while preserving paired Catmull-Rom closest points",
+    ),
 ]
 
 

@@ -20,7 +20,6 @@ from .detection_utils import (
     get_centroid,
     get_selected_islands,
     align_islands_to_boss,
-    get_kissing_chains,
     check_if_anchored,
     check_selected_junction,
     get_junction_chains,
