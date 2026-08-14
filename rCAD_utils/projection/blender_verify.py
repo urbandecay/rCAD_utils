@@ -55,6 +55,16 @@ def verify_flat_surface():
     assert_near(result.locations[1], (1, -0.5, 0), "flat point 1")
 
 
+def verify_edge_clamping():
+    vertices = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
+    components = build_surface_components(vertices, [(0, 1, 2, 3)])
+    result = project_points_coherently(
+        [(2, 0, 2), (0, -2, 2)], components, Vector((0, 0, 1))
+    )
+    assert_near(result.locations[0], (1, 0, 0), "right edge clamp")
+    assert_near(result.locations[1], (0, -1, 0), "bottom edge clamp")
+
+
 def verify_angled_surface():
     # z = x, with points offset along the plane normal.
     vertices = [(-2, -2, -2), (2, -2, 2), (2, 2, 2), (-2, 2, -2)]
@@ -455,6 +465,7 @@ def main():
         for module in (heavy_weld_op, x_weld_op, face_weld_op):
             module.register()
         verify_flat_surface()
+        verify_edge_clamping()
         verify_angled_surface()
         verify_horizontal_surface()
         verify_vertical_surface()

@@ -27,6 +27,7 @@ class SurfaceComponent:
     face_indices: tuple
     reference_normal: Vector
     normal_weight: float
+    face_planes: tuple
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,25 @@ def build_surface_components(vertices, polygons):
             [remap[index] for index in valid_faces[face_index][1]]
             for face_index in face_set
         ]
+        face_planes = []
+        for polygon in component_polygons:
+            origin = component_vertices[polygon[0]]
+            normal = Vector((0.0, 0.0, 0.0))
+            for offset in range(1, len(polygon) - 1):
+                normal += (
+                    component_vertices[polygon[offset]] - origin
+                ).cross(component_vertices[polygon[offset + 1]] - origin)
+            if normal.length <= _AREA_EPSILON:
+                continue
+            normal.normalize()
+            edges = tuple(
+                (
+                    component_vertices[index],
+                    component_vertices[polygon[(offset + 1) % len(polygon)]],
+                )
+                for offset, index in enumerate(polygon)
+            )
+            face_planes.append((origin, normal, edges))
         normal_sum = Vector((0.0, 0.0, 0.0))
         normal_weight = 0.0
         for face_index in face_set:
@@ -155,6 +175,7 @@ def build_surface_components(vertices, polygons):
             face_indices=tuple(valid_faces[index][0] for index in face_set),
             reference_normal=reference_normal,
             normal_weight=max(normal_weight, _AREA_EPSILON),
+            face_planes=tuple(face_planes),
         ))
 
     return tuple(components)
@@ -178,6 +199,57 @@ def _closest_ray_hit(tree, point, direction):
             closest_location = location.copy()
             closest_distance_squared = distance_squared
     return closest_location, closest_distance_squared
+
+
+def _closest_point_on_segment(point, first, second):
+    edge = second - first
+    length_squared = edge.length_squared
+    if length_squared <= _AREA_EPSILON:
+        return first.copy()
+    factor = (point - first).dot(edge) / length_squared
+    factor = max(0.0, min(1.0, factor))
+    return first + edge * factor
+
+
+def _closest_edge_hit(component, point, direction):
+    """Clamp a directional plane hit to a finite target face edge.
+
+    BVH ray casts are intentionally strict about being inside a triangle.  A
+    projected point can instead land exactly on, or just outside, a finite
+    face boundary.  Intersect the same ray with each face plane and clamp the
+    plane hit to that face's boundary so those edge projections remain valid.
+    """
+    closest_location = None
+    closest_distance_squared = float('inf')
+    for origin, normal, edges in component.face_planes:
+        denominator = direction.dot(normal)
+        if abs(denominator) <= _RAY_EPSILON:
+            continue
+        travel = (origin - point).dot(normal) / denominator
+        plane_location = point + direction * travel
+        for first, second in edges:
+            location = _closest_point_on_segment(plane_location, first, second)
+            distance_squared = (location - point).length_squared
+            if distance_squared < closest_distance_squared:
+                closest_location = location.copy()
+                closest_distance_squared = distance_squared
+    return closest_location, closest_distance_squared
+
+
+def _closest_component_hit(component, point, direction):
+    face_location, face_distance_squared = _closest_ray_hit(
+        component.tree,
+        point,
+        direction,
+    )
+    edge_location, edge_distance_squared = _closest_edge_hit(
+        component,
+        point,
+        direction,
+    )
+    if edge_location is not None and edge_distance_squared < face_distance_squared:
+        return edge_location, edge_distance_squared
+    return face_location, face_distance_squared
 
 
 def project_points_coherently(points, components, direction):
@@ -244,8 +316,8 @@ def project_points_coherently(points, components, direction):
         for point in source_points:
             closest = None
             for component_index, component in enumerate(components):
-                location, distance_squared = _closest_ray_hit(
-                    component.tree,
+                location, distance_squared = _closest_component_hit(
+                    component,
                     point,
                     projection_direction,
                 )
