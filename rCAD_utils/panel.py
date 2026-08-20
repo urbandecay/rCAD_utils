@@ -133,3 +133,30 @@ class RCAD_PT_MirrorAlongPlane(bpy.types.Panel):
 
         row = box.row(align=True)
         row.operator("mesh.reflect_across_plane")
+
+
+class RCAD_PT_AxisEdgeHighlighter(bpy.types.Panel):
+    bl_label = "Axis Edge Highlighter"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "rCAD Utils"
+    bl_parent_id = "RCAD_PT_Main"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        box = layout.box()
+
+        axis_box = box.box()
+        header = axis_box.row(align=True)
+        header.label(text="Axis Edge Highlighter")
+        header.operator_context = 'INVOKE_DEFAULT'
+        header.operator("rcad.axis_edge_highlight_preferences", text="", icon='PREFERENCES')
+        axis_box.label(text="Select a mesh, then activate the highlight")
+        row = axis_box.row(align=True)
+        label = "Hide Axis Edges" if context.scene.rcad_axis_highlight_enabled else "Highlight Axis Edges"
+        row.operator("rcad.toggle_axis_edge_highlight", text=label, icon='MESH_DATA')
+        row.operator("rcad.clear_axis_edge_highlight", text="Clear", icon='X')
+        axis_box.prop(context.scene, "rcad_axis_highlight_tolerance", text="Tolerance")
+        axis_box.prop(context.scene, "rcad_axis_highlight_show_other", text="Show Other")
+        axis_box.label(text="X = red   Y = green   Z = blue")

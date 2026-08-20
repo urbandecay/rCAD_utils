@@ -24,6 +24,7 @@ from .mesh_tiler.preview import MESH_OT_MeshTilerPreview
 from . import weld_tools
 from . import vertex_resampler
 from . import projection
+from . import axis_edge_highlight
 import importlib
 _1d_tools = importlib.import_module(".1d_tools", package=__name__)
 from .mirror_along_plane import (
@@ -57,6 +58,7 @@ classes = [
     panel.RCAD_PT_CoolBool,
     panel.RCAD_PT_MeshTiler,
     panel.RCAD_PT_MirrorAlongPlane,
+    panel.RCAD_PT_AxisEdgeHighlighter,
 ]
 
 
@@ -68,6 +70,7 @@ def register():
     _1d_tools.register()
     vertex_resampler.register()
     projection.register()
+    axis_edge_highlight.register()
     bpy.types.Scene.profile_path_mode = BoolProperty(name="Path Mode", default=False)
     bpy.types.Scene.cool_bool_solver = bpy.props.EnumProperty(
         name="Solver",
@@ -77,6 +80,7 @@ def register():
 
 
 def unregister():
+    axis_edge_highlight.unregister()
     projection.unregister()
     vertex_resampler.unregister()
     _1d_tools.unregister()
