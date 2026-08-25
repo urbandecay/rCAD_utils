@@ -4,7 +4,7 @@ import math
 
 import bmesh
 import bpy
-from bpy.props import FloatProperty
+from bpy.props import EnumProperty, FloatProperty
 from bpy_extras import view3d_utils
 from mathutils import Vector
 
@@ -434,8 +434,8 @@ def _same_edit_island(obj, first_face_index, second_face_index):
     return any(face.index == second_face_index for face in first_faces)
 
 
-def _rotate_face_uvs(face, uv_layer):
-    """Rotate one face's UVs 90 degrees counter-clockwise around its center."""
+def _rotate_face_uvs(face, uv_layer, clockwise=False):
+    """Rotate one face's UVs 90 degrees around its center."""
     if uv_layer is None or not face.loops:
         return False
 
@@ -445,7 +445,10 @@ def _rotate_face_uvs(face, uv_layer):
     ))
     for loop in face.loops:
         offset = loop[uv_layer].uv - center
-        loop[uv_layer].uv = center + Vector((-offset.y, offset.x))
+        if clockwise:
+            loop[uv_layer].uv = center + Vector((offset.y, -offset.x))
+        else:
+            loop[uv_layer].uv = center + Vector((-offset.y, offset.x))
     return True
 
 
@@ -481,6 +484,15 @@ class MESH_OT_TextureSamplerRotateUV(bpy.types.Operator):
     bl_description = "Rotate the selected faces' UVs 90 degrees"
     bl_options = {'REGISTER', 'UNDO'}
 
+    direction: EnumProperty(
+        name="Direction",
+        items=(
+            ('CCW', "Counter-clockwise", "Rotate UVs counter-clockwise"),
+            ('CW', "Clockwise", "Rotate UVs clockwise"),
+        ),
+        default='CCW',
+    )
+
     def execute(self, context):
         if context.mode != 'EDIT_MESH':
             self.report({'ERROR'}, "Enter Edit Mode and select one or more faces first.")
@@ -493,7 +505,11 @@ class MESH_OT_TextureSamplerRotateUV(bpy.types.Operator):
             if uv_layer is None:
                 continue
             for face in bm.faces:
-                if face.select and _rotate_face_uvs(face, uv_layer):
+                if face.select and _rotate_face_uvs(
+                    face,
+                    uv_layer,
+                    clockwise=self.direction == 'CW',
+                ):
                     rotated_faces += 1
             bmesh.update_edit_mesh(obj.data)
 
@@ -501,7 +517,11 @@ class MESH_OT_TextureSamplerRotateUV(bpy.types.Operator):
             self.report({'WARNING'}, "Select one or more faces with UVs to rotate.")
             return {'CANCELLED'}
 
-        self.report({'INFO'}, f"Rotated UVs on {rotated_faces} face(s) by 90 degrees.")
+        direction_name = "clockwise" if self.direction == 'CW' else "counter-clockwise"
+        self.report(
+            {'INFO'},
+            f"Rotated UVs on {rotated_faces} face(s) 90 degrees {direction_name}.",
+        )
         return {'FINISHED'}
 
 
