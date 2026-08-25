@@ -602,7 +602,11 @@ class MESH_OT_TextureSampler(bpy.types.Operator):
             {'INFO'},
             f'Applied "{self._source_material.name}" to "{picked_object.name}".',
         )
-        return self._end(context, {'FINISHED'})
+        self._phase = 'TARGET'
+        if context.area is not None:
+            context.area.tag_redraw()
+        self.report({'INFO'}, "Click another target to apply the sampled texture, or Esc to finish.")
+        return {'RUNNING_MODAL'}
 
     def execute(self, context):
         # This keeps F3 and scripted invocation useful as well as the sidebar
