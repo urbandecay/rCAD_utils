@@ -190,7 +190,6 @@ class RCAD_PT_TextureSampler(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         box = layout.box()
-        box.label(text="Click source mesh, then target mesh")
         box.prop(context.scene, "rcad_texture_sampler_face_only", text="Apply Per Face")
         box.operator_context = 'INVOKE_DEFAULT'
         box.operator("mesh.texture_sampler", text="Pick & Apply", icon='EYEDROPPER')
