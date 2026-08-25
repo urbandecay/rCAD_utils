@@ -179,6 +179,22 @@ class RCAD_PT_MeshTiler(bpy.types.Panel):
         row.operator("mesh.mesh_tiler", text="Tile")
 
 
+class RCAD_PT_TextureSampler(bpy.types.Panel):
+    bl_label = "Texture Sampler"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "rCAD Utils"
+    bl_parent_id = "RCAD_PT_Main"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        box = layout.box()
+        box.label(text="Click source mesh, then target mesh")
+        box.operator_context = 'INVOKE_DEFAULT'
+        box.operator("mesh.texture_sampler", text="Pick & Apply", icon='EYEDROPPER')
+
+
 class RCAD_PT_MirrorAlongPlane(bpy.types.Panel):
     bl_label = "Mirror Across Plane"
     bl_space_type = "VIEW_3D"

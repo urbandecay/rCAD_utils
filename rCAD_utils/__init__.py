@@ -26,6 +26,7 @@ from . import vertex_resampler
 from . import projection
 from . import axis_edge_highlight
 from . import part_separator
+from .texture_sampler import MESH_OT_TextureSampler
 import importlib
 _1d_tools = importlib.import_module(".1d_tools", package=__name__)
 from .mirror_along_plane import (
@@ -49,6 +50,8 @@ classes = [
     # Mesh Tiler operators
     MESH_OT_MeshTiler,
     MESH_OT_MeshTilerPreview,
+    # Texture sampler operators
+    MESH_OT_TextureSampler,
     # Mirror Across Plane operators
     MESH_OT_store_plane_vertices,
     MESH_OT_point_reflection,
@@ -59,6 +62,7 @@ classes = [
     panel.RCAD_PT_PlaceProfile,
     panel.RCAD_PT_CoolBool,
     panel.RCAD_PT_MeshTiler,
+    panel.RCAD_PT_TextureSampler,
     panel.RCAD_PT_MirrorAlongPlane,
     panel.RCAD_PT_AxisEdgeHighlighter,
     panel.RCAD_PT_PartSeparator,
