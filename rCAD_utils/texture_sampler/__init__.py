@@ -346,7 +346,15 @@ def _unwrap_target_component(
 
     # Re-fetch the edit mesh after Blender's UV operator has rebuilt its data.
     bm = bmesh.from_edit_mesh(target.data)
-    mapped_faces = _connected_edit_faces(bm, face_index)
+    if face_only:
+        bm.faces.ensure_lookup_table()
+        mapped_faces = (
+            [bm.faces[face_index]]
+            if 0 <= face_index < len(bm.faces)
+            else []
+        )
+    else:
+        mapped_faces = _connected_edit_faces(bm, face_index)
     uv_layer = _uv_layer_for_material(bm, material)
     if not mapped_faces or uv_layer is None:
         raise RuntimeError("The target UV map was not available after unwrapping.")
