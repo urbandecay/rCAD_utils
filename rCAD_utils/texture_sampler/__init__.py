@@ -4,7 +4,7 @@ import math
 
 import bmesh
 import bpy
-from bpy.props import EnumProperty, FloatProperty
+from bpy.props import FloatProperty
 from bpy_extras import view3d_utils
 from mathutils import Vector
 
@@ -434,8 +434,8 @@ def _same_edit_island(obj, first_face_index, second_face_index):
     return any(face.index == second_face_index for face in first_faces)
 
 
-def _rotate_face_uvs(face, uv_layer, clockwise=False):
-    """Rotate one face's UVs 90 degrees around its center."""
+def _rotate_face_uvs(face, uv_layer, angle):
+    """Rotate one face's UVs by an angle around its center."""
     if uv_layer is None or not face.loops:
         return False
 
@@ -443,12 +443,14 @@ def _rotate_face_uvs(face, uv_layer, clockwise=False):
         sum(loop[uv_layer].uv.x for loop in face.loops) / len(face.loops),
         sum(loop[uv_layer].uv.y for loop in face.loops) / len(face.loops),
     ))
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
     for loop in face.loops:
         offset = loop[uv_layer].uv - center
-        if clockwise:
-            loop[uv_layer].uv = center + Vector((offset.y, -offset.x))
-        else:
-            loop[uv_layer].uv = center + Vector((-offset.y, offset.x))
+        loop[uv_layer].uv = center + Vector((
+            cosine * offset.x - sine * offset.y,
+            sine * offset.x + cosine * offset.y,
+        ))
     return True
 
 
@@ -484,14 +486,18 @@ class MESH_OT_TextureSamplerRotateUV(bpy.types.Operator):
     bl_description = "Rotate the selected faces' UVs 90 degrees"
     bl_options = {'REGISTER', 'UNDO'}
 
-    direction: EnumProperty(
-        name="Direction",
-        items=(
-            ('CCW', "Counter-clockwise", "Rotate UVs counter-clockwise"),
-            ('CW', "Clockwise", "Rotate UVs clockwise"),
-        ),
-        default='CCW',
+    angle_degrees: FloatProperty(
+        name="Angle",
+        description="Rotate selected UVs by this many degrees",
+        default=90.0,
+        min=-360.0,
+        max=360.0,
+        soft_min=-180.0,
+        soft_max=180.0,
     )
+
+    def draw(self, context):
+        self.layout.prop(self, "angle_degrees", text="Angle", slider=True)
 
     def execute(self, context):
         if context.mode != 'EDIT_MESH':
@@ -505,11 +511,7 @@ class MESH_OT_TextureSamplerRotateUV(bpy.types.Operator):
             if uv_layer is None:
                 continue
             for face in bm.faces:
-                if face.select and _rotate_face_uvs(
-                    face,
-                    uv_layer,
-                    clockwise=self.direction == 'CW',
-                ):
+                if face.select and _rotate_face_uvs(face, uv_layer, math.radians(self.angle_degrees)):
                     rotated_faces += 1
             bmesh.update_edit_mesh(obj.data)
 
@@ -517,10 +519,9 @@ class MESH_OT_TextureSamplerRotateUV(bpy.types.Operator):
             self.report({'WARNING'}, "Select one or more faces with UVs to rotate.")
             return {'CANCELLED'}
 
-        direction_name = "clockwise" if self.direction == 'CW' else "counter-clockwise"
         self.report(
             {'INFO'},
-            f"Rotated UVs on {rotated_faces} face(s) 90 degrees {direction_name}.",
+            f"Rotated UVs on {rotated_faces} face(s) by {self.angle_degrees:.1f} degrees.",
         )
         return {'FINISHED'}
 

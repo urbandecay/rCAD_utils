@@ -200,13 +200,13 @@ class RCAD_PT_TextureSampler(bpy.types.Panel):
             text="",
             icon='LOOP_FORWARDS',
         )
-        clockwise.direction = 'CW'
+        clockwise.angle_degrees = -90.0
         counter_clockwise = rotate_row.operator(
             "mesh.texture_sampler_rotate_uv",
             text="",
             icon='LOOP_BACK',
         )
-        counter_clockwise.direction = 'CCW'
+        counter_clockwise.angle_degrees = 90.0
         box.operator_context = 'EXEC_DEFAULT'
         box.operator("mesh.texture_sampler_scale_uv", text="Scale UVs")
 
