@@ -1,10 +1,11 @@
 """Pick a mesh material in the viewport and apply it to another mesh."""
 
 import math
+import random
 
 import bmesh
 import bpy
-from bpy.props import FloatProperty
+from bpy.props import BoolProperty, FloatProperty
 from bpy_extras import view3d_utils
 from mathutils import Vector
 
@@ -611,10 +612,23 @@ class MESH_OT_TextureSamplerMoveUV(bpy.types.Operator):
         soft_min=-1.0,
         soft_max=1.0,
     )
+    randomize: BoolProperty(
+        name="Random",
+        description="Generate new random X and Y offsets",
+        default=False,
+    )
 
     def draw(self, context):
         self.layout.prop(self, "offset_x", slider=True)
         self.layout.prop(self, "offset_y", slider=True)
+        self.layout.prop(self, "randomize", text="Random", toggle=True)
+
+    def invoke(self, context, event):
+        # Do not inherit the Random toggle from the previous Move UVs action.
+        self.offset_x = 0.0
+        self.offset_y = 0.0
+        self.randomize = False
+        return self.execute(context)
 
     def execute(self, context):
         if context.mode != 'EDIT_MESH':
@@ -623,6 +637,11 @@ class MESH_OT_TextureSamplerMoveUV(bpy.types.Operator):
         if _selected_uv_face_count(context) == 0:
             self.report({'WARNING'}, "Select one or more faces with UVs to move.")
             return {'CANCELLED'}
+
+        if self.randomize:
+            self.offset_x = random.uniform(-1.0, 1.0)
+            self.offset_y = random.uniform(-1.0, 1.0)
+            self.randomize = False
 
         moved_faces = 0
         offset = Vector((self.offset_x, self.offset_y))

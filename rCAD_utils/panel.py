@@ -195,6 +195,7 @@ class RCAD_PT_TextureSampler(bpy.types.Panel):
         box.operator("mesh.texture_sampler", text="Pick & Apply", icon='EYEDROPPER')
         box.operator_context = 'EXEC_DEFAULT'
         rotate_row = box.row(align=True)
+        rotate_row.alignment = 'CENTER'
         clockwise = rotate_row.operator(
             "mesh.texture_sampler_rotate_uv",
             text="",
@@ -209,6 +210,7 @@ class RCAD_PT_TextureSampler(bpy.types.Panel):
         counter_clockwise.angle_degrees = 90.0
         box.operator_context = 'EXEC_DEFAULT'
         box.operator("mesh.texture_sampler_scale_uv", text="Scale UVs")
+        box.operator_context = 'INVOKE_DEFAULT'
         box.operator("mesh.texture_sampler_move_uv", text="Move UVs")
 
 
