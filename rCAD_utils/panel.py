@@ -1,4 +1,68 @@
+import importlib
+import sys
+import traceback
+
 import bpy
+
+
+_reload_pending = False
+
+
+def _reload_rCAD_utils_timer():
+    """Reload the complete package after the reload button returns."""
+    global _reload_pending
+    _reload_pending = False
+
+    package_name = __package__.split('.')[0]
+    old_package = sys.modules.get(package_name)
+    if old_package is None:
+        print(f"rCAD Utils reload failed: {package_name!r} is not loaded")
+        return None
+
+    addon_enabled = getattr(old_package, "__addon_enabled__", False)
+    addon_persistent = getattr(old_package, "__addon_persistent__", False)
+
+    try:
+        old_package.unregister()
+        package_modules = [
+            name for name in tuple(sys.modules)
+            if name == package_name or name.startswith(package_name + ".")
+        ]
+        for name in sorted(
+            package_modules,
+            key=lambda item: (item.count('.'), item),
+            reverse=True,
+        ):
+            sys.modules.pop(name, None)
+
+        importlib.invalidate_caches()
+        new_package = importlib.import_module(package_name)
+        new_package.register()
+        new_package.__addon_enabled__ = addon_enabled
+        new_package.__addon_persistent__ = addon_persistent
+        print("rCAD Utils reloaded")
+    except Exception:
+        traceback.print_exc()
+
+    return None
+
+
+class RCAD_OT_ReloadAddon(bpy.types.Operator):
+    bl_idname = "wm.rcad_reload_addon"
+    bl_label = "Reload rCAD Utils"
+    bl_description = "Reload rCAD Utils without restarting Blender or saving the file"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        global _reload_pending
+        if _reload_pending:
+            self.report({'WARNING'}, "rCAD Utils reload is already pending.")
+            return {'CANCELLED'}
+
+        _reload_pending = True
+        bpy.app.timers.register(_reload_rCAD_utils_timer, first_interval=0.1)
+        self.report({'INFO'}, "rCAD Utils will reload after this operation finishes.")
+        return {'FINISHED'}
 
 
 class RCAD_PT_Main(bpy.types.Panel):
@@ -177,3 +241,18 @@ class RCAD_PT_PartSeparator(bpy.types.Panel):
         box.operator("mesh.rcad_separate_parts", text="Separate 2x4 Islands")
         box.operator("mesh.rcad_mark_part_ids", text="Mark IDs for Future Edits")
         box.label(text="Keeps all parts inside one object.")
+
+
+class RCAD_PT_AddonDevelopment(bpy.types.Panel):
+    bl_label = "Addon Development"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "rCAD Utils"
+    bl_parent_id = "RCAD_PT_Main"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        box = layout.box()
+        box.label(text="Reload the complete rCAD Utils addon")
+        box.operator("wm.rcad_reload_addon", text="Reload rCAD Utils", icon='FILE_REFRESH')

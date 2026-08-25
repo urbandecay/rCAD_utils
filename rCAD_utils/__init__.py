@@ -54,6 +54,7 @@ classes = [
     MESH_OT_point_reflection,
     # Container panels
     panel.RCAD_PT_Main,
+    panel.RCAD_OT_ReloadAddon,
     panel.RCAD_PT_ExtrudeAlongPath,
     panel.RCAD_PT_PlaceProfile,
     panel.RCAD_PT_CoolBool,
@@ -61,6 +62,7 @@ classes = [
     panel.RCAD_PT_MirrorAlongPlane,
     panel.RCAD_PT_AxisEdgeHighlighter,
     panel.RCAD_PT_PartSeparator,
+    panel.RCAD_PT_AddonDevelopment,
 ]
 
 
