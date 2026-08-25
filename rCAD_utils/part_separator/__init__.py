@@ -19,7 +19,7 @@ without provenance.  See the operator descriptions for that boundary.
 """
 
 from collections import defaultdict, deque
-from math import isfinite
+from math import isfinite, radians
 
 import bmesh
 import bpy
@@ -687,6 +687,24 @@ def _copy_part_mesh(source_bm, source_mesh, face_indices, part_id, mesh_name):
     return part_mesh
 
 
+def _limited_dissolve_mesh(mesh):
+    """Apply Blender's default five-degree limited dissolve to one mesh."""
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    if bm.edges:
+        bmesh.ops.dissolve_limit(
+            bm,
+            angle_limit=radians(5.0),
+            use_dissolve_boundaries=False,
+            verts=list(bm.verts),
+            edges=list(bm.edges),
+        )
+        bm.normal_update()
+        bm.to_mesh(mesh)
+    bm.free()
+    mesh.update()
+
+
 def _selection_for_edit_object(context, obj, selected_only=False):
     """Return the complete mesh or the edge-connected selected regions.
 
@@ -766,7 +784,7 @@ def _join_part_objects(context, source_obj, part_objects):
     bpy.ops.object.join()
 
 
-def _replace_with_parts(context, obj, groups):
+def _replace_with_parts(context, obj, groups, dissolve_affected=False):
     """Keep one object and make one disconnected island per face group."""
     source_mesh = obj.data
     source_bm = bmesh.new()
@@ -789,6 +807,8 @@ def _replace_with_parts(context, obj, groups):
             part_index,
             f"{base_name}_part_{part_index + 1:03d}",
         )
+        if dissolve_affected:
+            _limited_dissolve_mesh(part_mesh)
 
         if part_index == 0:
             obj.data = part_mesh
@@ -833,7 +853,7 @@ def _prism_mesh(source_mesh, cell, part_id, mesh_name):
     return mesh
 
 
-def _replace_with_prism_cells(context, obj, cells):
+def _replace_with_prism_cells(context, obj, cells, dissolve_affected=False):
     """Rebuild closed prisms as disconnected islands inside one object."""
     source_mesh = obj.data
     base_name = obj.name
@@ -845,6 +865,8 @@ def _replace_with_prism_cells(context, obj, cells):
             part_index,
             f"{base_name}_part_{part_index + 1:03d}",
         )
+        if dissolve_affected:
+            _limited_dissolve_mesh(part_mesh)
         if part_index == 0:
             obj.data = part_mesh
             obj.name = base_name
@@ -867,7 +889,13 @@ def _remove_part_attribute(mesh):
     mesh.pop(PART_ATTRIBUTE + "_source", None)
 
 
-def _replace_selected_regions(context, obj, selected_face_indices, part_specs):
+def _replace_selected_regions(
+    context,
+    obj,
+    selected_face_indices,
+    part_specs,
+    dissolve_affected=False,
+):
     """Rebuild selected regions and preserve all other geometry in one object."""
     if not part_specs:
         return [obj], 0, False
@@ -911,6 +939,8 @@ def _replace_selected_regions(context, obj, selected_face_indices, part_specs):
                 part_index,
                 mesh_name,
             )
+        if dissolve_affected:
+            _limited_dissolve_mesh(part_mesh)
 
         if not output_objects:
             obj.data = part_mesh
@@ -996,6 +1026,9 @@ class MESH_OT_rcad_separate_parts(bpy.types.Operator):
 
     def execute(self, context):
         was_edit = context.mode == 'EDIT_MESH'
+        dissolve_affected = bool(
+            getattr(context.scene, 'rcad_separator_dissolve', False)
+        )
         targets, error = _targets_from_context(
             context,
             selected_only=was_edit,
@@ -1045,6 +1078,7 @@ class MESH_OT_rcad_separate_parts(bpy.types.Operator):
                         context,
                         obj,
                         prism_cells,
+                        dissolve_affected=dissolve_affected,
                     )
                     label = "fused rectangular-prism cells"
                 else:
@@ -1052,6 +1086,7 @@ class MESH_OT_rcad_separate_parts(bpy.types.Operator):
                         context,
                         obj,
                         groups,
+                        dissolve_affected=dissolve_affected,
                     )
 
                 if len(groups) == 1 and len(prism_cells) <= 1 and self.strategy != 'TAGGED':
@@ -1111,6 +1146,7 @@ class MESH_OT_rcad_separate_parts(bpy.types.Operator):
                 obj,
                 face_indices,
                 part_specs,
+                dissolve_affected=dissolve_affected,
             )
             if object_unresolved:
                 unresolved_objects += 1

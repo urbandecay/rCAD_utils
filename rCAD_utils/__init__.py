@@ -82,6 +82,11 @@ def register():
         items=[('FLOAT', "Fast", ""), ('EXACT', "Exact", ""), ('MANIFOLD', "Manifold", "")],
         default='EXACT'
     )
+    bpy.types.Scene.rcad_separator_dissolve = BoolProperty(
+        name="Limited Dissolve Affected Geometry",
+        description="Apply Blender's five-degree limited dissolve to rebuilt separator geometry",
+        default=False,
+    )
 
 
 def unregister():
@@ -99,6 +104,8 @@ def unregister():
         del bpy.types.Scene.profile_path_mode
     if hasattr(bpy.types.Scene, "cool_bool_solver"):
         del bpy.types.Scene.cool_bool_solver
+    if hasattr(bpy.types.Scene, "rcad_separator_dissolve"):
+        del bpy.types.Scene.rcad_separator_dissolve
 
 
 if __name__ == "__main__":

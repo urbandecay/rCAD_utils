@@ -237,11 +237,13 @@ class RCAD_PT_PartSeparator(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         box = layout.box()
-        box.label(text="Recover welded boards")
         box.operator("mesh.rcad_separate_parts", text="Separate 2x4 Islands")
+        box.prop(
+            context.scene,
+            "rcad_separator_dissolve",
+            text="Limited Dissolve",
+        )
         box.operator("mesh.rcad_mark_part_ids", text="Mark IDs for Future Edits")
-        box.label(text="Keeps all parts inside one object.")
-        box.label(text="Edit Mode: selected regions only.")
 
 
 class RCAD_PT_AddonDevelopment(bpy.types.Panel):
