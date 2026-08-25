@@ -56,6 +56,17 @@ def _view_window_region(context, event):
     return None, None, None
 
 
+def _event_in_ui_region(context, event):
+    """Check whether a modal event is physically over the sidebar region."""
+    area = context.area
+    if area is None or area.type != 'VIEW_3D':
+        return False
+    return any(
+        region.type == 'UI' and _region_mouse_coord(area, region, event) is not None
+        for region in area.regions
+    )
+
+
 def _mouse_ray(context, event):
     region, region_3d, coord = _view_window_region(context, event)
     if region is None:
@@ -422,6 +433,53 @@ def _same_edit_island(obj, first_face_index, second_face_index):
     return any(face.index == second_face_index for face in first_faces)
 
 
+def _rotate_face_uvs(face, uv_layer):
+    """Rotate one face's UVs 90 degrees counter-clockwise around its center."""
+    if uv_layer is None or not face.loops:
+        return False
+
+    center = Vector((
+        sum(loop[uv_layer].uv.x for loop in face.loops) / len(face.loops),
+        sum(loop[uv_layer].uv.y for loop in face.loops) / len(face.loops),
+    ))
+    for loop in face.loops:
+        offset = loop[uv_layer].uv - center
+        loop[uv_layer].uv = center + Vector((-offset.y, offset.x))
+    return True
+
+
+class MESH_OT_TextureSamplerRotateUV(bpy.types.Operator):
+    """Rotate the selected Edit Mode faces' active UVs by 90 degrees."""
+
+    bl_idname = "mesh.texture_sampler_rotate_uv"
+    bl_label = "Rotate UV 90 Degrees"
+    bl_description = "Rotate the selected faces' UVs 90 degrees"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        if context.mode != 'EDIT_MESH':
+            self.report({'ERROR'}, "Enter Edit Mode and select one or more faces first.")
+            return {'CANCELLED'}
+
+        rotated_faces = 0
+        for obj in _edit_objects(context):
+            bm = bmesh.from_edit_mesh(obj.data)
+            uv_layer = bm.loops.layers.uv.active
+            if uv_layer is None:
+                continue
+            for face in bm.faces:
+                if face.select and _rotate_face_uvs(face, uv_layer):
+                    rotated_faces += 1
+            bmesh.update_edit_mesh(obj.data)
+
+        if rotated_faces == 0:
+            self.report({'WARNING'}, "Select one or more faces with UVs to rotate.")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, f"Rotated UVs on {rotated_faces} face(s) by 90 degrees.")
+        return {'FINISHED'}
+
+
 class MESH_OT_TextureSampler(bpy.types.Operator):
     """Pick a face material, then apply it to a second mesh."""
 
@@ -526,6 +584,9 @@ class MESH_OT_TextureSampler(bpy.types.Operator):
             self._refresh_cursor()
             return {'RUNNING_MODAL'}
 
+        if _event_in_ui_region(context, event):
+            return {'PASS_THROUGH'}
+
         if event.type != 'LEFTMOUSE' or event.value != 'PRESS':
             return {'PASS_THROUGH'}
 
@@ -614,4 +675,4 @@ class MESH_OT_TextureSampler(bpy.types.Operator):
         return self.invoke(context, None)
 
 
-classes = (MESH_OT_TextureSampler,)
+classes = (MESH_OT_TextureSamplerRotateUV, MESH_OT_TextureSampler,)

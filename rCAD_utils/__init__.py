@@ -26,7 +26,7 @@ from . import vertex_resampler
 from . import projection
 from . import axis_edge_highlight
 from . import part_separator
-from .texture_sampler import MESH_OT_TextureSampler
+from .texture_sampler import MESH_OT_TextureSampler, MESH_OT_TextureSamplerRotateUV
 import importlib
 _1d_tools = importlib.import_module(".1d_tools", package=__name__)
 from .mirror_along_plane import (
@@ -51,6 +51,7 @@ classes = [
     MESH_OT_MeshTiler,
     MESH_OT_MeshTilerPreview,
     # Texture sampler operators
+    MESH_OT_TextureSamplerRotateUV,
     MESH_OT_TextureSampler,
     # Mirror Across Plane operators
     MESH_OT_store_plane_vertices,
