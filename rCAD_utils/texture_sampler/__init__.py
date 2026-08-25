@@ -277,13 +277,22 @@ def _unwrap_target_component(
     material,
     source_object,
     source_face_index,
+    face_only=False,
 ):
     """Unwrap the clicked target island and match the source UV density."""
     if target.mode != 'EDIT':
         return False
 
     bm = bmesh.from_edit_mesh(target.data)
-    target_faces = _connected_edit_faces(bm, face_index)
+    if face_only:
+        bm.faces.ensure_lookup_table()
+        target_faces = (
+            [bm.faces[face_index]]
+            if 0 <= face_index < len(bm.faces)
+            else []
+        )
+    else:
+        target_faces = _connected_edit_faces(bm, face_index)
     if not target_faces:
         raise RuntimeError("The clicked target face could not be found for UV mapping.")
 
@@ -362,7 +371,7 @@ def _unwrap_target_component(
     return True
 
 
-def _apply_material(target, material, face_index=None):
+def _apply_material(target, material, face_index=None, face_only=False):
     """Assign material to the target object or clicked edit-mode island."""
     mesh = target.data
     slot_index = _material_slot(mesh, material)
@@ -372,14 +381,27 @@ def _apply_material(target, material, face_index=None):
 
     if target.mode == 'EDIT':
         bm = bmesh.from_edit_mesh(mesh)
-        faces = _connected_edit_faces(bm, face_index)
+        if face_only:
+            bm.faces.ensure_lookup_table()
+            faces = (
+                [bm.faces[face_index]]
+                if 0 <= face_index < len(bm.faces)
+                else []
+            )
+        else:
+            faces = _connected_edit_faces(bm, face_index)
         if not faces:
             raise RuntimeError("The clicked edit-mode face could not be identified.")
         for face in faces:
             face.material_index = slot_index
         bmesh.update_edit_mesh(mesh, destructive=True)
     else:
-        for polygon in mesh.polygons:
+        polygons = (
+            [mesh.polygons[face_index]]
+            if face_only and face_index is not None and 0 <= face_index < len(mesh.polygons)
+            else mesh.polygons
+        )
+        for polygon in polygons:
             polygon.material_index = slot_index
     target.active_material_index = slot_index
     mesh.update()
@@ -481,6 +503,7 @@ class MESH_OT_TextureSampler(bpy.types.Operator):
         self._source_object = None
         self._source_material = None
         self._source_face_index = -1
+        self._face_only = getattr(context.scene, "rcad_texture_sampler_face_only", False)
         self._phase = 'SOURCE'
         self._set_cursor('EYEDROPPER')
         context.window_manager.modal_handler_add(self)
@@ -523,11 +546,18 @@ class MESH_OT_TextureSampler(bpy.types.Operator):
             return {'RUNNING_MODAL'}
 
         if picked_object == self._source_object:
-            if picked_object.mode != 'EDIT' or _same_edit_island(
-                picked_object,
-                self._source_face_index,
-                _face_index,
-            ):
+            if self._face_only:
+                same_target = self._source_face_index == _face_index
+            else:
+                same_target = (
+                    picked_object.mode != 'EDIT'
+                    or _same_edit_island(
+                        picked_object,
+                        self._source_face_index,
+                        _face_index,
+                    )
+                )
+            if same_target:
                 self.report({'WARNING'}, "Choose a different mesh island for the target.")
                 return {'RUNNING_MODAL'}
         elif picked_object.data == self._source_object.data:
@@ -544,12 +574,18 @@ class MESH_OT_TextureSampler(bpy.types.Operator):
                         self._source_material,
                         self._source_object,
                         self._source_face_index,
+                        self._face_only,
                     )
                 except (RuntimeError, TypeError, ValueError) as error:
                     self.report({'WARNING'}, f"Material applied, but UVs were not updated: {error}")
 
             target_face_index = _face_index if picked_object.mode == 'EDIT' else None
-            _apply_material(picked_object, self._source_material, target_face_index)
+            _apply_material(
+                picked_object,
+                self._source_material,
+                target_face_index,
+                self._face_only,
+            )
         except (RuntimeError, TypeError, ValueError) as error:
             self.report({'ERROR'}, f"Could not apply the material: {error}")
             return {'RUNNING_MODAL'}

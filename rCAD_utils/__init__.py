@@ -91,6 +91,11 @@ def register():
         description="Apply Blender's five-degree limited dissolve to rebuilt separator geometry",
         default=False,
     )
+    bpy.types.Scene.rcad_texture_sampler_face_only = BoolProperty(
+        name="Apply Per Face",
+        description="Apply the sampled material and UV scale only to the clicked face",
+        default=False,
+    )
 
 
 def unregister():
@@ -110,6 +115,8 @@ def unregister():
         del bpy.types.Scene.cool_bool_solver
     if hasattr(bpy.types.Scene, "rcad_separator_dissolve"):
         del bpy.types.Scene.rcad_separator_dissolve
+    if hasattr(bpy.types.Scene, "rcad_texture_sampler_face_only"):
+        del bpy.types.Scene.rcad_texture_sampler_face_only
 
 
 if __name__ == "__main__":
