@@ -25,6 +25,7 @@ from . import weld_tools
 from . import vertex_resampler
 from . import projection
 from . import axis_edge_highlight
+from . import part_separator
 import importlib
 _1d_tools = importlib.import_module(".1d_tools", package=__name__)
 from .mirror_along_plane import (
@@ -59,6 +60,7 @@ classes = [
     panel.RCAD_PT_MeshTiler,
     panel.RCAD_PT_MirrorAlongPlane,
     panel.RCAD_PT_AxisEdgeHighlighter,
+    panel.RCAD_PT_PartSeparator,
 ]
 
 
@@ -71,6 +73,7 @@ def register():
     vertex_resampler.register()
     projection.register()
     axis_edge_highlight.register()
+    part_separator.register()
     bpy.types.Scene.profile_path_mode = BoolProperty(name="Path Mode", default=False)
     bpy.types.Scene.cool_bool_solver = bpy.props.EnumProperty(
         name="Solver",
@@ -81,6 +84,7 @@ def register():
 
 def unregister():
     axis_edge_highlight.unregister()
+    part_separator.unregister()
     projection.unregister()
     vertex_resampler.unregister()
     _1d_tools.unregister()

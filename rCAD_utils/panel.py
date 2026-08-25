@@ -160,3 +160,20 @@ class RCAD_PT_AxisEdgeHighlighter(bpy.types.Panel):
         axis_box.prop(context.scene, "rcad_axis_highlight_tolerance", text="Tolerance")
         axis_box.prop(context.scene, "rcad_axis_highlight_show_other", text="Show Other")
         axis_box.label(text="X = red   Y = green   Z = blue")
+
+
+class RCAD_PT_PartSeparator(bpy.types.Panel):
+    bl_label = "Part Separator"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "rCAD Utils"
+    bl_parent_id = "RCAD_PT_Main"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        box = layout.box()
+        box.label(text="Recover welded boards")
+        box.operator("mesh.rcad_separate_parts", text="Separate 2x4 Islands")
+        box.operator("mesh.rcad_mark_part_ids", text="Mark IDs for Future Edits")
+        box.label(text="Keeps all parts inside one object.")
