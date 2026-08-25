@@ -16,6 +16,11 @@ Detection is attempted in this order:
 The result is one Blender object containing disconnected mesh islands. The
 operator does not leave one Blender object per board.
 
+In Edit Mode, selecting any vertex, edge, or face chooses its complete
+edge-connected mesh region. Only those selected regions are rebuilt; all
+disconnected unselected geometry in the object is preserved unchanged. Object
+Mode continues to process every selected mesh object in full.
+
 This covers endpoint, corner, T, L, stacked, face-to-face, and multiple-board
 welds when either the original board faces or the cross-section seam loops
 still exist. If a cleanup operation also dissolves every seam loop, the final

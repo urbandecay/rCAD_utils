@@ -687,28 +687,57 @@ def _copy_part_mesh(source_bm, source_mesh, face_indices, part_id, mesh_name):
     return part_mesh
 
 
-def _selection_for_edit_object(context, obj):
-    """Return the complete active mesh used for solid reconstruction.
+def _selection_for_edit_object(context, obj, selected_only=False):
+    """Return the complete mesh or the edge-connected selected regions.
 
-    A fused 2x4 assembly is one manifold island.  Reconstructing its internal
-    cells requires the complete shell, and Blender's face-selection flags are
-    unreliable when the user is in vertex or edge mode.  Edit Mode therefore
-    processes the entire active mesh object, matching Object Mode semantics.
+    Detection needs every face of a fused board assembly, even if the user
+    started from one selected vertex, edge, or face.  In selection-only mode
+    the selection is therefore expanded to complete edge-connected regions.
+    Disconnected, unselected regions in the same object are left untouched.
     """
     bm = bmesh.from_edit_mesh(obj.data)
     _ensure_face_indices(bm)
     if not bm.faces:
         return None, "The active mesh has no faces to separate."
-    return list(range(len(bm.faces))), None
+
+    if not selected_only:
+        return list(range(len(bm.faces))), None
+
+    seeds = {
+        face for face in bm.faces
+        if not face.hide and (
+            face.select
+            or any(edge.select for edge in face.edges)
+            or any(vertex.select for vertex in face.verts)
+        )
+    }
+    if not seeds:
+        return None, "Select at least one mesh element to separate."
+
+    selected_regions = set(seeds)
+    queue = deque(seeds)
+    while queue:
+        face = queue.popleft()
+        for edge in face.edges:
+            for neighbor in edge.link_faces:
+                if neighbor not in selected_regions:
+                    selected_regions.add(neighbor)
+                    queue.append(neighbor)
+
+    return sorted(face.index for face in selected_regions), None
 
 
-def _targets_from_context(context):
+def _targets_from_context(context, selected_only=False):
     """Return ``[(object, face_indices)]`` and an optional error message."""
     if context.mode == 'EDIT_MESH':
         obj = context.edit_object
         if not obj or obj.type != 'MESH':
             return [], "Active edit object must be a mesh."
-        face_indices, error = _selection_for_edit_object(context, obj)
+        face_indices, error = _selection_for_edit_object(
+            context,
+            obj,
+            selected_only=selected_only,
+        )
         if error:
             return [], error
         return [(obj, face_indices)], None
@@ -830,6 +859,76 @@ def _replace_with_prism_cells(context, obj, cells):
     return [obj], len(part_objects), len(part_objects) > 1
 
 
+def _remove_part_attribute(mesh):
+    """Keep an untouched remainder from inheriting generated ownership IDs."""
+    attribute = mesh.attributes.get(PART_ATTRIBUTE)
+    if attribute is not None:
+        mesh.attributes.remove(attribute)
+    mesh.pop(PART_ATTRIBUTE + "_source", None)
+
+
+def _replace_selected_regions(context, obj, selected_face_indices, part_specs):
+    """Rebuild selected regions and preserve all other geometry in one object."""
+    if not part_specs:
+        return [obj], 0, False
+
+    source_mesh = obj.data
+    source_bm = bmesh.new()
+    source_bm.from_mesh(source_mesh)
+    _ensure_face_indices(source_bm)
+
+    selected_faces = {int(index) for index in selected_face_indices}
+    remainder_faces = sorted(set(range(len(source_mesh.polygons))) - selected_faces)
+    base_name = obj.name
+    output_objects = []
+
+    if remainder_faces:
+        remainder_mesh = _copy_part_mesh(
+            source_bm,
+            source_mesh,
+            remainder_faces,
+            -1,
+            f"{base_name}_unselected",
+        )
+        _remove_part_attribute(remainder_mesh)
+        obj.data = remainder_mesh
+        output_objects.append(obj)
+
+    for part_index, (kind, payload) in enumerate(part_specs):
+        mesh_name = f"{base_name}_selected_{part_index + 1:03d}"
+        if kind == 'CELL':
+            part_mesh = _prism_mesh(
+                source_mesh,
+                payload,
+                part_index,
+                mesh_name,
+            )
+        else:
+            part_mesh = _copy_part_mesh(
+                source_bm,
+                source_mesh,
+                payload,
+                part_index,
+                mesh_name,
+            )
+
+        if not output_objects:
+            obj.data = part_mesh
+            output_objects.append(obj)
+            continue
+
+        part_obj = obj.copy()
+        part_obj.data = part_mesh
+        part_obj.name = mesh_name
+        _link_like_source(context, obj, part_obj)
+        output_objects.append(part_obj)
+
+    source_bm.free()
+    if len(output_objects) > 1:
+        _join_part_objects(context, obj, output_objects)
+    return [obj], len(part_specs), True
+
+
 class MESH_OT_rcad_mark_part_ids(bpy.types.Operator):
     """Store a face-level identity for each currently recoverable part."""
 
@@ -878,7 +977,8 @@ class MESH_OT_rcad_separate_parts(bpy.types.Operator):
     bl_label = "Separate 2x4 Islands"
     bl_description = (
         "Separate face-tagged parts, welded shells, and fully fused rectangular "
-        "2x4 cells recognized from their end cross-section seams"
+        "2x4 cells recognized from their end cross-section seams; Edit Mode "
+        "changes only selected mesh regions"
     )
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -895,12 +995,15 @@ class MESH_OT_rcad_separate_parts(bpy.types.Operator):
     )
 
     def execute(self, context):
-        targets, error = _targets_from_context(context)
+        was_edit = context.mode == 'EDIT_MESH'
+        targets, error = _targets_from_context(
+            context,
+            selected_only=was_edit,
+        )
         if error:
             self.report({'ERROR'}, error)
             return {'CANCELLED'}
 
-        was_edit = context.mode == 'EDIT_MESH'
         if was_edit:
             bpy.ops.object.mode_set(mode='OBJECT')
 
@@ -916,26 +1019,104 @@ class MESH_OT_rcad_separate_parts(bpy.types.Operator):
                 continue
             bm = bmesh.new()
             bm.from_mesh(obj.data)
-            groups, label = _groups_for_strategy(bm, obj.data, face_indices, self.strategy)
-            prism_cells = []
-            if self.strategy in {'AUTO', 'MANIFOLD'} and len(groups) == 1:
-                prism_cells = _recognize_fused_prism_cells(bm, face_indices)
-            bm.free()
-            if not groups:
-                self.report({'WARNING'}, f"{obj.name}: no parts detected ({label}).")
+            all_face_indices = set(range(len(obj.data.polygons)))
+            selected_face_indices = {int(index) for index in face_indices}
+
+            # Object Mode and a complete Edit Mode selection use the original
+            # separator path verbatim.  This keeps the proven full-object
+            # behavior unchanged.
+            if not was_edit or selected_face_indices == all_face_indices:
+                groups, label = _groups_for_strategy(
+                    bm,
+                    obj.data,
+                    face_indices,
+                    self.strategy,
+                )
+                prism_cells = []
+                if self.strategy in {'AUTO', 'MANIFOLD'} and len(groups) == 1:
+                    prism_cells = _recognize_fused_prism_cells(bm, face_indices)
+                bm.free()
+                if not groups:
+                    self.report({'WARNING'}, f"{obj.name}: no parts detected ({label}).")
+                    continue
+
+                if len(prism_cells) > 1:
+                    parts, part_count, _did_split = _replace_with_prism_cells(
+                        context,
+                        obj,
+                        prism_cells,
+                    )
+                    label = "fused rectangular-prism cells"
+                else:
+                    parts, part_count, _did_split = _replace_with_parts(
+                        context,
+                        obj,
+                        groups,
+                    )
+
+                if len(groups) == 1 and len(prism_cells) <= 1 and self.strategy != 'TAGGED':
+                    unresolved_objects += 1
+                all_new_objects.extend(parts)
+                total_parts += part_count
+                detection_labels.add(label)
                 continue
 
-            if len(prism_cells) > 1:
-                parts, part_count, _did_split = _replace_with_prism_cells(context, obj, prism_cells)
-                label = "fused rectangular-prism cells"
-            else:
-                parts, part_count, _did_split = _replace_with_parts(context, obj, groups)
+            # A partial Edit Mode selection is already expanded to complete
+            # edge-connected regions.  Run the same detector on each selected
+            # region, then rebuild only those faces and preserve the rest.
+            selected_regions = _face_groups_from_edges(
+                bm,
+                face_indices,
+                manifold_only=False,
+            )
+            part_specs = []
+            object_labels = set()
+            object_unresolved = False
+            last_failure_label = "no selected regions"
 
-            if len(groups) == 1 and len(prism_cells) <= 1 and self.strategy != 'TAGGED':
+            for region in selected_regions:
+                groups, label = _groups_for_strategy(
+                    bm,
+                    obj.data,
+                    region,
+                    self.strategy,
+                )
+                last_failure_label = label
+                if not groups:
+                    continue
+
+                prism_cells = []
+                if self.strategy in {'AUTO', 'MANIFOLD'} and len(groups) == 1:
+                    prism_cells = _recognize_fused_prism_cells(bm, region)
+
+                if len(prism_cells) > 1:
+                    part_specs.extend(('CELL', cell) for cell in prism_cells)
+                    object_labels.add("selected fused rectangular-prism cells")
+                else:
+                    part_specs.extend(('FACES', group) for group in groups)
+                    object_labels.add(f"selected {label}")
+                    if len(groups) == 1 and self.strategy != 'TAGGED':
+                        object_unresolved = True
+
+            bm.free()
+            if not part_specs:
+                self.report(
+                    {'WARNING'},
+                    f"{obj.name}: no selected parts detected ({last_failure_label}).",
+                )
+                continue
+
+            parts, part_count, _did_split = _replace_selected_regions(
+                context,
+                obj,
+                face_indices,
+                part_specs,
+            )
+            if object_unresolved:
                 unresolved_objects += 1
             all_new_objects.extend(parts)
             total_parts += part_count
-            detection_labels.add(label)
+            detection_labels.update(object_labels)
 
         if not all_new_objects:
             if was_edit and context.mode == 'OBJECT':

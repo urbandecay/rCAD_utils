@@ -241,6 +241,7 @@ class RCAD_PT_PartSeparator(bpy.types.Panel):
         box.operator("mesh.rcad_separate_parts", text="Separate 2x4 Islands")
         box.operator("mesh.rcad_mark_part_ids", text="Mark IDs for Future Edits")
         box.label(text="Keeps all parts inside one object.")
+        box.label(text="Edit Mode: selected regions only.")
 
 
 class RCAD_PT_AddonDevelopment(bpy.types.Panel):
