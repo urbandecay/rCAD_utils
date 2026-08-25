@@ -4,6 +4,7 @@ import math
 
 import bmesh
 import bpy
+from bpy.props import FloatProperty
 from bpy_extras import view3d_utils
 from mathutils import Vector
 
@@ -448,6 +449,30 @@ def _rotate_face_uvs(face, uv_layer):
     return True
 
 
+def _scale_face_uvs(face, uv_layer, scale):
+    """Scale one face's UVs around its center."""
+    if uv_layer is None or not face.loops:
+        return False
+
+    center = Vector((
+        sum(loop[uv_layer].uv.x for loop in face.loops) / len(face.loops),
+        sum(loop[uv_layer].uv.y for loop in face.loops) / len(face.loops),
+    ))
+    for loop in face.loops:
+        uv = loop[uv_layer].uv.copy()
+        loop[uv_layer].uv = center + (uv - center) * scale
+    return True
+
+
+def _selected_uv_face_count(context):
+    count = 0
+    for obj in _edit_objects(context):
+        bm = bmesh.from_edit_mesh(obj.data)
+        if bm.loops.layers.uv.active is not None:
+            count += sum(face.select for face in bm.faces)
+    return count
+
+
 class MESH_OT_TextureSamplerRotateUV(bpy.types.Operator):
     """Rotate the selected Edit Mode faces' active UVs by 90 degrees."""
 
@@ -477,6 +502,65 @@ class MESH_OT_TextureSamplerRotateUV(bpy.types.Operator):
             return {'CANCELLED'}
 
         self.report({'INFO'}, f"Rotated UVs on {rotated_faces} face(s) by 90 degrees.")
+        return {'FINISHED'}
+
+
+class MESH_OT_TextureSamplerScaleUV(bpy.types.Operator):
+    """Scale the selected Edit Mode faces' active UVs."""
+
+    bl_idname = "mesh.texture_sampler_scale_uv"
+    bl_label = "Scale UVs"
+    bl_description = "Scale the selected faces' UVs"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    scale_position: FloatProperty(
+        name="Scale",
+        description="Scale selected UVs around each face center",
+        default=0.0,
+        min=-1.0,
+        max=1.0,
+        soft_min=-1.0,
+        soft_max=1.0,
+    )
+
+    def _scale_factor(self):
+        return 2.0 ** (self.scale_position * 4.0)
+
+    def draw(self, context):
+        self.layout.label(text=f"Current scale: {self._scale_factor():.2f}x")
+        self.layout.prop(self, "scale_position", text="", slider=True)
+
+    def invoke(self, context, event):
+        # Use Blender's Last Operation panel instead of opening a separate
+        # properties dialog. The registered operator will expose the slider
+        # and re-run execute as its value changes.
+        self.scale_position = 0.0
+        return self.execute(context)
+
+    def execute(self, context):
+        if context.mode != 'EDIT_MESH':
+            self.report({'ERROR'}, "Enter Edit Mode and select one or more faces first.")
+            return {'CANCELLED'}
+        if _selected_uv_face_count(context) == 0:
+            self.report({'WARNING'}, "Select one or more faces with UVs to scale.")
+            return {'CANCELLED'}
+        scale_factor = self._scale_factor()
+        scaled_faces = 0
+        for obj in _edit_objects(context):
+            bm = bmesh.from_edit_mesh(obj.data)
+            uv_layer = bm.loops.layers.uv.active
+            if uv_layer is None:
+                continue
+            for face in bm.faces:
+                if face.select and _scale_face_uvs(face, uv_layer, scale_factor):
+                    scaled_faces += 1
+            bmesh.update_edit_mesh(obj.data)
+
+        if scaled_faces == 0:
+            self.report({'WARNING'}, "Select one or more faces with UVs to scale.")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, f"Scaled UVs on {scaled_faces} face(s) by {scale_factor:.2f}x.")
         return {'FINISHED'}
 
 
@@ -675,4 +759,8 @@ class MESH_OT_TextureSampler(bpy.types.Operator):
         return self.invoke(context, None)
 
 
-classes = (MESH_OT_TextureSamplerRotateUV, MESH_OT_TextureSampler,)
+classes = (
+    MESH_OT_TextureSamplerRotateUV,
+    MESH_OT_TextureSamplerScaleUV,
+    MESH_OT_TextureSampler,
+)

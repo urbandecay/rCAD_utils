@@ -195,6 +195,8 @@ class RCAD_PT_TextureSampler(bpy.types.Panel):
         box.operator("mesh.texture_sampler", text="Pick & Apply", icon='EYEDROPPER')
         box.operator_context = 'EXEC_DEFAULT'
         box.operator("mesh.texture_sampler_rotate_uv", text="Rotate 90°")
+        box.operator_context = 'EXEC_DEFAULT'
+        box.operator("mesh.texture_sampler_scale_uv", text="Scale UVs")
 
 
 class RCAD_PT_MirrorAlongPlane(bpy.types.Panel):
