@@ -28,6 +28,7 @@ from . import axis_edge_highlight
 from . import part_separator
 from .texture_sampler import (
     MESH_OT_TextureSampler,
+    MESH_OT_TextureSamplerMoveUV,
     MESH_OT_TextureSamplerRotateUV,
     MESH_OT_TextureSamplerScaleUV,
 )
@@ -57,6 +58,7 @@ classes = [
     # Texture sampler operators
     MESH_OT_TextureSamplerRotateUV,
     MESH_OT_TextureSamplerScaleUV,
+    MESH_OT_TextureSamplerMoveUV,
     MESH_OT_TextureSampler,
     # Mirror Across Plane operators
     MESH_OT_store_plane_vertices,

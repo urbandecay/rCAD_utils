@@ -585,6 +585,71 @@ class MESH_OT_TextureSamplerScaleUV(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class MESH_OT_TextureSamplerMoveUV(bpy.types.Operator):
+    """Move the selected Edit Mode faces' active UVs."""
+
+    bl_idname = "mesh.texture_sampler_move_uv"
+    bl_label = "Move UVs"
+    bl_description = "Move the selected faces' UVs with X and Y offsets"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    offset_x: FloatProperty(
+        name="X Offset",
+        description="Move selected UVs horizontally",
+        default=0.0,
+        min=-10.0,
+        max=10.0,
+        soft_min=-1.0,
+        soft_max=1.0,
+    )
+    offset_y: FloatProperty(
+        name="Y Offset",
+        description="Move selected UVs vertically",
+        default=0.0,
+        min=-10.0,
+        max=10.0,
+        soft_min=-1.0,
+        soft_max=1.0,
+    )
+
+    def draw(self, context):
+        self.layout.prop(self, "offset_x", slider=True)
+        self.layout.prop(self, "offset_y", slider=True)
+
+    def execute(self, context):
+        if context.mode != 'EDIT_MESH':
+            self.report({'ERROR'}, "Enter Edit Mode and select one or more faces first.")
+            return {'CANCELLED'}
+        if _selected_uv_face_count(context) == 0:
+            self.report({'WARNING'}, "Select one or more faces with UVs to move.")
+            return {'CANCELLED'}
+
+        moved_faces = 0
+        offset = Vector((self.offset_x, self.offset_y))
+        for obj in _edit_objects(context):
+            bm = bmesh.from_edit_mesh(obj.data)
+            uv_layer = bm.loops.layers.uv.active
+            if uv_layer is None:
+                continue
+            for face in bm.faces:
+                if not face.select or not face.loops:
+                    continue
+                for loop in face.loops:
+                    loop[uv_layer].uv += offset
+                moved_faces += 1
+            bmesh.update_edit_mesh(obj.data)
+
+        if moved_faces == 0:
+            self.report({'WARNING'}, "Select one or more faces with UVs to move.")
+            return {'CANCELLED'}
+
+        self.report(
+            {'INFO'},
+            f"Moved UVs on {moved_faces} face(s) by ({self.offset_x:.2f}, {self.offset_y:.2f}).",
+        )
+        return {'FINISHED'}
+
+
 class MESH_OT_TextureSampler(bpy.types.Operator):
     """Pick a face material, then apply it to a second mesh."""
 
@@ -783,5 +848,6 @@ class MESH_OT_TextureSampler(bpy.types.Operator):
 classes = (
     MESH_OT_TextureSamplerRotateUV,
     MESH_OT_TextureSamplerScaleUV,
+    MESH_OT_TextureSamplerMoveUV,
     MESH_OT_TextureSampler,
 )

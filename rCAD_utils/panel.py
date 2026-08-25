@@ -209,6 +209,7 @@ class RCAD_PT_TextureSampler(bpy.types.Panel):
         counter_clockwise.angle_degrees = 90.0
         box.operator_context = 'EXEC_DEFAULT'
         box.operator("mesh.texture_sampler_scale_uv", text="Scale UVs")
+        box.operator("mesh.texture_sampler_move_uv", text="Move UVs")
 
 
 class RCAD_PT_MirrorAlongPlane(bpy.types.Panel):
