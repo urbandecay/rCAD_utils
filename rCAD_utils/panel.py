@@ -208,9 +208,9 @@ class RCAD_PT_TextureSampler(bpy.types.Panel):
             icon='LOOP_BACK',
         )
         counter_clockwise.angle_degrees = 90.0
-        box.operator_context = 'EXEC_DEFAULT'
-        box.operator("mesh.texture_sampler_scale_uv", text="Scale UVs")
         box.operator_context = 'INVOKE_DEFAULT'
+        scale_uv = box.operator("mesh.texture_sampler_scale_uv", text="Scale UVs")
+        scale_uv.scale_position = 0.0
         box.operator("mesh.texture_sampler_move_uv", text="Move UVs")
 
 
