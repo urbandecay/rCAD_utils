@@ -7,6 +7,7 @@ from .extrude import (
     get_active_element_and_its_indices,
 )
 from .eap_adapter import extrude_faces_to_cutter
+from .cool_bool import subtract_selected_islands
 
 
 def _active_mesh_in_edit_mode(context):
@@ -245,53 +246,108 @@ def _deselect_all_objects(context):
         object_scene.select_set(False)
 
 
-def _recalculate_normals(context, object_mesh):
-    """Recalculate normals using the same cleanup as Cool Bool.
+def _join_cutter_for_cool_bool(context, target, cutter):
+    """Join EAP's result and make its island the active Cool Bool island."""
+    marker = bpy.data.materials.new("__rcad_carve_cutter_marker__")
+    placeholder = None
 
-    BMesh keeps this step independent of the active editor area, which also
-    makes the operator reliable when invoked from Blender's background mode.
-    """
-    normals_bm = bmesh.new()
-    try:
-        normals_bm.from_mesh(object_mesh.data)
-        bmesh.ops.recalc_face_normals(normals_bm, faces=list(normals_bm.faces))
-        normals_bm.to_mesh(object_mesh.data)
-        object_mesh.data.update()
-    finally:
-        normals_bm.free()
+    # A target without material slots would otherwise share slot zero with the
+    # marker after Object > Join.  Give it a temporary slot so the cutter can
+    # be identified unambiguously after the join.
+    if len(target.data.materials) == 0:
+        placeholder = bpy.data.materials.new("__rcad_carve_target_slot__")
+        target.data.materials.append(placeholder)
 
-
-def _subtract_cutter(context, target, cutter, solver):
-    """Apply the Cool Bool Difference pattern to one target/cutter pair."""
-    if context.mode != 'OBJECT':
-        bpy.ops.object.mode_set(mode='OBJECT')
-
-    _recalculate_normals(context, target)
-    _recalculate_normals(context, cutter)
+    cutter.data.materials.append(marker)
+    marker_slot = len(cutter.data.materials) - 1
+    for polygon in cutter.data.polygons:
+        polygon.material_index = marker_slot
 
     _deselect_all_objects(context)
     target.select_set(True)
+    cutter.select_set(True)
     context.view_layer.objects.active = target
-
-    modifier = target.modifiers.new(name="CAP Boolean", type='BOOLEAN')
-    modifier.operation = 'DIFFERENCE'
-    modifier.object = cutter
-    modifier.solver = solver
-    try:
-        result = bpy.ops.object.modifier_apply(modifier=modifier.name)
-    except Exception:
-        if modifier.name in target.modifiers:
-            target.modifiers.remove(modifier)
-        raise
-
+    result = bpy.ops.object.join()
     if 'FINISHED' not in result:
-        raise RuntimeError("Blender could not apply the Boolean Difference")
+        _remove_temporary_materials([marker, placeholder])
+        raise RuntimeError("Could not join the EAP cutter to the target")
+
+    marker_slot = next(
+        (
+            index
+            for index, material in enumerate(target.data.materials)
+            if material == marker
+        ),
+        None,
+    )
+    if marker_slot is None:
+        _remove_temporary_materials([marker, placeholder])
+        raise RuntimeError("Could not identify the joined EAP cutter island")
+
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    bm = bmesh.from_edit_mesh(target.data)
+    bm.faces.ensure_lookup_table()
+    cutter_faces = [
+        face for face in bm.faces
+        if face.material_index == marker_slot
+    ]
+    if not cutter_faces:
+        _remove_temporary_materials([marker, placeholder])
+        raise RuntimeError("The EAP cutter has no faces to subtract")
+
+    # Cool Bool uses the active BMesh element to decide which selected island
+    # is the cutter.  Preserve the manual "cutter first, target second"
+    # workflow explicitly instead of relying on Blender's join history.
+    bm.select_history.clear()
+    bm.select_history.add(cutter_faces[0])
+    bmesh.update_edit_mesh(target.data)
+    return marker, placeholder
+
+
+def _remove_temporary_materials(materials):
+    """Remove the private join markers from any objects left by Cool Bool."""
+    if not materials:
+        return
+
+    if bpy.context.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+    for object_scene in list(bpy.data.objects):
+        if object_scene.type != 'MESH':
+            continue
+        slots = object_scene.data.materials
+        for index in range(len(slots) - 1, -1, -1):
+            if slots[index] in materials:
+                slots.pop(index=index)
+
+    # Cool Bool's temporary separation can leave orphan mesh datablocks with
+    # copied material slots.  Clear those slots as well so the private marker
+    # materials do not accumulate across repeated carves.
+    for mesh_data in list(bpy.data.meshes):
+        slots = mesh_data.materials
+        for index in range(len(slots) - 1, -1, -1):
+            if slots[index] in materials:
+                slots.pop(index=index)
+
+    for material in materials:
+        if material is not None and material.users == 0:
+            bpy.data.materials.remove(material)
 
 
 class OT_CarveAlongPath_Carve(bpy.types.Operator):
     bl_label = "Carve"
     bl_idname = "mesh.cap_carve"
     bl_options = {'REGISTER', 'UNDO'}
+
+    invert_cutter: bpy.props.BoolProperty(
+        name="Invert",
+        default=False,
+        description="Reverse the swept cutter so Difference keeps the opposite side",
+    )
+
+    def draw(self, context):
+        self.layout.prop(self, "invert_cutter")
 
     def execute(self, context):
         target = context.active_object
@@ -338,6 +394,7 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
         solver = getattr(context.scene, "carve_along_path_solver", 'EXACT')
         cutter = None
         source_object = None
+        temporary_materials = []
         wm = context.window_manager
         wm.progress_begin(0, 100)
 
@@ -394,10 +451,25 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
             target.select_set(True)
             context.view_layer.objects.active = target
             _remove_source_geometry(target, cleanup_vertices)
-            _subtract_cutter(context, target, cutter, solver)
-
-            _remove_temporary_object(cutter)
+            # The operation order is deliberate: EAP has already produced
+            # the cutter above.  Now perform the same joined-island setup that
+            # Cool Bool expects, with the cutter as the active island, and run
+            # the copied Cool Bool Difference implementation.
+            marker, placeholder = _join_cutter_for_cool_bool(
+                context,
+                target,
+                cutter,
+            )
+            temporary_materials = [marker, placeholder]
             cutter = None
+            subtract_selected_islands(
+                context,
+                invert_cutter=self.invert_cutter,
+                solver_mode=solver,
+            )
+
+            _remove_temporary_materials(temporary_materials)
+            temporary_materials = []
 
             _deselect_all_objects(context)
             target.select_set(True)
@@ -427,4 +499,9 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
                 _remove_temporary_object(source_object)
             if cutter is not None and cutter.name in bpy.data.objects:
                 _remove_temporary_object(cutter)
+            if temporary_materials:
+                try:
+                    _remove_temporary_materials(temporary_materials)
+                except Exception:
+                    pass
             wm.progress_end()

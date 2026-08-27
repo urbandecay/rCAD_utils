@@ -7,11 +7,10 @@ the caller can then apply Cool Bool's Difference workflow to the original.
 """
 
 import bpy
-import bmesh
 
-from ..extrude_along_path import extrude as eap_extrude
-from ..extrude_along_path import helper_functions as eap_helpers
-from ..extrude_along_path import operator_functions as eap_operators
+from .extrude_along_path import extrude as eap_extrude
+from .extrude_along_path import helper_functions as eap_helpers
+from .extrude_along_path import operator_functions as eap_operators
 
 
 def _activate_work_buffer(path_edges, path_start):
@@ -39,21 +38,6 @@ def _remove_temporary_object(object_mesh):
         bpy.data.objects.remove(object_mesh, do_unlink=True)
     if mesh_data is not None and mesh_data.users == 0 and mesh_data.name in bpy.data.meshes:
         bpy.data.meshes.remove(mesh_data)
-
-
-def _close_cutter_boundaries(cutter):
-    """Cap the open profile/end loops of EAP's separated face surface."""
-    cutter_bm = bmesh.new()
-    try:
-        cutter_bm.from_mesh(cutter.data)
-        boundary_edges = [edge for edge in cutter_bm.edges if edge.is_boundary]
-        if boundary_edges:
-            bmesh.ops.holes_fill(cutter_bm, edges=boundary_edges, sides=0)
-        bmesh.ops.recalc_face_normals(cutter_bm, faces=list(cutter_bm.faces))
-        cutter_bm.to_mesh(cutter.data)
-        cutter.data.update()
-    finally:
-        cutter_bm.free()
 
 
 def extrude_faces_to_cutter(context, source_object, path_edges, path_start):
@@ -149,8 +133,10 @@ def extrude_faces_to_cutter(context, source_object, path_edges, path_start):
             for obj in new_objects:
                 _remove_temporary_object(obj)
             return None, "EAP did not produce one cutter object."
+        # Keep EAP's surface open.  Cool Bool uses the cutter face winding to
+        # choose the retained side, and capping these boundaries changes that
+        # behavior (and makes Carve differ from EAP followed by Cool Bool).
         cutter = new_objects[0]
-        _close_cutter_boundaries(cutter)
         result_cutter = cutter
         return result_cutter, None
     except Exception as error:
