@@ -13,6 +13,8 @@ from bpy.props import BoolProperty
 from . import panel
 from .extrude_along_path import ui as eap_ui
 from .extrude_along_path import options_manager as eap_options
+from .carve_along_path import ui as cap_ui
+from .carve_along_path import options_manager as cap_options
 from .place_profile import (
     OBJECT_OT_store_profile_info_edit,
     OBJECT_OT_place_profile_on_edges_edit,
@@ -48,6 +50,9 @@ classes = [
     eap_ui.OT_ExtrudeAlongPath_Store_Start_Point,
     eap_ui.OT_ExtrudeAlongPath_Store_Both,
     eap_ui.OT_ExtrudeAlongPath_Extrude,
+    # Carve Along Path operators
+    cap_ui.OT_CarveAlongPath_Store_Path,
+    cap_ui.OT_CarveAlongPath_Carve,
     # Place Profile operators
     OBJECT_OT_store_profile_info_edit,
     OBJECT_OT_profile_rotate_axis,
@@ -69,6 +74,7 @@ classes = [
     panel.RCAD_PT_Main,
     panel.RCAD_OT_ReloadAddon,
     panel.RCAD_PT_ExtrudeAlongPath,
+    panel.RCAD_PT_CarveAlongPath,
     panel.RCAD_PT_PlaceProfile,
     panel.RCAD_PT_CoolBool,
     panel.RCAD_PT_MeshTiler,
@@ -82,6 +88,7 @@ classes = [
 
 def register():
     eap_options.register_options()
+    cap_options.register_options()
     for cls in classes:
         bpy.utils.register_class(cls)
     weld_tools.register()
@@ -122,6 +129,7 @@ def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     eap_options.unregister_options()
+    cap_options.unregister_options()
     VertexStorage._instance = None
     if hasattr(bpy.types.Scene, "profile_path_mode"):
         del bpy.types.Scene.profile_path_mode

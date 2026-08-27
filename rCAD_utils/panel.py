@@ -116,6 +116,28 @@ class RCAD_PT_ExtrudeAlongPath(bpy.types.Panel):
         row_extrude.operator("mesh.eap_extrude")
 
 
+class RCAD_PT_CarveAlongPath(bpy.types.Panel):
+    bl_label = "Carve Along Path"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "rCAD Utils"
+    bl_parent_id = "RCAD_PT_Main"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        box = layout.box()
+
+        row_path = box.row()
+        row_path.label(text="Path: ")
+        row_path.operator("mesh.cap_store_path", text="Store")
+
+        box.prop(context.scene, "carve_along_path_solver", text="Solver")
+
+        row_carve = box.row()
+        row_carve.operator("mesh.cap_carve", text="Carve")
+
+
 class RCAD_PT_PlaceProfile(bpy.types.Panel):
     bl_label = "Place Profile"
     bl_space_type = "VIEW_3D"
