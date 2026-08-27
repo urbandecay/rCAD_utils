@@ -24,6 +24,7 @@ from .mesh_tiler.preview import MESH_OT_MeshTilerPreview
 from . import weld_tools
 from . import vertex_resampler
 from . import projection
+from . import edge_knife_project
 from . import axis_edge_highlight
 from . import part_separator
 from .texture_sampler import (
@@ -86,6 +87,7 @@ def register():
     _1d_tools.register()
     vertex_resampler.register()
     projection.register()
+    edge_knife_project.register()
     axis_edge_highlight.register()
     part_separator.register()
     bpy.types.Scene.profile_path_mode = BoolProperty(name="Path Mode", default=False)
@@ -108,6 +110,7 @@ def register():
 
 def unregister():
     axis_edge_highlight.unregister()
+    edge_knife_project.unregister()
     part_separator.unregister()
     projection.unregister()
     vertex_resampler.unregister()
