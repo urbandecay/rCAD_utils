@@ -118,7 +118,10 @@ def _capture_profile(bm):
     profile_face_indices = set()
     for face in bm.faces:
         face_indices = [vertex.index for vertex in face.verts]
-        if face.select and all(index in index_lookup for index in face_indices):
+        # A face profile can be selected in vertex or edge mode, where
+        # Blender does not mark the face itself selected.  The selected
+        # vertices still describe the profile, so preserve the face too.
+        if all(index in index_lookup for index in face_indices):
             profile_faces.append([index_lookup[index] for index in face_indices])
             profile_face_indices.add(face.index)
 
@@ -481,7 +484,7 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
         wm.progress_begin(0, 100)
 
         try:
-            if keep_profile and cleanup_vertices and (profile_faces or profile_edges):
+            if keep_profile and (profile_faces or profile_edges):
                 profile_object = _make_profile_object(
                     target,
                     profile_coordinates,
