@@ -599,14 +599,16 @@ class MESH_OT_RCAD_EdgeKnifeProject(bpy.types.Operator):
             bm_after.faces.ensure_lookup_table()
             cut_count = max(0, len(bm_after.edges) - before_edge_count)
             new_edges = [edge for edge in bm_after.edges if edge not in original_edges]
-            seam_tolerance = max(ortho_scale * 1.0e-3, 1.0e-5)
-            seam_edges = _projected_seam_edges(
-                obj,
-                new_edges,
-                edge_points,
-                direction,
-                seam_tolerance,
-            )
+            # Knife Project can clip one projected line into many short edges
+            # on a dense mesh.  The endpoint test used here previously dropped
+            # some of those valid pieces, so only part of the seam was split.
+            # Every newly-created interior edge is part of this operation's
+            # cut and must be disconnected from its neighboring faces.
+            seam_edges = [
+                edge
+                for edge in new_edges
+                if edge.is_valid and len(edge.link_faces) >= 2
+            ]
             if seam_edges:
                 bmesh.ops.split_edges(bm_after, edges=seam_edges)
                 seam_count = len(seam_edges)
