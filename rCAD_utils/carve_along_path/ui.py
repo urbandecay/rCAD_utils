@@ -260,7 +260,6 @@ def _make_profile_object(target, profile_coordinates, profile_edges, profile_fac
         profile_mesh,
         target.users_collection[0] if target.users_collection else bpy.context.collection,
     )
-    profile_object.matrix_world = target.matrix_world.copy()
     return profile_object
 
 
@@ -302,9 +301,6 @@ def _append_kept_profile(target, profile_object, reuse_existing_vertices=False):
         profile_bm.edges.ensure_lookup_table()
         profile_bm.faces.ensure_lookup_table()
 
-        profile_to_target = (
-            target.matrix_world.inverted_safe() @ profile_object.matrix_world
-        )
         existing_vertices = {}
         if reuse_existing_vertices:
             for vertex in target_bm.verts:
@@ -313,7 +309,10 @@ def _append_kept_profile(target, profile_object, reuse_existing_vertices=False):
 
         vertex_map = {}
         for vertex in profile_bm.verts:
-            profile_co = profile_to_target @ vertex.co
+            # The snapshot was taken from target.data, so these coordinates
+            # are already in the target mesh's local space.  Reuse them
+            # directly instead of applying a second object-space transform.
+            profile_co = vertex.co.copy()
             key = tuple(round(value, 6) for value in profile_co)
             target_vertex = existing_vertices.get(key)
             if target_vertex is None:
