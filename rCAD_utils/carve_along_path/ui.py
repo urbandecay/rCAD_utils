@@ -247,7 +247,7 @@ def _make_mesh_object(name, mesh, collection):
 
 
 def _make_profile_object(target, profile_coordinates, profile_edges, profile_faces):
-    """Snapshot the selected profile so it can be restored after the carve."""
+    """Save the selected profile before EAP and Cool Bool modify the mesh."""
     profile_mesh = bpy.data.meshes.new(f"{target.name}_CarveProfileMesh")
     profile_mesh.from_pydata(
         profile_coordinates,
@@ -264,8 +264,32 @@ def _make_profile_object(target, profile_coordinates, profile_edges, profile_fac
     return profile_object
 
 
-def _append_kept_profile(target, profile_object):
-    """Append the preserved source profile to the carved target mesh."""
+def _remove_profile_faces(target, profile_indices, profile_face_indices):
+    """Remove only the saved profile faces before the boolean runs."""
+    if not profile_face_indices:
+        return
+
+    profile_bm = bmesh.new()
+    try:
+        profile_bm.from_mesh(target.data)
+        profile_bm.faces.ensure_lookup_table()
+        profile_vertices = set(profile_indices)
+        profile_faces = [
+            face
+            for face in profile_bm.faces
+            if face.index in profile_face_indices
+            and all(vertex.index in profile_vertices for vertex in face.verts)
+        ]
+        if profile_faces:
+            bmesh.ops.delete(profile_bm, geom=profile_faces, context='FACES')
+            profile_bm.to_mesh(target.data)
+            target.data.update()
+    finally:
+        profile_bm.free()
+
+
+def _append_kept_profile(target, profile_object, reuse_existing_vertices=False):
+    """Restore the saved profile after the boolean has finished."""
     if profile_object is None:
         return
 
@@ -281,10 +305,20 @@ def _append_kept_profile(target, profile_object):
         profile_to_target = (
             target.matrix_world.inverted_safe() @ profile_object.matrix_world
         )
-        vertex_map = {
-            vertex: target_bm.verts.new(profile_to_target @ vertex.co)
-            for vertex in profile_bm.verts
-        }
+        existing_vertices = {}
+        if reuse_existing_vertices:
+            for vertex in target_bm.verts:
+                key = tuple(round(value, 6) for value in vertex.co)
+                existing_vertices.setdefault(key, vertex)
+
+        vertex_map = {}
+        for vertex in profile_bm.verts:
+            profile_co = profile_to_target @ vertex.co
+            key = tuple(round(value, 6) for value in profile_co)
+            target_vertex = existing_vertices.get(key)
+            if target_vertex is None:
+                target_vertex = target_bm.verts.new(profile_co)
+            vertex_map[vertex] = target_vertex
 
         for edge in profile_bm.edges:
             try:
@@ -543,6 +577,12 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
             _deselect_all_objects(context)
             target.select_set(True)
             context.view_layer.objects.active = target
+            if keep_profile and not cleanup_vertices:
+                _remove_profile_faces(
+                    target,
+                    profile_indices,
+                    profile_face_indices,
+                )
             _remove_source_geometry(target, cleanup_vertices)
             # The operation order is deliberate: EAP has already produced
             # the cutter above.  Now perform the same joined-island setup that
@@ -563,7 +603,11 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
 
             _remove_temporary_materials(temporary_materials)
             temporary_materials = []
-            _append_kept_profile(target, profile_object)
+            _append_kept_profile(
+                target,
+                profile_object,
+                reuse_existing_vertices=not cleanup_vertices,
+            )
             _remove_temporary_object(profile_object)
             profile_object = None
 
