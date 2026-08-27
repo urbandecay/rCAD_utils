@@ -92,9 +92,36 @@ def verify_transformed_target_uses_world_space():
     bm.free()
 
 
+def verify_preview_cut_line():
+    obj, cutter_index = make_box_with_cutter()
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.edges.ensure_lookup_table()
+    cutter = bm.edges[cutter_index]
+    cutter_segments = [
+        (obj.matrix_world @ cutter.verts[0].co,
+         obj.matrix_world @ cutter.verts[1].co),
+    ]
+    target_faces = list(bm.faces)
+    direction = Vector((-1.0, 0.0, 0.0))
+    preview = operators._preview_projected_segments(
+        obj,
+        target_faces,
+        cutter_segments,
+        direction,
+        1.0e-6,
+    )
+    assert preview, "preview did not find the projected box-side cut"
+    for point in preview:
+        assert abs(abs(point.x) - 1.0) <= TOLERANCE, point
+        assert abs(point.z - 0.5) <= TOLERANCE, point
+    bm.free()
+
+
 def main():
     verify_nearest_surface_avoids_centroid_tilt()
     verify_transformed_target_uses_world_space()
+    verify_preview_cut_line()
     print("EDGE_KNIFE_PROJECT_VERIFICATION_OK")
 
 

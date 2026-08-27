@@ -11,5 +11,6 @@ def register():
 
 
 def unregister():
+    operators.stop_preview()
     for cls in reversed(operators.classes + ui.classes):
         bpy.utils.unregister_class(cls)

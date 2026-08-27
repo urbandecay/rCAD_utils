@@ -8,6 +8,11 @@ from mathutils.bvhtree import BVHTree
 
 _EPSILON = 1.0e-10
 _TEMP_OBJECT_NAME = "__rcad_edge_knife_cutter__"
+_PREVIEW_STATE = {
+    "handle": None,
+    "data": None,
+    "shader": None,
+}
 
 
 def _active_edit_mesh(context):
@@ -375,6 +380,168 @@ def _projected_seam_edges(obj, candidate_edges, cutter_segments, direction, tole
     return seams
 
 
+def _projected_segment_factor(point, first, second, direction):
+    """Return a point's position along a cutter after removing depth."""
+    segment = second - first
+    screen_segment = segment - direction * segment.dot(direction)
+    length_squared = screen_segment.length_squared
+    if length_squared <= _EPSILON:
+        return None
+
+    offset = point - first
+    screen_offset = offset - direction * offset.dot(direction)
+    factor = screen_offset.dot(screen_segment) / length_squared
+    distance = (screen_offset - screen_segment * factor).length
+    return factor, distance
+
+
+def _triangle_plane_segment(triangle, plane_point, plane_normal, tolerance):
+    """Return the part of a triangle cut by a plane, if it has one."""
+    intersections = []
+    values = [
+        (point - plane_point).dot(plane_normal)
+        for point in triangle
+    ]
+    for index, first in enumerate(triangle):
+        second = triangle[(index + 1) % 3]
+        first_value = values[index]
+        second_value = values[(index + 1) % 3]
+        if abs(first_value) <= tolerance:
+            intersections.append(first)
+        if (
+            (first_value < -tolerance and second_value > tolerance)
+            or (first_value > tolerance and second_value < -tolerance)
+        ):
+            factor = first_value / (first_value - second_value)
+            intersections.append(first.lerp(second, factor))
+
+    unique = []
+    tolerance_squared = tolerance * tolerance
+    for point in intersections:
+        if not any((point - other).length_squared <= tolerance_squared for other in unique):
+            unique.append(point)
+    if len(unique) < 2:
+        return None
+
+    first = unique[0]
+    second = max(unique[1:], key=lambda point: (point - first).length_squared)
+    if (second - first).length_squared <= tolerance_squared:
+        return None
+    return first, second
+
+
+def _preview_projected_segments(
+    obj,
+    target_faces,
+    cutter_segments,
+    direction,
+    tolerance,
+):
+    """Build the visible 3D line segments Knife Project will create.
+
+    Each cutter edge and the projection direction define a plane.  Intersect
+    that plane with the selected target triangles, then clip the result to the
+    finite cutter edge.  This keeps the preview aligned with the same
+    projection geometry without changing the mesh.
+    """
+    preview_segments = []
+    for first, second in cutter_segments:
+        cutter_vector = second - first
+        plane_normal = cutter_vector.cross(direction)
+        if plane_normal.length <= _EPSILON:
+            continue
+        plane_normal.normalize()
+
+        for face in target_faces:
+            face_points = [obj.matrix_world @ vert.co for vert in face.verts]
+            if len(face_points) < 3:
+                continue
+            for index in range(1, len(face_points) - 1):
+                triangle = (
+                    face_points[0],
+                    face_points[index],
+                    face_points[index + 1],
+                )
+                result = _triangle_plane_segment(
+                    triangle,
+                    first,
+                    plane_normal,
+                    tolerance,
+                )
+                if result is None:
+                    continue
+                point_a, point_b = result
+                factor_a = _projected_segment_factor(
+                    point_a,
+                    first,
+                    second,
+                    direction,
+                )
+                factor_b = _projected_segment_factor(
+                    point_b,
+                    first,
+                    second,
+                    direction,
+                )
+                if factor_a is None or factor_b is None:
+                    continue
+                factor_a = factor_a[0]
+                factor_b = factor_b[0]
+                if factor_a > factor_b:
+                    point_a, point_b = point_b, point_a
+                    factor_a, factor_b = factor_b, factor_a
+
+                if factor_b < 0.0 or factor_a > 1.0:
+                    continue
+                clipped_a = max(factor_a, 0.0)
+                clipped_b = min(factor_b, 1.0)
+                if clipped_b - clipped_a <= _EPSILON:
+                    continue
+                factor_span = factor_b - factor_a
+                if factor_span <= _EPSILON:
+                    continue
+                original_a, original_b = point_a, point_b
+                point_a = original_a.lerp(
+                    original_b,
+                    (clipped_a - factor_a) / factor_span,
+                )
+                point_b = original_a.lerp(
+                    original_b,
+                    (clipped_b - factor_a) / factor_span,
+                )
+                if (point_b - point_a).length_squared <= tolerance * tolerance:
+                    continue
+                preview_segments.extend((point_a, point_b))
+    return preview_segments
+
+
+def _preview_direction_segments(source_points, target_points, direction, scale):
+    """Return an arrow showing the direction used for projection."""
+    source_center = _average(source_points)
+    target_center = _average(target_points)
+    projected_distance = abs((target_center - source_center).dot(direction))
+    arrow_length = max(projected_distance, scale * 0.35, 0.1)
+    arrow_start = source_center
+    arrow_end = arrow_start + direction * arrow_length
+    head_size = min(max(scale * 0.045, 0.03), arrow_length * 0.35)
+
+    side = direction.cross(Vector((0.0, 0.0, 1.0)))
+    if side.length <= _EPSILON:
+        side = direction.cross(Vector((0.0, 1.0, 0.0)))
+    if side.length <= _EPSILON:
+        return [arrow_start, arrow_end]
+    side.normalize()
+    arrow_back = arrow_end - direction * head_size
+    return [
+        arrow_start,
+        arrow_end,
+        arrow_end,
+        arrow_back + side * head_size * 0.55,
+        arrow_end,
+        arrow_back - side * head_size * 0.55,
+    ]
+
+
 def _view_center_and_scale(source_points, target_points):
     points = list(source_points) + list(target_points)
     center = _average(points)
@@ -479,6 +646,90 @@ def _restore_object_selection(context, selected_objects, active_object):
             context.view_layer.objects.active = active_object
     except (ReferenceError, RuntimeError):
         pass
+
+
+def _draw_preview_lines(gpu, batch_for_shader, shader, points, color, width):
+    if len(points) < 2:
+        return
+    batch = batch_for_shader(shader, 'LINES', {"pos": points})
+    shader.bind()
+    shader.uniform_float("color", color)
+    gpu.state.line_width_set(width)
+    batch.draw(shader)
+
+
+def _draw_preview_callback():
+    data = _PREVIEW_STATE["data"]
+    if not data:
+        return
+    gpu = None
+    try:
+        import gpu
+        from gpu_extras.batch import batch_for_shader
+
+        shader = _PREVIEW_STATE["shader"]
+        if shader is None:
+            shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+            _PREVIEW_STATE["shader"] = shader
+
+        gpu.state.blend_set('ALPHA')
+        gpu.state.depth_test_set('NONE')
+        _draw_preview_lines(
+            gpu,
+            batch_for_shader,
+            shader,
+            data["source_lines"],
+            (1.0, 0.65, 0.05, 1.0),
+            2.0,
+        )
+        _draw_preview_lines(
+            gpu,
+            batch_for_shader,
+            shader,
+            data["cut_lines"],
+            data["cut_color"],
+            4.0,
+        )
+        _draw_preview_lines(
+            gpu,
+            batch_for_shader,
+            shader,
+            data["direction_lines"],
+            (1.0, 0.25, 0.05, 1.0),
+            3.0,
+        )
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        # Drawing is best-effort; it must never interrupt the modal tool.
+        pass
+    finally:
+        if gpu is not None:
+            try:
+                gpu.state.line_width_set(1.0)
+                gpu.state.depth_test_set('LESS_EQUAL')
+                gpu.state.blend_set('NONE')
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                pass
+
+
+def _remove_preview_handler(context):
+    handle = _PREVIEW_STATE["handle"]
+    if handle is not None:
+        try:
+            bpy.types.SpaceView3D.draw_handler_remove(handle, 'WINDOW')
+        except (ReferenceError, RuntimeError, TypeError, ValueError):
+            pass
+        _PREVIEW_STATE["handle"] = None
+    _PREVIEW_STATE["data"] = None
+    _PREVIEW_STATE["shader"] = None
+    screen = getattr(context, "screen", None)
+    for area in getattr(screen, "areas", ()):
+        if area.type == 'VIEW_3D':
+            area.tag_redraw()
+
+
+def stop_preview(context=None):
+    """Remove an active preview, including when the add-on is reloaded."""
+    _remove_preview_handler(context or bpy.context)
 
 
 class MESH_OT_RCAD_EdgeKnifeProject(bpy.types.Operator):
@@ -664,4 +915,144 @@ class MESH_OT_RCAD_EdgeKnifeProject(bpy.types.Operator):
         return {'FINISHED'}
 
 
-classes = (MESH_OT_RCAD_EdgeKnifeProject,)
+class MESH_OT_RCAD_EdgeKnifePreview(bpy.types.Operator):
+    """Preview the projected cut and wait for confirmation."""
+
+    bl_idname = "mesh.rcad_edge_knife_preview"
+    bl_label = "Preview Cut"
+    bl_description = (
+        "Show the projected cut line and direction; click to apply or press Esc to cancel"
+    )
+    bl_options = {'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_edit_mesh(context) is not None
+
+    def _tag_redraw(self, context):
+        screen = getattr(context, "screen", None)
+        for area in getattr(screen, "areas", ()):
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+
+    def _build_preview_data(self, context):
+        obj = _active_edit_mesh(context)
+        if obj is None:
+            raise RuntimeError("Active Mesh Edit Mode is required.")
+
+        area, space, _region = _view3d_context(context)
+        if area is None:
+            raise RuntimeError("Run Preview Cut from a 3D Viewport.")
+
+        bm = bmesh.from_edit_mesh(obj.data)
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+
+        source_edges, target_faces = _selected_inputs(bm)
+        if not source_edges:
+            raise RuntimeError(
+                "Select at least one cutter edge that is not part of a selected target face."
+            )
+        if not target_faces:
+            raise RuntimeError("Select one or more target faces.")
+
+        source_points = [
+            obj.matrix_world @ vert.co
+            for edge in source_edges
+            for vert in edge.verts
+        ]
+        cutter_segments = [
+            (obj.matrix_world @ edge.verts[0].co,
+             obj.matrix_world @ edge.verts[1].co)
+            for edge in source_edges
+        ]
+        target_points = _world_face_points(obj, target_faces)
+        if not source_points or not target_points:
+            raise RuntimeError("The selected geometry has no usable points.")
+
+        direction = _choose_view_direction(
+            space,
+            obj,
+            source_points,
+            target_faces,
+            target_points,
+        )
+        _center, scale = _view_center_and_scale(source_points, target_points)
+        tolerance = max(scale * 1.0e-5, 1.0e-6)
+        cut_lines = _preview_projected_segments(
+            obj,
+            target_faces,
+            cutter_segments,
+            direction,
+            tolerance,
+        )
+        return {
+            "source_lines": [point for segment in cutter_segments for point in segment],
+            "cut_lines": cut_lines,
+            "direction_lines": _preview_direction_segments(
+                source_points,
+                target_points,
+                direction,
+                scale,
+            ),
+            "cut_color": (
+                (0.1, 1.0, 0.15, 1.0)
+                if cut_lines
+                else (1.0, 0.1, 0.05, 1.0)
+            ),
+        }
+
+    def _refresh_preview(self, context):
+        try:
+            _PREVIEW_STATE["data"] = self._build_preview_data(context)
+        except (ReferenceError, RuntimeError, TypeError, ValueError) as exc:
+            _PREVIEW_STATE["data"] = {
+                "source_lines": [],
+                "cut_lines": [],
+                "direction_lines": [],
+                "cut_color": (1.0, 0.1, 0.05, 1.0),
+                "error": str(exc),
+            }
+        self._tag_redraw(context)
+
+    def invoke(self, context, _event):
+        if _PREVIEW_STATE["handle"] is not None:
+            _remove_preview_handler(context)
+        try:
+            _PREVIEW_STATE["data"] = self._build_preview_data(context)
+        except (ReferenceError, RuntimeError, TypeError, ValueError) as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+
+        _PREVIEW_STATE["handle"] = bpy.types.SpaceView3D.draw_handler_add(
+            _draw_preview_callback,
+            (),
+            'WINDOW',
+            'POST_VIEW',
+        )
+        context.window_manager.modal_handler_add(self)
+        self._tag_redraw(context)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type in {'ESC', 'RIGHTMOUSE'} and event.value == 'PRESS':
+            _remove_preview_handler(context)
+            return {'CANCELLED'}
+
+        if event.type in {'LEFTMOUSE', 'RET', 'NUMPAD_ENTER'} and event.value == 'PRESS':
+            _remove_preview_handler(context)
+            return bpy.ops.mesh.rcad_edge_knife_project('EXEC_DEFAULT')
+
+        if event.type in {
+            'MOUSEMOVE',
+            'MIDDLEMOUSE',
+            'WHEELUPMOUSE',
+            'WHEELDOWNMOUSE',
+            'NDOF_MOTION',
+        }:
+            self._refresh_preview(context)
+        return {'PASS_THROUGH'}
+
+
+classes = (MESH_OT_RCAD_EdgeKnifeProject, MESH_OT_RCAD_EdgeKnifePreview)

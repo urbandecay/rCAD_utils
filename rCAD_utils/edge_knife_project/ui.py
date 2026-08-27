@@ -18,6 +18,10 @@ class RCAD_PT_EdgeKnifeProject(bpy.types.Panel):
         box = layout.box()
         box.label(text="Select cutter edge(s) + target face(s)")
         box.operator(
+            "mesh.rcad_edge_knife_preview",
+            text="Preview Cut",
+        )
+        box.operator(
             "mesh.rcad_edge_knife_project",
             text="Project, Knife & Split",
         )
