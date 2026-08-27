@@ -355,7 +355,12 @@ def _projected_seam_edges(obj, candidate_edges, cutter_segments, direction, tole
     """Return new interior edges that lie on a projected cutter segment."""
     seams = []
     for edge in candidate_edges:
-        if not edge.is_valid or len(edge.link_faces) < 2:
+        if (
+            not edge.is_valid
+            or edge.hide
+            or len(edge.link_faces) < 2
+            or any(face.hide for face in edge.link_faces)
+        ):
             continue
         first_point = obj.matrix_world @ edge.verts[0].co
         second_point = obj.matrix_world @ edge.verts[1].co
@@ -377,6 +382,44 @@ def _projected_seam_edges(obj, candidate_edges, cutter_segments, direction, tole
             for cutter_first, cutter_second in cutter_segments
         ):
             seams.append(edge)
+    return seams
+
+
+def _seam_edges_for_segments(
+    obj,
+    candidate_edges,
+    generated_edges,
+    cutter_segments,
+    direction,
+    tolerance,
+):
+    """Find the seam for each cutter segment without over-splitting old edges.
+
+    Knife Project creates new edges when a segment crosses face interiors.  If
+    it does not create one, the segment may already lie on existing topology;
+    only then use the geometric fallback for that individual segment.
+    """
+    seams = []
+    seen = set()
+    for cutter_segment in cutter_segments:
+        generated_seams = _projected_seam_edges(
+            obj,
+            generated_edges,
+            (cutter_segment,),
+            direction,
+            tolerance,
+        )
+        segment_seams = generated_seams or _projected_seam_edges(
+            obj,
+            candidate_edges,
+            (cutter_segment,),
+            direction,
+            tolerance,
+        )
+        for edge in segment_seams:
+            if edge not in seen:
+                seen.add(edge)
+                seams.append(edge)
     return seams
 
 
@@ -797,6 +840,7 @@ class MESH_OT_RCAD_EdgeKnifeProject(bpy.types.Operator):
 
         bmesh_state = _capture_bmesh_state(bm)
         before_edge_count = len(bm.edges)
+        original_edges = set(bm.edges)
         selected_objects = tuple(context.selected_objects)
         active_object = context.view_layer.objects.active
         view_state = _capture_view(space)
@@ -849,14 +893,15 @@ class MESH_OT_RCAD_EdgeKnifeProject(bpy.types.Operator):
             bm_after.faces.ensure_lookup_table()
             cut_count = max(0, len(bm_after.edges) - before_edge_count)
             seam_tolerance = max(ortho_scale * 1.0e-3, 1.0e-5)
-            # A straight projection can land exactly on edges that already
-            # existed before Knife Project ran.  Looking only at new edges
-            # misses that seam, even though the cut itself succeeds.  Search
-            # the final mesh so both new cut segments and pre-existing seam
-            # edges are disconnected.
-            seam_edges = _projected_seam_edges(
+            generated_edges = [
+                edge
+                for edge in bm_after.edges
+                if edge not in original_edges
+            ]
+            seam_edges = _seam_edges_for_segments(
                 obj,
                 bm_after.edges,
+                generated_edges,
                 edge_points,
                 direction,
                 seam_tolerance,
@@ -867,8 +912,8 @@ class MESH_OT_RCAD_EdgeKnifeProject(bpy.types.Operator):
 
             _restore_visibility(bm_after, bmesh_state)
             bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=True)
-            success = cut_count > 0 and seam_count > 0
-            if cut_count <= 0:
+            success = seam_count > 0
+            if cut_count <= 0 and seam_count <= 0:
                 error_message = "Knife Project finished, but created no new edges."
             elif seam_count <= 0:
                 error_message = "The projected cut was created, but no interior seam could be split."

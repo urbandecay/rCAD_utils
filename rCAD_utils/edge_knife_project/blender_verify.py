@@ -159,9 +159,10 @@ def verify_existing_straight_seam_is_split():
         (obj.matrix_world @ cutter_edge.verts[0].co,
          obj.matrix_world @ cutter_edge.verts[1].co),
     ]
-    seams = operators._projected_seam_edges(
+    seams = operators._seam_edges_for_segments(
         obj,
         check.edges,
+        [],
         cutter_segments,
         Vector((-1.0, 0.0, 0.0)),
         1.0e-6,
