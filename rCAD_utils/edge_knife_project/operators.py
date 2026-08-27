@@ -173,6 +173,17 @@ def _restore_selection(bm, state):
             continue
 
 
+def _clear_selection(bm):
+    """Leave the edited mesh with no selected vertices, edges, or faces."""
+    for face in bm.faces:
+        face.select_set(False)
+    for edge in bm.edges:
+        edge.select_set(False)
+    for vert in bm.verts:
+        vert.select_set(False)
+    bm.select_history.clear()
+
+
 def _prepare_target(bm, target_faces):
     target_set = set(target_faces)
     target_edges = {edge for face in target_faces for edge in face.edges}
@@ -911,6 +922,7 @@ class MESH_OT_RCAD_EdgeKnifeProject(bpy.types.Operator):
                 seam_count = len(seam_edges)
 
             _restore_visibility(bm_after, bmesh_state)
+            _clear_selection(bm_after)
             bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=True)
             success = seam_count > 0
             if cut_count <= 0 and seam_count <= 0:
