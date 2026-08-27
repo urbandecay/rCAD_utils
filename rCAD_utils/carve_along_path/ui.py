@@ -10,16 +10,16 @@ from .eap_adapter import extrude_faces_to_cutter
 from .cool_bool import subtract_selected_islands
 
 
-_last_keep_cutter = False
+_last_keep_profile = False
 
 
-def _get_keep_cutter(operator):
-    return _last_keep_cutter
+def _get_keep_profile(operator):
+    return _last_keep_profile
 
 
-def _set_keep_cutter(operator, value):
-    global _last_keep_cutter
-    _last_keep_cutter = bool(value)
+def _set_keep_profile(operator, value):
+    global _last_keep_profile
+    _last_keep_profile = bool(value)
 
 
 def _active_mesh_in_edit_mode(context):
@@ -243,6 +243,65 @@ def _make_mesh_object(name, mesh, collection):
     return object_new
 
 
+def _make_profile_object(target, profile_coordinates, profile_edges, profile_faces):
+    """Snapshot the selected profile so it can be restored after the carve."""
+    profile_mesh = bpy.data.meshes.new(f"{target.name}_CarveProfileMesh")
+    profile_mesh.from_pydata(
+        profile_coordinates,
+        profile_edges,
+        profile_faces,
+    )
+    profile_mesh.update()
+    profile_object = _make_mesh_object(
+        f"{target.name}_CarveProfile",
+        profile_mesh,
+        target.users_collection[0] if target.users_collection else bpy.context.collection,
+    )
+    profile_object.matrix_world = target.matrix_world.copy()
+    return profile_object
+
+
+def _append_kept_profile(target, profile_object):
+    """Append the preserved source profile to the carved target mesh."""
+    if profile_object is None:
+        return
+
+    target_bm = bmesh.new()
+    profile_bm = bmesh.new()
+    try:
+        target_bm.from_mesh(target.data)
+        profile_bm.from_mesh(profile_object.data)
+        profile_bm.verts.ensure_lookup_table()
+        profile_bm.edges.ensure_lookup_table()
+        profile_bm.faces.ensure_lookup_table()
+
+        profile_to_target = (
+            target.matrix_world.inverted_safe() @ profile_object.matrix_world
+        )
+        vertex_map = {
+            vertex: target_bm.verts.new(profile_to_target @ vertex.co)
+            for vertex in profile_bm.verts
+        }
+
+        for edge in profile_bm.edges:
+            try:
+                target_bm.edges.new([vertex_map[v] for v in edge.verts])
+            except ValueError:
+                pass
+
+        for face in profile_bm.faces:
+            try:
+                target_bm.faces.new([vertex_map[v] for v in face.verts])
+            except ValueError:
+                pass
+
+        target_bm.to_mesh(target.data)
+        target.data.update()
+    finally:
+        profile_bm.free()
+        target_bm.free()
+
+
 def _remove_temporary_object(object_mesh):
     if object_mesh is None:
         return
@@ -357,22 +416,22 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
         default=False,
         description="Reverse the swept cutter so Difference keeps the opposite side",
     )
-    keep_cutter: bpy.props.BoolProperty(
-        name="Keep Cutter",
+    keep_profile: bpy.props.BoolProperty(
+        name="Keep Profile",
         default=False,
-        get=_get_keep_cutter,
-        set=_set_keep_cutter,
-        description="Keep the swept cutter joined to the carved result",
+        get=_get_keep_profile,
+        set=_set_keep_profile,
+        description="Keep the selected profile used to create the carve",
     )
 
     def draw(self, context):
         row = self.layout.row(align=True)
         row.prop(self, "invert_cutter")
-        row.prop(self, "keep_cutter")
+        row.prop(self, "keep_profile")
 
     def execute(self, context):
         target = context.active_object
-        keep_cutter = bool(self.keep_cutter)
+        keep_profile = bool(self.keep_profile)
         if not _active_mesh_in_edit_mode(context):
             self.report({'ERROR'}, "Select a mesh in Edit Mode before carving.")
             return {'CANCELLED'}
@@ -416,11 +475,20 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
         solver = getattr(context.scene, "carve_along_path_solver", 'EXACT')
         cutter = None
         source_object = None
+        profile_object = None
         temporary_materials = []
         wm = context.window_manager
         wm.progress_begin(0, 100)
 
         try:
+            if keep_profile and cleanup_vertices and (profile_faces or profile_edges):
+                profile_object = _make_profile_object(
+                    target,
+                    profile_coordinates,
+                    profile_edges,
+                    profile_faces,
+                )
+
             # Make the exact source mesh EAP expects, with only the selected
             # profile selected.  EAP then owns the complete face extrusion
             # and cutter separation on this temporary object.
@@ -487,12 +555,14 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
             subtract_selected_islands(
                 context,
                 invert_cutter=self.invert_cutter,
-                keep_cutter=keep_cutter,
                 solver_mode=solver,
             )
 
             _remove_temporary_materials(temporary_materials)
             temporary_materials = []
+            _append_kept_profile(target, profile_object)
+            _remove_temporary_object(profile_object)
+            profile_object = None
 
             _deselect_all_objects(context)
             target.select_set(True)
@@ -522,6 +592,8 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
                 _remove_temporary_object(source_object)
             if cutter is not None and cutter.name in bpy.data.objects:
                 _remove_temporary_object(cutter)
+            if profile_object is not None and profile_object.name in bpy.data.objects:
+                _remove_temporary_object(profile_object)
             if temporary_materials:
                 try:
                     _remove_temporary_materials(temporary_materials)
