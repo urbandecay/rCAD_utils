@@ -10,7 +10,7 @@ bl_info = {
     "author": "rCAD Utils",
     "version": (1, 0, 0),
     "blender": (3, 0, 0),
-    "location": "Properties > Object",
+    "location": "3D View > Select",
     "description": "Select all visible objects that share a collection with the active object",
     "category": "Object",
 }
@@ -187,77 +187,25 @@ def _reset_selection_state_after_file_load(_dummy):
     _last_selection_state = None
 
 
-class OBJECT_OT_rcad_select_active_collection(bpy.types.Operator):
-    """Select all visible objects sharing a collection with the active object."""
-
-    bl_idname = "object.rcad_select_active_collection"
-    bl_label = "Select Active Collection"
-    bl_description = "Select all visible objects in the active object's collection"
-
-    @classmethod
-    def poll(cls, context):
-        return context.mode == 'OBJECT' and context.view_layer.objects.active is not None
-
-    def execute(self, context):
-        count = select_active_collection(context)
-        self.report({'INFO'}, f"Selected {count} object(s) in the active collection group.")
-        return {'FINISHED'}
-
-
-class OBJECT_PT_rcad_auto_select_collection(bpy.types.Panel):
-    """Settings panel in the Object properties tab."""
-
-    bl_label = "Auto Select Collection"
-    bl_idname = "OBJECT_PT_rcad_auto_select_collection"
-    bl_space_type = 'PROPERTIES'
-    bl_region_type = 'WINDOW'
-    bl_context = 'object'
-
-    def draw(self, context):
-        layout = self.layout
-        layout.prop(
-            context.scene,
-            PROPERTY_NAME,
-            text="Select Collection on Click",
-        )
-
-        active = context.view_layer.objects.active
-        if active is None:
-            layout.label(text="Select an object to see its collection.", icon='INFO')
-            return
-
-        collections = list(active.users_collection)
-        if collections:
-            layout.label(text="Active collection group:", icon='OUTLINER_COLLECTION')
-            for collection in collections:
-                layout.label(text=collection.name)
-        else:
-            layout.label(text="Object is not linked to a collection.", icon='ERROR')
-
-        layout.operator(
-            "object.rcad_select_active_collection",
-            text="Select Collection Now",
-            icon='RESTRICT_SELECT_OFF',
-        )
-
-
-classes = (
-    OBJECT_OT_rcad_select_active_collection,
-    OBJECT_PT_rcad_auto_select_collection,
-)
+def _draw_select_menu(self, context):
+    """Add the automatic collection-selection toggle to Blender's Select menu."""
+    self.layout.separator()
+    self.layout.prop(
+        context.scene,
+        PROPERTY_NAME,
+        text="Select Collection on Click",
+    )
 
 
 def register():
     global _last_selection_state
-    for cls in classes:
-        bpy.utils.register_class(cls)
-
     bpy.types.Scene.rcad_auto_select_collection = BoolProperty(
         name="Select Collection on Click",
         description="Automatically select visible objects sharing a collection with the active object",
         default=True,
         update=_enabled_update,
     )
+    bpy.types.VIEW3D_MT_select_object.append(_draw_select_menu)
     if _selection_update_handler not in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.append(_selection_update_handler)
     if _reset_selection_state_after_file_load not in bpy.app.handlers.load_post:
@@ -267,6 +215,10 @@ def register():
 
 def unregister():
     global _last_selection_state, _selection_timer_pending
+    try:
+        bpy.types.VIEW3D_MT_select_object.remove(_draw_select_menu)
+    except (AttributeError, ValueError):
+        pass
     try:
         bpy.app.timers.unregister(_apply_pending_selection)
     except (RuntimeError, ValueError):
@@ -281,9 +233,6 @@ def unregister():
 
     if hasattr(bpy.types.Scene, PROPERTY_NAME):
         delattr(bpy.types.Scene, PROPERTY_NAME)
-
-    for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
 
 
 if __name__ == "__main__":
