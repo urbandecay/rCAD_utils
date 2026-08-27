@@ -27,6 +27,7 @@ from . import projection
 from . import edge_knife_project
 from . import axis_edge_highlight
 from . import part_separator
+from . import auto_select_collection
 from .texture_sampler import (
     MESH_OT_TextureSampler,
     MESH_OT_TextureSamplerMoveUV,
@@ -90,6 +91,7 @@ def register():
     edge_knife_project.register()
     axis_edge_highlight.register()
     part_separator.register()
+    auto_select_collection.register()
     bpy.types.Scene.profile_path_mode = BoolProperty(name="Path Mode", default=False)
     bpy.types.Scene.cool_bool_solver = bpy.props.EnumProperty(
         name="Solver",
@@ -110,6 +112,7 @@ def register():
 
 def unregister():
     axis_edge_highlight.unregister()
+    auto_select_collection.unregister()
     edge_knife_project.unregister()
     part_separator.unregister()
     projection.unregister()
