@@ -55,6 +55,25 @@ def separate_and_find_new(context, objects_before):
     return None
 
 
+def reverse_mesh_normals(obj):
+    """Reverse all face winding without depending on the active mode.
+
+    For an open Boolean operand, face winding is the only indication of which
+    side of the surface is treated as the cutter.  Reversing every face keeps
+    the relative winding of a multi-face cutter intact while changing that
+    side globally.
+    """
+    mesh = obj.data
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(mesh)
+        bmesh.ops.reverse_faces(bm, faces=list(bm.faces))
+        bm.to_mesh(mesh)
+        mesh.update()
+    finally:
+        bm.free()
+
+
 # --- OPERATOR ---
 
 class MESH_OT_CoolBool(bpy.types.Operator):
@@ -69,7 +88,8 @@ class MESH_OT_CoolBool(bpy.types.Operator):
     keep_cutter: bpy.props.BoolProperty(name="Keep Cutter", default=False)
     intersect_with_cutter: bpy.props.BoolProperty(name="Intersect with Cutter", default=False)
     merge_intersections: bpy.props.BoolProperty(name="Merge Intersections", default=False)
-    swap_subtract: bpy.props.BoolProperty(name="Swap", default=False, description="Targets cut into the cutter instead of cutter cutting into targets")
+    swap_subtract: bpy.props.BoolProperty(name="Swap Cutter", default=False, description="Targets cut into the cutter instead of cutter cutting into targets")
+    invert_cutter: bpy.props.BoolProperty(name="Invert", default=False, description="Reverse the open cutter so Difference keeps the opposite side")
     merge_subtract_results: bpy.props.BoolProperty(name="Merge Results", default=False)
     limited_dissolve: bpy.props.BoolProperty(name="Limited Dissolve", default=True)
     dissolve_per_iteration: bpy.props.BoolProperty(name="Per Iteration", default=True)
@@ -79,6 +99,8 @@ class MESH_OT_CoolBool(bpy.types.Operator):
         layout.prop(self, "keep_cutter")
         if self.operation_mode == 'SUBTRACT':
             layout.prop(self, "swap_subtract")
+            if not self.swap_subtract:
+                layout.prop(self, "invert_cutter")
             layout.prop(self, "merge_subtract_results")
         elif self.operation_mode == 'INTERSECT':
             row = layout.row()
@@ -162,6 +184,17 @@ class MESH_OT_CoolBool(bpy.types.Operator):
                     bpy.ops.mesh.select_all(action='SELECT')
                     bpy.ops.mesh.normals_make_consistent(inside=False)
                     bpy.ops.object.mode_set(mode='OBJECT')
+                # Recalculate first, then invert.  Recalculating an open mesh
+                # can choose a new global winding and would otherwise cancel
+                # the user's choice before the Boolean modifier sees it.
+                if (
+                    self.operation_mode == 'SUBTRACT'
+                    and not self.swap_subtract
+                    and self.invert_cutter
+                    and operand is cutter_obj
+                    and op == 'DIFFERENCE'
+                ):
+                    reverse_mesh_normals(cutter_obj)
                 mod = main.modifiers.new("CB", 'BOOLEAN')
                 mod.operation = op
                 mod.object = operand
