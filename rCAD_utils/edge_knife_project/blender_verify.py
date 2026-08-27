@@ -118,10 +118,65 @@ def verify_preview_cut_line():
     bm.free()
 
 
+def verify_existing_straight_seam_is_split():
+    mesh = bpy.data.meshes.new("ExistingSeamMesh")
+    obj = bpy.data.objects.new("ExistingSeam", mesh)
+    bpy.context.scene.collection.objects.link(obj)
+
+    bm = bmesh.new()
+    bottom_left = bm.verts.new((0.0, -1.0, -1.0))
+    bottom_right = bm.verts.new((0.0, 1.0, -1.0))
+    seam_right = bm.verts.new((0.0, 1.0, 0.5))
+    seam_left = bm.verts.new((0.0, -1.0, 0.5))
+    top_right = bm.verts.new((0.0, 1.0, 1.0))
+    top_left = bm.verts.new((0.0, -1.0, 1.0))
+    lower = bm.faces.new((bottom_left, bottom_right, seam_right, seam_left))
+    upper = bm.faces.new((seam_left, seam_right, top_right, top_left))
+    cutter_first = bm.verts.new((2.0, -1.0, 0.5))
+    cutter_second = bm.verts.new((2.0, 1.0, 0.5))
+    bm.edges.new((cutter_first, cutter_second))
+    bm.to_mesh(mesh)
+    bm.free()
+
+    check = bmesh.new()
+    check.from_mesh(mesh)
+    check.faces.ensure_lookup_table()
+    check.edges.ensure_lookup_table()
+    target_faces = list(check.faces)[:2]
+    lower, upper = target_faces
+    seam_edge = next(
+        edge
+        for edge in check.edges
+        if len(edge.link_faces) == 2
+        and all(abs(vert.co.z - 0.5) <= TOLERANCE for vert in edge.verts)
+    )
+    cutter_edge = next(
+        edge
+        for edge in check.edges
+        if all(abs(vert.co.x - 2.0) <= TOLERANCE for vert in edge.verts)
+    )
+    cutter_segments = [
+        (obj.matrix_world @ cutter_edge.verts[0].co,
+         obj.matrix_world @ cutter_edge.verts[1].co),
+    ]
+    seams = operators._projected_seam_edges(
+        obj,
+        check.edges,
+        cutter_segments,
+        Vector((-1.0, 0.0, 0.0)),
+        1.0e-6,
+    )
+    assert seam_edge in seams, "existing straight seam was not detected"
+    bmesh.ops.split_edges(check, edges=seams)
+    assert not set(lower.verts) & set(upper.verts), "existing seam stayed connected"
+    check.free()
+
+
 def main():
     verify_nearest_surface_avoids_centroid_tilt()
     verify_transformed_target_uses_world_space()
     verify_preview_cut_line()
+    verify_existing_straight_seam_is_split()
     print("EDGE_KNIFE_PROJECT_VERIFICATION_OK")
 
 
