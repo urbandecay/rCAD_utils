@@ -323,9 +323,9 @@ class _CoolBoolExecution:
     limited-dissolve behavior.
     """
 
-    def __init__(self, invert_cutter, solver_mode):
+    def __init__(self, invert_cutter, solver_mode, keep_cutter=False):
         self.operation_mode = 'SUBTRACT'
-        self.keep_cutter = False
+        self.keep_cutter = keep_cutter
         self.intersect_with_cutter = False
         self.merge_intersections = False
         self.swap_subtract = False
@@ -341,13 +341,22 @@ class _CoolBoolExecution:
             self.errors.append(message)
 
 
-def subtract_selected_islands(context, invert_cutter=False, solver_mode='EXACT'):
+def subtract_selected_islands(
+    context,
+    invert_cutter=False,
+    keep_cutter=False,
+    solver_mode='EXACT',
+):
     """Run copied Cool Bool Difference logic on the active edit mesh.
 
     The active mesh must already contain the selected target and cutter
     islands, with the cutter island represented by the active BMesh element.
     """
-    execution = _CoolBoolExecution(invert_cutter, solver_mode)
+    execution = _CoolBoolExecution(
+        invert_cutter,
+        solver_mode,
+        keep_cutter,
+    )
     result = MESH_OT_CoolBool.execute(execution, context)
     if execution.errors:
         raise RuntimeError(execution.errors[-1])

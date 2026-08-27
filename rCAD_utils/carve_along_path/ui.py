@@ -10,6 +10,18 @@ from .eap_adapter import extrude_faces_to_cutter
 from .cool_bool import subtract_selected_islands
 
 
+_last_keep_cutter = False
+
+
+def _get_keep_cutter(operator):
+    return _last_keep_cutter
+
+
+def _set_keep_cutter(operator, value):
+    global _last_keep_cutter
+    _last_keep_cutter = bool(value)
+
+
 def _active_mesh_in_edit_mode(context):
     object_active = context.active_object
     return (
@@ -345,12 +357,22 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
         default=False,
         description="Reverse the swept cutter so Difference keeps the opposite side",
     )
+    keep_cutter: bpy.props.BoolProperty(
+        name="Keep Cutter",
+        default=False,
+        get=_get_keep_cutter,
+        set=_set_keep_cutter,
+        description="Keep the swept cutter joined to the carved result",
+    )
 
     def draw(self, context):
-        self.layout.prop(self, "invert_cutter")
+        row = self.layout.row(align=True)
+        row.prop(self, "invert_cutter")
+        row.prop(self, "keep_cutter")
 
     def execute(self, context):
         target = context.active_object
+        keep_cutter = bool(self.keep_cutter)
         if not _active_mesh_in_edit_mode(context):
             self.report({'ERROR'}, "Select a mesh in Edit Mode before carving.")
             return {'CANCELLED'}
@@ -465,6 +487,7 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
             subtract_selected_islands(
                 context,
                 invert_cutter=self.invert_cutter,
+                keep_cutter=keep_cutter,
                 solver_mode=solver,
             )
 
