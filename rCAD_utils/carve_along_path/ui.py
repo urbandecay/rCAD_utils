@@ -11,7 +11,6 @@ from .cool_bool import subtract_selected_islands
 
 
 _last_keep_profile = False
-_last_profile_snapshot = None
 
 
 def _get_keep_profile(operator):
@@ -21,85 +20,6 @@ def _get_keep_profile(operator):
 def _set_keep_profile(operator, value):
     global _last_keep_profile
     _last_keep_profile = bool(value)
-
-
-def _remember_profile_snapshot(target, path_edges, path_start, captured):
-    global _last_profile_snapshot
-    (
-        profile_indices,
-        profile_coordinates,
-        profile_edges,
-        profile_faces,
-        profile_face_indices,
-    ) = captured
-    _last_profile_snapshot = {
-        "mesh_name": target.data.name,
-        "path_edges": tuple(tuple(edge) for edge in path_edges),
-        "path_start": path_start,
-        "profile_indices": tuple(profile_indices),
-        "profile_coordinates": [coordinate.copy() for coordinate in profile_coordinates],
-        "profile_edges": [tuple(edge) for edge in profile_edges],
-        "profile_faces": [tuple(face) for face in profile_faces],
-    }
-
-
-def _restore_profile_snapshot(target, bm, path_edges, path_start):
-    snapshot = _last_profile_snapshot
-    if snapshot is None:
-        return None
-    if snapshot["mesh_name"] != target.data.name:
-        return None
-    if snapshot["path_start"] != path_start:
-        return None
-    if snapshot["path_edges"] != tuple(tuple(edge) for edge in path_edges):
-        return None
-
-    coordinate_keys = [
-        tuple(round(value, 6) for value in coordinate)
-        for coordinate in snapshot["profile_coordinates"]
-    ]
-    vertices_by_coordinate = {}
-    for vertex in bm.verts:
-        key = tuple(round(value, 6) for value in vertex.co)
-        vertices_by_coordinate.setdefault(key, []).append(vertex.index)
-
-    profile_indices = []
-    used_indices = set()
-    for key in coordinate_keys:
-        candidates = vertices_by_coordinate.get(key, [])
-        candidate = next(
-            (index for index in candidates if index not in used_indices),
-            None,
-        )
-        if candidate is None:
-            return None
-        profile_indices.append(candidate)
-        used_indices.add(candidate)
-
-    profile_face_indices = set()
-    for face_vertices in snapshot["profile_faces"]:
-        expected_keys = sorted(coordinate_keys[index] for index in face_vertices)
-        matching_face = next(
-            (
-                face for face in bm.faces
-                if sorted(
-                    tuple(round(value, 6) for value in vertex.co)
-                    for vertex in face.verts
-                ) == expected_keys
-            ),
-            None,
-        )
-        if matching_face is None:
-            return None
-        profile_face_indices.add(matching_face.index)
-
-    return (
-        profile_indices,
-        [coordinate.copy() for coordinate in snapshot["profile_coordinates"]],
-        [tuple(edge) for edge in snapshot["profile_edges"]],
-        [list(face) for face in snapshot["profile_faces"]],
-        profile_face_indices,
-    )
 
 
 def _active_mesh_in_edit_mode(context):
@@ -341,32 +261,7 @@ def _make_profile_object(target, profile_coordinates, profile_edges, profile_fac
     return profile_object
 
 
-def _remove_profile_faces(target, profile_indices, profile_face_indices):
-    """Remove source profile faces while leaving the target boundary intact."""
-    if not profile_face_indices:
-        return
-
-    profile_bm = bmesh.new()
-    try:
-        profile_bm.from_mesh(target.data)
-        profile_bm.faces.ensure_lookup_table()
-        profile_vertices = set(profile_indices)
-        profile_faces = [
-            face
-            for face in profile_bm.faces
-            if face.index in profile_face_indices
-            and all(vertex.index in profile_vertices for vertex in face.verts)
-        ]
-        if not profile_faces:
-            return
-        bmesh.ops.delete(profile_bm, geom=profile_faces, context='FACES')
-        profile_bm.to_mesh(target.data)
-        target.data.update()
-    finally:
-        profile_bm.free()
-
-
-def _append_kept_profile(target, profile_object, reuse_existing_vertices=False):
+def _append_kept_profile(target, profile_object):
     """Append the preserved source profile to the carved target mesh."""
     if profile_object is None:
         return
@@ -383,24 +278,9 @@ def _append_kept_profile(target, profile_object, reuse_existing_vertices=False):
         profile_to_target = (
             target.matrix_world.inverted_safe() @ profile_object.matrix_world
         )
-
-        existing_vertices = {}
-        if reuse_existing_vertices:
-            for vertex in target_bm.verts:
-                key = tuple(round(value, 6) for value in vertex.co)
-                existing_vertices.setdefault(key, vertex)
-
-        profile_vertices = []
-        for vertex in profile_bm.verts:
-            profile_co = profile_to_target @ vertex.co
-            key = tuple(round(value, 6) for value in profile_co)
-            target_vertex = existing_vertices.get(key)
-            if target_vertex is None:
-                target_vertex = target_bm.verts.new(profile_co)
-            profile_vertices.append((vertex, target_vertex))
         vertex_map = {
-            profile_vertex: target_vertex
-            for profile_vertex, target_vertex in profile_vertices
+            vertex: target_bm.verts.new(profile_to_target @ vertex.co)
+            for vertex in profile_bm.verts
         }
 
         for edge in profile_bm.edges:
@@ -572,28 +452,6 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
             profile_faces,
             profile_face_indices,
         ) = captured
-        if profile_indices:
-            _remember_profile_snapshot(
-                target,
-                cap_buf.list_ek,
-                cap_buf.list_sp[0],
-                captured,
-            )
-        elif keep_profile:
-            restored_profile = _restore_profile_snapshot(
-                target,
-                bm,
-                cap_buf.list_ek,
-                cap_buf.list_sp[0],
-            )
-            if restored_profile is not None:
-                (
-                    profile_indices,
-                    profile_coordinates,
-                    profile_edges,
-                    profile_faces,
-                    profile_face_indices,
-                ) = restored_profile
         if not profile_indices:
             self.report({'ERROR'}, "Select a face profile before carving.")
             return {'CANCELLED'}
@@ -623,7 +481,7 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
         wm.progress_begin(0, 100)
 
         try:
-            if keep_profile and (profile_faces or profile_edges):
+            if keep_profile and cleanup_vertices and (profile_faces or profile_edges):
                 profile_object = _make_profile_object(
                     target,
                     profile_coordinates,
@@ -682,12 +540,6 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
             _deselect_all_objects(context)
             target.select_set(True)
             context.view_layer.objects.active = target
-            if keep_profile and not cleanup_vertices:
-                _remove_profile_faces(
-                    target,
-                    profile_indices,
-                    profile_face_indices,
-                )
             _remove_source_geometry(target, cleanup_vertices)
             # The operation order is deliberate: EAP has already produced
             # the cutter above.  Now perform the same joined-island setup that
@@ -708,11 +560,7 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
 
             _remove_temporary_materials(temporary_materials)
             temporary_materials = []
-            _append_kept_profile(
-                target,
-                profile_object,
-                reuse_existing_vertices=not cleanup_vertices,
-            )
+            _append_kept_profile(target, profile_object)
             _remove_temporary_object(profile_object)
             profile_object = None
 
