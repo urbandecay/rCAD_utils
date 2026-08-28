@@ -1171,7 +1171,7 @@ class MESH_OT_rcad_separate_parts(bpy.types.Operator):
 
         if was_edit:
             bpy.ops.object.mode_set(mode='EDIT')
-            bpy.ops.mesh.select_all(action='SELECT')
+            bpy.ops.mesh.select_all(action='DESELECT')
 
         label = ", ".join(sorted(detection_labels))
         self.report(
