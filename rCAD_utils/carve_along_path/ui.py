@@ -450,7 +450,7 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
     invert_cutter: bpy.props.BoolProperty(
         name="Invert",
         default=False,
-        description="Reverse the swept cutter so Difference keeps the opposite side",
+        description="Keep the opposite side of the swept cutter",
     )
     keep_profile: bpy.props.BoolProperty(
         name="Keep Profile",

@@ -81,6 +81,35 @@ def reverse_mesh_normals(obj):
         bm.free()
 
 
+def mesh_is_closed(obj):
+    """Return whether *obj* is a closed, two-manifold mesh shell.
+
+    Reversing the winding of an open cutter changes the side of its surface
+    that Blender classifies as the cutter.  A closed cutter instead describes
+    a volume, so its opposite side is the volume *inside* the cutter and must
+    be obtained with an intersection.  Treat non-manifold meshes as open so
+    their existing winding-based behavior remains available.
+    """
+    if obj is None or obj.type != 'MESH':
+        return False
+
+    mesh = obj.data
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(mesh)
+        if not bm.faces or not bm.edges:
+            return False
+        return all(
+            len(edge.link_faces) == 2
+            for edge in bm.edges
+        ) and all(
+            bool(vertex.link_faces)
+            for vertex in bm.verts
+        )
+    finally:
+        bm.free()
+
+
 # --- OPERATOR ---
 
 class MESH_OT_CoolBool(bpy.types.Operator):
@@ -96,7 +125,7 @@ class MESH_OT_CoolBool(bpy.types.Operator):
     intersect_with_cutter: bpy.props.BoolProperty(name="Intersect with Cutter", default=False)
     merge_intersections: bpy.props.BoolProperty(name="Merge Intersections", default=False)
     swap_subtract: bpy.props.BoolProperty(name="Swap Cutter", default=False, description="Targets cut into the cutter instead of cutter cutting into targets")
-    invert_cutter: bpy.props.BoolProperty(name="Invert", default=False, description="Reverse the open cutter so Difference keeps the opposite side")
+    invert_cutter: bpy.props.BoolProperty(name="Invert", default=False, description="Keep the opposite side of the cutter")
     merge_subtract_results: bpy.props.BoolProperty(name="Merge Results", default=False)
     limited_dissolve: bpy.props.BoolProperty(name="Limited Dissolve", default=True)
     dissolve_per_iteration: bpy.props.BoolProperty(name="Per Iteration", default=True)
@@ -106,8 +135,7 @@ class MESH_OT_CoolBool(bpy.types.Operator):
         layout.prop(self, "keep_cutter")
         if self.operation_mode == 'SUBTRACT':
             layout.prop(self, "swap_subtract")
-            if not self.swap_subtract:
-                layout.prop(self, "invert_cutter")
+            layout.prop(self, "invert_cutter")
             layout.prop(self, "merge_subtract_results")
         elif self.operation_mode == 'INTERSECT':
             row = layout.row()
@@ -193,19 +221,31 @@ class MESH_OT_CoolBool(bpy.types.Operator):
                     bpy.ops.mesh.select_all(action='SELECT')
                     bpy.ops.mesh.normals_make_consistent(inside=False)
                     bpy.ops.object.mode_set(mode='OBJECT')
-                # Recalculate first, then invert.  Recalculating an open mesh
-                # can choose a new global winding and would otherwise cancel
-                # the user's choice before the Boolean modifier sees it.
-                if (
+                invert_subtract = (
                     self.operation_mode == 'SUBTRACT'
-                    and not self.swap_subtract
                     and self.invert_cutter
-                    and operand is cutter_obj
                     and op == 'DIFFERENCE'
-                ):
-                    reverse_mesh_normals(cutter_obj)
+                    and (
+                        (not self.swap_subtract and operand is cutter_obj)
+                        or (self.swap_subtract and main is cutter_obj)
+                    )
+                )
+                boolean_operation = op
+                if invert_subtract:
+                    if mesh_is_closed(operand):
+                        # A closed split operand represents a volume.  Its
+                        # opposite side is the part shared by the main object
+                        # and operand; face reversal would make the closed
+                        # operand invalid for Boolean volume classification.
+                        boolean_operation = 'INTERSECT'
+                    else:
+                        # Recalculate first, then invert.  Recalculating an
+                        # open mesh can choose a new global winding and would
+                        # otherwise cancel the user's choice before the
+                        # Boolean modifier sees it.
+                        reverse_mesh_normals(operand)
                 mod = main.modifiers.new("CB", 'BOOLEAN')
-                mod.operation = op
+                mod.operation = boolean_operation
                 mod.object = operand
                 mod.solver = solver_mode
                 bpy.ops.object.select_all(action='DESELECT')
