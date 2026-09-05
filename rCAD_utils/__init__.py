@@ -21,9 +21,11 @@ from .place_profile import (
     OBJECT_OT_profile_rotate_axis,
 )
 from .cool_bool import MESH_OT_CoolBool
+from .explode_edges import MESH_OT_ExplodeEdges, draw_split_menu
 from .mesh_tiler import MESH_OT_MeshTiler
 from .mesh_tiler.preview import MESH_OT_MeshTilerPreview
 from . import weld_tools
+from . import split_tools
 from . import vertex_resampler
 from . import projection
 from . import edge_knife_project
@@ -59,6 +61,8 @@ classes = [
     OBJECT_OT_place_profile_on_edges_edit,
     # Cool Bool operator
     MESH_OT_CoolBool,
+    # Edge tools
+    MESH_OT_ExplodeEdges,
     # Mesh Tiler operators
     MESH_OT_MeshTiler,
     MESH_OT_MeshTilerPreview,
@@ -91,7 +95,9 @@ def register():
     cap_options.register_options()
     for cls in classes:
         bpy.utils.register_class(cls)
+    bpy.types.VIEW3D_MT_edit_mesh_split.append(draw_split_menu)
     weld_tools.register()
+    split_tools.register()
     _1d_tools.register()
     vertex_resampler.register()
     projection.register()
@@ -118,6 +124,7 @@ def register():
 
 
 def unregister():
+    bpy.types.VIEW3D_MT_edit_mesh_split.remove(draw_split_menu)
     axis_edge_highlight.unregister()
     auto_select_collection.unregister()
     edge_knife_project.unregister()
@@ -125,6 +132,7 @@ def unregister():
     projection.unregister()
     vertex_resampler.unregister()
     _1d_tools.unregister()
+    split_tools.unregister()
     weld_tools.unregister()
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
