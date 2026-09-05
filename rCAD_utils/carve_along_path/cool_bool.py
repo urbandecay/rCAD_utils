@@ -13,6 +13,8 @@ from collections import deque
 
 # --- CORE HELPERS ---
 
+ISLAND_MARKER = "__cool_bool_island_id__"
+
 def find_selected_islands(bm):
     islands_indices = []
     visited = set()
@@ -37,21 +39,64 @@ def find_selected_islands(bm):
     return islands_indices
 
 
-def select_island_geometry_by_positions(bm, positions_set):
+def mark_selected_islands(bm, islands):
+    """Attach a temporary stable ID to every selected island vertex."""
+    bm.verts.ensure_lookup_table()
+    marker = bm.verts.layers.int.get(ISLAND_MARKER)
+    if marker is None:
+        marker = bm.verts.layers.int.new(ISLAND_MARKER)
+
+    for vertex in bm.verts:
+        vertex[marker] = -1
+    for island_index, island in enumerate(islands):
+        for vertex_index in island:
+            bm.verts[vertex_index][marker] = island_index
+    return ISLAND_MARKER
+
+
+def select_island_geometry_by_marker(bm, marker_name, island_index):
+    """Select one original island without matching coincident coordinates."""
+    marker = bm.verts.layers.int.get(marker_name)
+    if marker is None:
+        return False
+
     for v in bm.verts: v.select_set(False)
     for e in bm.edges: e.select_set(False)
     for f in bm.faces: f.select_set(False)
-    count = 0
-    for v in bm.verts:
-        coord = (round(v.co.x, 6), round(v.co.y, 6), round(v.co.z, 6))
-        if coord in positions_set:
-            v.select_set(True)
-            count += 1
+    selected_verts = {
+        vertex for vertex in bm.verts
+        if vertex[marker] == island_index
+    }
+    if not selected_verts:
+        return False
+
+    for vertex in selected_verts:
+        vertex.select_set(True)
     for e in bm.edges:
-        if all(v.select for v in e.verts): e.select_set(True)
+        if all(vertex in selected_verts for vertex in e.verts):
+            e.select_set(True)
     for f in bm.faces:
-        if all(v.select for v in f.verts): f.select_set(True)
-    return count > 0
+        if all(vertex in selected_verts for vertex in f.verts):
+            f.select_set(True)
+    return True
+
+
+def remove_island_marker(obj, marker_name):
+    """Remove the temporary island ID from an object mesh."""
+    if obj is None or obj.type != 'MESH':
+        return
+
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(obj.data)
+        marker = bm.verts.layers.int.get(marker_name)
+        if marker is None:
+            return
+        bm.verts.layers.int.remove(marker)
+        bm.to_mesh(obj.data)
+        obj.data.update()
+    finally:
+        bm.free()
 
 
 def separate_and_find_new(context, objects_before):
@@ -60,6 +105,21 @@ def separate_and_find_new(context, objects_before):
     new_objects = list(objects_after - objects_before)
     if len(new_objects) == 1: return new_objects[0]
     return None
+
+
+def duplicate_mesh_object(source, name):
+    """Create an independent object/data copy for a second Boolean result."""
+    duplicate = source.copy()
+    duplicate.data = source.data.copy()
+    duplicate.name = name
+    collections = list(source.users_collection)
+    if collections:
+        for collection in collections:
+            collection.objects.link(duplicate)
+    else:
+        bpy.context.collection.objects.link(duplicate)
+    duplicate.matrix_world = source.matrix_world.copy()
+    return duplicate
 
 
 def reverse_mesh_normals(obj):
@@ -118,7 +178,12 @@ class MESH_OT_CoolBool(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     operation_mode: bpy.props.EnumProperty(
-        items=[('UNION', "Union", ""), ('SUBTRACT', "Subtract", ""), ('INTERSECT', "Intersect", "")],
+        items=[
+            ('UNION', "Union", ""),
+            ('SUBTRACT', "Subtract", ""),
+            ('INTERSECT', "Intersect", ""),
+            ('SPLIT', "Split", ""),
+        ],
         default='UNION',
     )
     keep_cutter: bpy.props.BoolProperty(name="Keep Cutter", default=False)
@@ -142,10 +207,11 @@ class MESH_OT_CoolBool(bpy.types.Operator):
             row.prop(self, "intersect_with_cutter")
             if self.intersect_with_cutter:
                 row.prop(self, "merge_intersections")
-        row = layout.row()
-        row.prop(self, "limited_dissolve")
-        if self.limited_dissolve:
-            row.prop(self, "dissolve_per_iteration")
+        if self.operation_mode != 'SPLIT':
+            row = layout.row()
+            row.prop(self, "limited_dissolve")
+            if self.limited_dissolve:
+                row.prop(self, "dissolve_per_iteration")
 
     def execute(self, context):
         wm = context.window_manager
@@ -179,41 +245,47 @@ class MESH_OT_CoolBool(bpy.types.Operator):
                 for i, island in enumerate(islands):
                     if active_index in island: cutter_index = i; break
 
-            islands_data = []
-            for island in islands:
-                pos_set = set()
-                for idx in island:
-                    v = bm.verts[idx]
-                    pos_set.add((round(v.co.x, 6), round(v.co.y, 6), round(v.co.z, 6)))
-                islands_data.append(pos_set)
-
-            cutter_pos = islands_data[cutter_index]
-            target_pos_list = [d for i, d in enumerate(islands_data) if i != cutter_index]
+            island_marker_name = mark_selected_islands(bm, islands)
+            bmesh.update_edit_mesh(original_obj.data)
+            target_island_indices = [
+                i for i in range(len(islands))
+                if i != cutter_index
+            ]
 
             bpy.ops.object.mode_set(mode='EDIT')
             bm = bmesh.from_edit_mesh(original_obj.data)
-            select_island_geometry_by_positions(bm, cutter_pos)
+            select_island_geometry_by_marker(
+                bm,
+                island_marker_name,
+                cutter_index,
+            )
             bmesh.update_edit_mesh(original_obj.data)
             objs_before = set(context.scene.objects)
             cutter_obj = separate_and_find_new(context, objs_before)
             cutter_obj.name = "CB_Main_Temp"
 
             target_objects = []
-            for i, t_pos in enumerate(target_pos_list):
+            for i, island_index in enumerate(target_island_indices):
                 context.view_layer.objects.active = original_obj
                 bpy.ops.object.mode_set(mode='EDIT')
                 bm = bmesh.from_edit_mesh(original_obj.data)
-                if select_island_geometry_by_positions(bm, t_pos):
+                if select_island_geometry_by_marker(
+                    bm,
+                    island_marker_name,
+                    island_index,
+                ):
                     bmesh.update_edit_mesh(original_obj.data)
                     objs_before = set(context.scene.objects)
                     t_obj = separate_and_find_new(context, objs_before)
                     if t_obj: t_obj.name = f"CB_Target_{i}"; target_objects.append(t_obj)
 
             if context.mode != 'OBJECT': bpy.ops.object.mode_set(mode='OBJECT')
+            for marker_obj in [original_obj, cutter_obj] + target_objects:
+                remove_island_marker(marker_obj, island_marker_name)
             final_objects = []
             objects_to_delete = []
 
-            def apply_bool_and_clean(main, operand, op):
+            def apply_bool_and_clean(main, operand, op, force_invert=False):
                 if context.mode != 'OBJECT': bpy.ops.object.mode_set(mode='OBJECT')
                 for recalc_obj in (main, operand):
                     context.view_layer.objects.active = recalc_obj
@@ -222,12 +294,17 @@ class MESH_OT_CoolBool(bpy.types.Operator):
                     bpy.ops.mesh.normals_make_consistent(inside=False)
                     bpy.ops.object.mode_set(mode='OBJECT')
                 invert_subtract = (
-                    self.operation_mode == 'SUBTRACT'
-                    and self.invert_cutter
-                    and op == 'DIFFERENCE'
+                    op == 'DIFFERENCE'
                     and (
-                        (not self.swap_subtract and operand is cutter_obj)
-                        or (self.swap_subtract and main is cutter_obj)
+                        force_invert
+                        or (
+                            self.operation_mode == 'SUBTRACT'
+                            and self.invert_cutter
+                            and (
+                                (not self.swap_subtract and operand is cutter_obj)
+                                or (self.swap_subtract and main is cutter_obj)
+                            )
+                        )
                     )
                 )
                 boolean_operation = op
@@ -317,6 +394,40 @@ class MESH_OT_CoolBool(bpy.types.Operator):
                         apply_bool_and_clean(result_obj, next_obj, 'INTERSECT')
                         objects_to_delete.append(next_obj)
                     final_objects.append(result_obj)
+
+            elif self.operation_mode == 'SPLIT':
+                split_results = []
+                closed_cutter = mesh_is_closed(cutter_obj)
+                for index, t_obj in enumerate(target_objects):
+                    opposite_obj = duplicate_mesh_object(t_obj, f"CB_Split_{index}")
+
+                    # Keep the ordinary outside and inside results as two
+                    # independent mesh objects.  A closed cutter's opposite
+                    # side is an intersection; an open cutter needs the same
+                    # winding reversal used by inverted subtraction.
+                    apply_bool_and_clean(t_obj, cutter_obj, 'DIFFERENCE')
+                    if closed_cutter:
+                        apply_bool_and_clean(opposite_obj, cutter_obj, 'INTERSECT')
+                    else:
+                        split_cutter = duplicate_mesh_object(
+                            cutter_obj,
+                            f"CB_Split_Cutter_{index}",
+                        )
+                        apply_bool_and_clean(
+                            opposite_obj,
+                            split_cutter,
+                            'DIFFERENCE',
+                            force_invert=True,
+                        )
+                        objects_to_delete.append(split_cutter)
+
+                    split_results.extend((t_obj, opposite_obj))
+
+                if keep_cutter_setting:
+                    final_objects.append(cutter_obj)
+                else:
+                    objects_to_delete.append(cutter_obj)
+                final_objects.extend(split_results)
 
             if context.mode != 'OBJECT': bpy.ops.object.mode_set(mode='OBJECT')
 

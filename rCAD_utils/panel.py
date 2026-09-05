@@ -182,6 +182,7 @@ class RCAD_PT_CoolBool(bpy.types.Panel):
         row.operator("mesh.cool_bool", text="Union").operation_mode = 'UNION'
         row.operator("mesh.cool_bool", text="Subtract").operation_mode = 'SUBTRACT'
         row.operator("mesh.cool_bool", text="Intersect").operation_mode = 'INTERSECT'
+        row.operator("mesh.cool_bool", text="Split").operation_mode = 'SPLIT'
         col.separator()
 
 
