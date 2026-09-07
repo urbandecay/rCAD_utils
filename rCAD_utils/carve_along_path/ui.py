@@ -8,10 +8,9 @@ from .extrude import (
 )
 from .eap_adapter import extrude_faces_to_cutter
 from .profile_extrusion import (
-    connect_profile_across_removed_vertices,
     extrude_profile_endpoints,
     find_profile_vertices_on_edges,
-    profile_bridge_pairs,
+    remove_profile_edges_at_vertices,
     select_complete_profile,
 )
 from .cool_bool import subtract_selected_islands
@@ -127,15 +126,6 @@ def _capture_profile(bm, matrix_world):
             continue
         seen_edges.add(edge_key)
         profile_edges.append((index_lookup[first], index_lookup[second]))
-
-    for first, second in profile_bridge_pairs(
-        bm, original_profile_indices, removed_profile_indices,
-    ):
-        if first not in index_lookup or second not in index_lookup:
-            continue
-        edge = (index_lookup[first], index_lookup[second])
-        if edge not in profile_edges and edge[::-1] not in profile_edges:
-            profile_edges.append(edge)
 
     profile_faces = []
     profile_face_indices = set()
@@ -570,9 +560,10 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
             source_object.matrix_world = target.matrix_world.copy()
             source_bm = bm.copy()
             check_lukap(source_bm)
-            source_profile_indices = profile_indices + list(removed_profile_indices)
-            connect_profile_across_removed_vertices(
-                source_bm, source_profile_indices, removed_profile_indices,
+            remove_profile_edges_at_vertices(
+                source_bm,
+                profile_indices + list(removed_profile_indices),
+                removed_profile_indices,
             )
             complete_profile = extrude_profile_endpoints(
                 source_bm, profile_indices, target.matrix_world,

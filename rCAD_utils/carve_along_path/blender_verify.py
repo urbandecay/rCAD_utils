@@ -13,10 +13,9 @@ import carve_along_path
 from carve_along_path.extrude import cap_buf
 from carve_along_path.extrude_along_path import extrude
 from carve_along_path.profile_extrusion import (
-    connect_profile_across_removed_vertices,
     extrude_profile_endpoints,
     find_profile_vertices_on_edges,
-    profile_bridge_pairs,
+    remove_profile_edges_at_vertices,
 )
 
 
@@ -24,8 +23,9 @@ def verify_profile_edge_point_cleanup():
     bm = bmesh.new()
     try:
         bmesh.ops.create_cube(bm, size=2)
+        cube_vertices = list(bm.verts)
         profile = [
-            bm.verts.new((-1.0, -1.0, 0.5)),
+            bm.verts.new((-0.8, -1.0, 0.5)),
             bm.verts.new((0.0, -1.0, 1.0)),
             bm.verts.new((1.0, -1.0, 1.5)),
         ]
@@ -37,17 +37,24 @@ def verify_profile_edge_point_cleanup():
             bm, indices, Matrix.Identity(4),
         )
         assert removed == {profile[1].index}, removed
-        bridges = profile_bridge_pairs(bm, indices, removed)
-        assert bridges == {(profile[0].index, profile[2].index)}, bridges
-        connect_profile_across_removed_vertices(bm, indices, removed)
-        assert any(
-            {vertex.index for vertex in edge.verts}
-            == {profile[0].index, profile[2].index}
+        remove_profile_edges_at_vertices(bm, indices, removed)
+        assert not any(
+            profile[1] in edge.verts
             for edge in bm.edges
+            if all(vertex in profile for vertex in edge.verts)
         )
 
+        endpoint = bm.verts.new((-1.0, -1.0, 0.5))
+        endpoint_neighbor = bm.verts.new((-0.8, -0.5, 0.5))
+        bm.edges.new((endpoint, endpoint_neighbor))
+        bm.verts.index_update()
+        removed_endpoint = find_profile_vertices_on_edges(
+            bm, [endpoint.index, endpoint_neighbor.index], Matrix.Identity(4),
+        )
+        assert removed_endpoint == {endpoint.index}, removed_endpoint
+
         cube_top = [
-            vertex for vertex in bm.verts
+            vertex for vertex in cube_vertices
             if abs(vertex.co.z - 1.0) < 1e-6
         ]
         assert not find_profile_vertices_on_edges(
@@ -129,7 +136,7 @@ def carve_profile(manual, select_mode):
 
 def main():
     verify_profile_edge_point_cleanup()
-    print('PASS profile point on mesh edge is removed and bridged')
+    print('PASS profile points on mesh edges are omitted without reconnection')
     carve_along_path.register()
     fill_faces = extrude.fill_faces
 
