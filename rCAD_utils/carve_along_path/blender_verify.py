@@ -6,13 +6,55 @@ import sys
 
 import bmesh
 import bpy
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import carve_along_path
 from carve_along_path.extrude import cap_buf
 from carve_along_path.extrude_along_path import extrude
-from carve_along_path.profile_extrusion import extrude_profile_endpoints
+from carve_along_path.profile_extrusion import (
+    connect_profile_across_removed_vertices,
+    extrude_profile_endpoints,
+    find_profile_vertices_on_edges,
+    profile_bridge_pairs,
+)
+
+
+def verify_profile_edge_point_cleanup():
+    bm = bmesh.new()
+    try:
+        bmesh.ops.create_cube(bm, size=2)
+        profile = [
+            bm.verts.new((-1.0, -1.0, 0.5)),
+            bm.verts.new((0.0, -1.0, 1.0)),
+            bm.verts.new((1.0, -1.0, 1.5)),
+        ]
+        bm.edges.new((profile[0], profile[1]))
+        bm.edges.new((profile[1], profile[2]))
+        bm.verts.index_update()
+        indices = [vertex.index for vertex in profile]
+        removed = find_profile_vertices_on_edges(
+            bm, indices, Matrix.Identity(4),
+        )
+        assert removed == {profile[1].index}, removed
+        bridges = profile_bridge_pairs(bm, indices, removed)
+        assert bridges == {(profile[0].index, profile[2].index)}, bridges
+        connect_profile_across_removed_vertices(bm, indices, removed)
+        assert any(
+            {vertex.index for vertex in edge.verts}
+            == {profile[0].index, profile[2].index}
+            for edge in bm.edges
+        )
+
+        cube_top = [
+            vertex for vertex in bm.verts
+            if abs(vertex.co.z - 1.0) < 1e-6
+        ]
+        assert not find_profile_vertices_on_edges(
+            bm, [vertex.index for vertex in cube_top], Matrix.Identity(4),
+        )
+    finally:
+        bm.free()
 
 
 def carve_profile(manual, select_mode):
@@ -86,6 +128,8 @@ def carve_profile(manual, select_mode):
 
 
 def main():
+    verify_profile_edge_point_cleanup()
+    print('PASS profile point on mesh edge is removed and bridged')
     carve_along_path.register()
     fill_faces = extrude.fill_faces
 
