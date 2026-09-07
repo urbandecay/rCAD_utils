@@ -7,6 +7,7 @@ from .extrude import (
     get_active_element_and_its_indices,
 )
 from .eap_adapter import extrude_faces_to_cutter
+from .profile_extrusion import extrude_profile_endpoints, select_complete_profile
 from .cool_bool import subtract_selected_islands
 
 
@@ -508,7 +509,7 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
 
         path_edges = cap_buf.list_ek[:]
         path_start = cap_buf.list_sp[0]
-        solver = getattr(context.scene, "carve_along_path_solver", 'EXACT')
+        solver = 'EXACT'
         cutter = None
         source_object = None
         profile_object = None
@@ -539,17 +540,10 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
             source_object.matrix_world = target.matrix_world.copy()
             source_bm = bm.copy()
             check_lukap(source_bm)
-            for vertex in source_bm.verts:
-                vertex.select_set(False)
-            for edge in source_bm.edges:
-                edge.select_set(False)
-            for face in source_bm.faces:
-                face.select_set(False)
-            for index in profile_indices:
-                source_bm.verts[index].select_set(True)
-            for index in profile_face_indices:
-                if 0 <= index < len(source_bm.faces):
-                    source_bm.faces[index].select_set(True)
+            complete_profile = extrude_profile_endpoints(
+                source_bm, profile_indices, target.matrix_world,
+            )
+            select_complete_profile(source_bm, complete_profile)
             source_bm.to_mesh(source_mesh)
             source_bm.free()
             source_mesh.update()
@@ -571,6 +565,7 @@ class OT_CarveAlongPath_Carve(bpy.types.Operator):
             bpy.ops.object.mode_set(mode='OBJECT')
             _remove_temporary_object(source_object)
             source_object = None
+            context.view_layer.update()
             cutter.matrix_world = target.matrix_world.copy()
 
             _deselect_all_objects(context)
