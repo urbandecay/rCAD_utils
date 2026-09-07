@@ -9,7 +9,7 @@ import sys
 
 import bmesh
 import bpy
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 
 PACKAGE_PARENT = Path(__file__).resolve().parents[2]
@@ -173,11 +173,36 @@ def verify_existing_straight_seam_is_split():
     check.free()
 
 
+def verify_view_seams_at_different_depths():
+    # Perspective x/z: the target seam is twice as far away as the wire,
+    # so its world-space x coordinate must also double to overlap on screen.
+    obj = bpy.data.objects.new("ViewSeam", bpy.data.meshes.new("ViewSeam"))
+    bm = bmesh.new()
+    a, b, c, d, e, f = [bm.verts.new(point) for point in (
+        (-2, -2, -4), (1, -2, -4), (2, -2, -4),
+        (-2, 2, -4), (1, 2, -4), (2, 2, -4),
+    )]
+    lower = bm.faces.new((a, b, e, d))
+    upper = bm.faces.new((b, c, f, e))
+    seam = next(edge for edge in bm.edges if len(edge.link_faces) == 2)
+    matrix = Matrix(((1, 0, 0, 0), (0, 1, 0, 0),
+                     (0, 0, 1, 0), (0, 0, -1, 0)))
+    segments = [(Vector((0.5, -1, -2)), Vector((0.5, 1, -2)))]
+    found = operators._seam_edges_for_segments(
+        obj, bm.edges, [seam], segments, Vector((0, 0, -1)), 1e-5, matrix,
+    )
+    assert found == [seam], "perspective seam at a different depth was missed"
+    bmesh.ops.split_edges(bm, edges=found)
+    assert not set(lower.verts) & set(upper.verts), "view seam stayed connected"
+    bm.free()
+
+
 def main():
     verify_nearest_surface_avoids_centroid_tilt()
     verify_transformed_target_uses_world_space()
     verify_preview_cut_line()
     verify_existing_straight_seam_is_split()
+    verify_view_seams_at_different_depths()
     print("EDGE_KNIFE_PROJECT_VERIFICATION_OK")
 
 

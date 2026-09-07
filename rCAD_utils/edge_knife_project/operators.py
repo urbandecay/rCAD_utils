@@ -362,9 +362,23 @@ def _point_on_projected_segment(point, first, second, direction, tolerance):
     return (screen_offset - closest).length_squared <= tolerance * tolerance
 
 
-def _projected_seam_edges(obj, candidate_edges, cutter_segments, direction, tolerance):
+def _screen_point(matrix, point):
+    projected = matrix @ point.to_4d()
+    if abs(projected.w) <= _EPSILON:
+        raise ValueError("Geometry lies on the viewing plane; move the view and retry.")
+    return Vector((projected.x / projected.w, projected.y / projected.w, 0.0))
+
+
+def _projected_seam_edges(obj, candidate_edges, cutter_segments, direction, tolerance,
+                          projection_matrix=None):
     """Return new interior edges that lie on a projected cutter segment."""
     seams = []
+    if projection_matrix is not None:
+        cutter_segments = [
+            (_screen_point(projection_matrix, first), _screen_point(projection_matrix, second))
+            for first, second in cutter_segments
+        ]
+        direction = Vector((0.0, 0.0, 1.0))
     for edge in candidate_edges:
         if (
             not edge.is_valid
@@ -375,6 +389,9 @@ def _projected_seam_edges(obj, candidate_edges, cutter_segments, direction, tole
             continue
         first_point = obj.matrix_world @ edge.verts[0].co
         second_point = obj.matrix_world @ edge.verts[1].co
+        if projection_matrix is not None:
+            first_point = _screen_point(projection_matrix, first_point)
+            second_point = _screen_point(projection_matrix, second_point)
         if any(
             _point_on_projected_segment(
                 first_point,
@@ -403,6 +420,7 @@ def _seam_edges_for_segments(
     cutter_segments,
     direction,
     tolerance,
+    projection_matrix=None,
 ):
     """Find the seam for each cutter segment without over-splitting old edges.
 
@@ -419,6 +437,7 @@ def _seam_edges_for_segments(
             (cutter_segment,),
             direction,
             tolerance,
+            projection_matrix,
         )
         segment_seams = generated_seams or _projected_seam_edges(
             obj,
@@ -426,6 +445,7 @@ def _seam_edges_for_segments(
             (cutter_segment,),
             direction,
             tolerance,
+            projection_matrix,
         )
         for edge in segment_seams:
             if edge not in seen:
@@ -796,6 +816,18 @@ class MESH_OT_RCAD_EdgeKnifeProject(bpy.types.Operator):
     )
     bl_options = {'REGISTER', 'UNDO'}
 
+    use_view: bpy.props.BoolProperty(
+        name="Project by View",
+        description="Use the current viewport projection instead of the nearest target surface",
+        default=False,
+    )
+
+    separate_split: bpy.props.BoolProperty(
+        name="Separate Split",
+        description="Disconnect the cut seam within the mesh; disable to keep cut faces joined",
+        default=True,
+    )
+
     cut_through: bpy.props.BoolProperty(
         name="Cut Through",
         description="Cut every target face along the projected edge, including hidden-by-depth faces",
@@ -865,7 +897,7 @@ class MESH_OT_RCAD_EdgeKnifeProject(bpy.types.Operator):
             _prepare_target(bm, target_faces)
             bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
 
-            direction = _choose_view_direction(
+            direction = _current_view_direction(space) if self.use_view else _choose_view_direction(
                 space,
                 obj,
                 source_points,
@@ -876,7 +908,7 @@ class MESH_OT_RCAD_EdgeKnifeProject(bpy.types.Operator):
             # A wire exactly coplanar with a target can be ignored by Knife
             # Project.  The offset is along the projection ray, so it changes
             # depth without changing the projected edge location.
-            cutter_offset = direction * max(ortho_scale * 1.0e-4, 1.0e-6)
+            cutter_offset = Vector() if self.use_view else direction * max(ortho_scale * 1.0e-4, 1.0e-6)
             cutter = _create_cutter(context, edge_points, cutter_offset)
 
             for scene_object in context.view_layer.objects:
@@ -885,8 +917,10 @@ class MESH_OT_RCAD_EdgeKnifeProject(bpy.types.Operator):
             cutter.select_set(True)
             context.view_layer.objects.active = obj
 
-            _set_projection_view(space, direction, center, ortho_scale)
+            if not self.use_view:
+                _set_projection_view(space, direction, center, ortho_scale)
             _redraw_and_update(context, area, region, space)
+            projection_matrix = space.region_3d.perspective_matrix.copy() if self.use_view else None
 
             result = _run_knife_project(
                 context,
@@ -903,7 +937,7 @@ class MESH_OT_RCAD_EdgeKnifeProject(bpy.types.Operator):
             bm_after.edges.ensure_lookup_table()
             bm_after.faces.ensure_lookup_table()
             cut_count = max(0, len(bm_after.edges) - before_edge_count)
-            seam_tolerance = max(ortho_scale * 1.0e-3, 1.0e-5)
+            seam_tolerance = 1.0e-4 if self.use_view else max(ortho_scale * 1.0e-3, 1.0e-5)
             generated_edges = [
                 edge
                 for edge in bm_after.edges
@@ -916,18 +950,19 @@ class MESH_OT_RCAD_EdgeKnifeProject(bpy.types.Operator):
                 edge_points,
                 direction,
                 seam_tolerance,
+                projection_matrix,
             )
-            if seam_edges:
+            if seam_edges and self.separate_split:
                 bmesh.ops.split_edges(bm_after, edges=seam_edges)
                 seam_count = len(seam_edges)
 
             _restore_visibility(bm_after, bmesh_state)
             _clear_selection(bm_after)
             bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=True)
-            success = seam_count > 0
-            if cut_count <= 0 and seam_count <= 0:
+            success = seam_count > 0 if self.separate_split else cut_count > 0 or bool(seam_edges)
+            if not success and cut_count <= 0:
                 error_message = "Knife Project finished, but created no new edges."
-            elif seam_count <= 0:
+            elif self.separate_split and seam_count <= 0:
                 error_message = "The projected cut was created, but no interior seam could be split."
         except (ReferenceError, RuntimeError, TypeError, ValueError) as exc:
             error_message = str(exc)
@@ -948,7 +983,8 @@ class MESH_OT_RCAD_EdgeKnifeProject(bpy.types.Operator):
                 except (ReferenceError, RuntimeError, TypeError, ValueError):
                     pass
 
-            _restore_view(space, view_state)
+            if not self.use_view:
+                _restore_view(space, view_state)
 
             if cutter is not None:
                 try:
@@ -968,7 +1004,9 @@ class MESH_OT_RCAD_EdgeKnifeProject(bpy.types.Operator):
 
         self.report(
             {'INFO'},
-            f"Projected {len(source_edges)} cutter edge(s) and split {seam_count} seam edge(s).",
+            (f"Projected {len(source_edges)} cutter edge(s) and split {seam_count} seam edge(s)."
+             if self.separate_split else
+             f"Projected {len(source_edges)} cutter edge(s); cut faces remain joined."),
         )
         return {'FINISHED'}
 
@@ -1100,7 +1138,10 @@ class MESH_OT_RCAD_EdgeKnifePreview(bpy.types.Operator):
 
         if event.type in {'LEFTMOUSE', 'RET', 'NUMPAD_ENTER'} and event.value == 'PRESS':
             _remove_preview_handler(context)
-            return bpy.ops.mesh.rcad_edge_knife_project('EXEC_DEFAULT')
+            return bpy.ops.mesh.rcad_edge_knife_project(
+                'EXEC_DEFAULT', use_view=False,
+                separate_split=context.scene.rcad_knife_separate_split,
+            )
 
         if event.type in {
             'MOUSEMOVE',
