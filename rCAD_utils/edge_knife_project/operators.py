@@ -2,6 +2,7 @@
 
 import bmesh
 import bpy
+from .fill import fill_split_islands
 from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 
@@ -828,6 +829,11 @@ class MESH_OT_RCAD_EdgeKnifeProject(bpy.types.Operator):
         default=True,
     )
 
+    fill_faces: bpy.props.BoolProperty(
+        name="Fill Faces", default=False,
+        description="Fill holes in each target island after separating the split",
+    )
+
     cut_through: bpy.props.BoolProperty(
         name="Cut Through",
         description="Cut every target face along the projected edge, including hidden-by-depth faces",
@@ -955,6 +961,8 @@ class MESH_OT_RCAD_EdgeKnifeProject(bpy.types.Operator):
             if seam_edges and self.separate_split:
                 bmesh.ops.split_edges(bm_after, edges=seam_edges)
                 seam_count = len(seam_edges)
+                if self.fill_faces:
+                    fill_split_islands(bm_after, [face for face in bm_after.faces if not face.hide])
 
             _restore_visibility(bm_after, bmesh_state)
             _clear_selection(bm_after)
@@ -1141,6 +1149,7 @@ class MESH_OT_RCAD_EdgeKnifePreview(bpy.types.Operator):
             return bpy.ops.mesh.rcad_edge_knife_project(
                 'EXEC_DEFAULT', use_view=False,
                 separate_split=context.scene.rcad_knife_separate_split,
+                fill_faces=context.scene.rcad_face_cut_fill,
             )
 
         if event.type in {

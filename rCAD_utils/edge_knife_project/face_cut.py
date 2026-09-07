@@ -2,8 +2,15 @@
 
 import bmesh
 import bpy
+from .fill import fill_split_islands
 
 from .operators import _active_edit_mesh, _clear_selection
+
+
+SOLVER_ITEMS = (
+    ('EXACT', "Exact", "Slower solver with the best results for coplanar faces"),
+    ('FLOAT', "Float", "Faster solver without support for overlapping geometry"),
+)
 
 
 def _target_island(bm):
@@ -34,9 +41,19 @@ class MESH_OT_RCAD_CutByFace(bpy.types.Operator):
     )
     bl_options = {'REGISTER', 'UNDO'}
 
+    solver: bpy.props.EnumProperty(
+        name="Solver", items=SOLVER_ITEMS, default='EXACT',
+        description="Solver used to intersect the cutter faces with the target",
+    )
+
     separate_split: bpy.props.BoolProperty(
         name="Separate Split", default=True,
         description="Disconnect intersection seams within the target mesh",
+    )
+
+    fill_faces: bpy.props.BoolProperty(
+        name="Fill Faces", default=False,
+        description="Cap closed openings created by Cut by Face when Separate Split is enabled",
     )
 
     @classmethod
@@ -110,7 +127,7 @@ class MESH_OT_RCAD_CutByFace(bpy.types.Operator):
             bpy.ops.mesh.intersect(
                 mode='SELECT_UNSELECT',
                 separate_mode='ALL' if self.separate_split else 'CUT',
-                solver='EXACT',
+                solver=self.solver,
             )
         finally:
             for source, state in other_states:
@@ -123,6 +140,9 @@ class MESH_OT_RCAD_CutByFace(bpy.types.Operator):
             bm = bmesh.from_edit_mesh(obj.data)
             tag = bm.faces.layers.int.get(tag_name)
             bmesh.ops.delete(bm, geom=[f for f in bm.faces if f[tag] == 2], context='FACES')
+            if self.separate_split and self.fill_faces:
+                for face in fill_split_islands(bm, [f for f in bm.faces if f[tag] == 1]):
+                    face[tag] = 1
             for element, was_hidden in hidden:
                 if element.is_valid:
                     element.hide = was_hidden

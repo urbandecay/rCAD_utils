@@ -1,13 +1,19 @@
 """Background Blender regression for five cutters in multi-object Edit Mode."""
 import sys
+from itertools import product
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import bpy,bmesh
 from rCAD_utils.edge_knife_project import face_cut
 bpy.utils.register_class(face_cut.MESH_OT_RCAD_CutByFace)
-for split in (False,True):
+for solver, split, fill, open_end in product(('EXACT', 'FLOAT'), (False, True), (False, True), (False, True)):
  bpy.ops.object.select_all(action='SELECT');bpy.ops.object.delete(use_global=False)
  bpy.ops.mesh.primitive_cube_add();cube=bpy.context.object
+ if open_end:
+  bm=bmesh.new();bm.from_mesh(cube.data)
+  end=next(face for face in bm.faces if face.normal.x > 0.9)
+  bmesh.ops.delete(bm, geom=[end], context='FACES_ONLY')
+  bm.to_mesh(cube.data);bm.free()
  planes=[]
  for x in (-.8,-.4,0,.4,.8):
   mesh=bpy.data.meshes.new('cutter');mesh.from_pydata([(0,-2,-2),(0,2,-2),(0,2,2),(0,-2,2)],[],[(0,1,2,3)])
@@ -18,9 +24,11 @@ for split in (False,True):
   bm=bmesh.from_edit_mesh(ob.data)
   for f in bm.faces:f.select_set(True)
  bm=bmesh.from_edit_mesh(cube.data);bm.faces.ensure_lookup_table();bm.faces.active=bm.faces[0]
- assert bpy.ops.mesh.rcad_cut_by_face(separate_split=split)=={'FINISHED'}
+ assert bpy.ops.mesh.rcad_cut_by_face(separate_split=split, solver=solver, fill_faces=fill)=={'FINISHED'}
  bm=bmesh.from_edit_mesh(cube.data)
- assert len(bm.faces)==26,len(bm.faces)
+ assert len(bm.faces)==(36 if split and fill else 26-int(open_end)),len(bm.faces)
+ if (fill and split) or (not split and not open_end):
+  assert all(edge.is_manifold and edge.is_contiguous for edge in bm.edges), 'open or reversed cap'
  unseen=set(bm.verts);count=0
  while unseen:
   todo=[unseen.pop()];count+=1
