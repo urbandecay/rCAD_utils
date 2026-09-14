@@ -32,6 +32,7 @@ from . import edge_knife_project
 from . import axis_edge_highlight
 from . import part_separator
 from . import auto_select_collection
+from . import section_imprint
 from .texture_sampler import (
     MESH_OT_TextureSampler,
     MESH_OT_TextureSamplerMoveUV,
@@ -86,6 +87,7 @@ classes = [
     panel.RCAD_PT_MirrorAlongPlane,
     panel.RCAD_PT_AxisEdgeHighlighter,
     panel.RCAD_PT_PartSeparator,
+    panel.RCAD_PT_SectionImprint,
     panel.RCAD_PT_AddonDevelopment,
 ]
 
@@ -105,6 +107,7 @@ def register():
     axis_edge_highlight.register()
     part_separator.register()
     auto_select_collection.register()
+    section_imprint.register()
     bpy.types.Scene.profile_path_mode = BoolProperty(name="Path Mode", default=False)
     bpy.types.Scene.cool_bool_solver = bpy.props.EnumProperty(
         name="Solver",
@@ -127,6 +130,7 @@ def unregister():
     bpy.types.VIEW3D_MT_edit_mesh_split.remove(draw_split_menu)
     axis_edge_highlight.unregister()
     auto_select_collection.unregister()
+    section_imprint.unregister()
     edge_knife_project.unregister()
     part_separator.unregister()
     projection.unregister()

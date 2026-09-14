@@ -304,6 +304,37 @@ class RCAD_PT_PartSeparator(bpy.types.Panel):
         box.operator("mesh.rcad_mark_part_ids", text="Mark IDs for Future Edits")
 
 
+class RCAD_PT_SectionImprint(bpy.types.Panel):
+    bl_label = "Section Imprint"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "rCAD Utils"
+    bl_parent_id = "RCAD_PT_Main"
+    bl_options = {'DEFAULT_CLOSED'}
+    bl_order = 115
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        box = layout.box()
+
+        box.label(text="Edit Mode: select the cutter plane")
+        box.prop(scene, "rcad_section_tolerance", text="Tolerance")
+
+        row = box.row(align=True)
+        create = row.operator(
+            "mesh.rcad_section_imprint",
+            text="Create Section",
+        )
+        create.tolerance = scene.rcad_section_tolerance
+        row.operator(
+            "mesh.rcad_clear_section_imprints",
+            text="Clear Results",
+        )
+        box.label(text="Intersecting visible geometry is found automatically")
+        box.label(text="Cutters inside the model are preserved")
+
+
 class RCAD_PT_AddonDevelopment(bpy.types.Panel):
     bl_label = "Addon Development"
     bl_space_type = "VIEW_3D"
