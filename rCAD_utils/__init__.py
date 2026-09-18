@@ -39,6 +39,11 @@ from .texture_sampler import (
     MESH_OT_TextureSamplerRotateUV,
     MESH_OT_TextureSamplerScaleUV,
 )
+from .clipboard_image import (
+    OBJECT_OT_add_clipboard_image,
+    configure_existing_clipboard_images,
+    draw_clipboard_image_menu,
+)
 import importlib
 _1d_tools = importlib.import_module(".1d_tools", package=__name__)
 from .mirror_along_plane import (
@@ -72,6 +77,8 @@ classes = [
     MESH_OT_TextureSamplerScaleUV,
     MESH_OT_TextureSamplerMoveUV,
     MESH_OT_TextureSampler,
+    # Clipboard image operator
+    OBJECT_OT_add_clipboard_image,
     # Mirror Across Plane operators
     MESH_OT_store_plane_vertices,
     MESH_OT_point_reflection,
@@ -95,9 +102,12 @@ classes = [
 def register():
     eap_options.register_options()
     cap_options.register_options()
+    configure_existing_clipboard_images()
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.VIEW3D_MT_edit_mesh_split.append(draw_split_menu)
+    image_add_menu = getattr(bpy.types, "VIEW3D_MT_image_add", bpy.types.VIEW3D_MT_add)
+    image_add_menu.append(draw_clipboard_image_menu)
     weld_tools.register()
     split_tools.register()
     _1d_tools.register()
@@ -128,6 +138,8 @@ def register():
 
 def unregister():
     bpy.types.VIEW3D_MT_edit_mesh_split.remove(draw_split_menu)
+    image_add_menu = getattr(bpy.types, "VIEW3D_MT_image_add", bpy.types.VIEW3D_MT_add)
+    image_add_menu.remove(draw_clipboard_image_menu)
     axis_edge_highlight.unregister()
     auto_select_collection.unregister()
     section_imprint.unregister()

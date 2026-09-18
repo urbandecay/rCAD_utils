@@ -202,7 +202,7 @@ def register():
     bpy.types.Scene.rcad_auto_select_collection = BoolProperty(
         name="Select Collection on Click",
         description="Automatically select visible objects sharing a collection with the active object",
-        default=True,
+        default=False,
         update=_enabled_update,
     )
     bpy.types.VIEW3D_MT_select_object.append(_draw_select_menu)
