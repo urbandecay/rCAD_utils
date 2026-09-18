@@ -349,10 +349,46 @@ def _configure_preview_material(preview_material, node_name):
     return True
 
 
+def _direct_image_preview(node, signature):
+    """Create a cached thumbnail without invoking Blender's render engine."""
+    source = getattr(node, "image", None)
+    if source is None or source.size[0] <= 0 or source.size[1] <= 0:
+        return None
+
+    max_size = PREVIEW_RESOLUTION
+    scale = min(max_size / source.size[0], max_size / source.size[1], 1.0)
+    width = max(1, round(source.size[0] * scale))
+    height = max(1, round(source.size[1] * scale))
+    image_name = (
+        f"{PREVIEW_IMAGE_PREFIX}direct "
+        f"{abs(hash((source.name, node.name, signature))) % 100000000}"
+    )
+    old_image = bpy.data.images.get(image_name)
+    if old_image is not None:
+        bpy.data.images.remove(old_image)
+
+    preview = source.copy()
+    preview.name = image_name
+    if preview.size[0] != width or preview.size[1] != height:
+        preview.scale(width, height)
+    preview.pack()
+    preview["rcad_node_preview"] = True
+    return preview
+
+
+def _can_direct_image_preview(node):
+    if node.bl_idname != "ShaderNodeTexImage":
+        return False
+    vector_input = node.inputs.get("Vector")
+    return vector_input is None or not vector_input.is_linked
+
+
 def _render_node_preview(material, node, signature):
     """Render a copied material with one node connected to the output."""
     if material is None or node is None or material.node_tree is None:
         return None
+    if _can_direct_image_preview(node):
+        return _direct_image_preview(node, signature)
     if material.node_tree.nodes.get(node.name) is None:
         # Nested group previews are deliberately left for the next iteration;
         # the top-level material path is the reliable Python baseline.
@@ -431,13 +467,19 @@ def _collect_preview_jobs():
             entry = _preview_cache.get(key)
             if entry is None or entry["signature"] != signature:
                 if entry is not None:
-                    _remove_preview_image(entry.get("image"))
-                entry = {
-                    "signature": signature,
-                    "image": None,
-                    "error": None,
-                }
-                _preview_cache[key] = entry
+                    # Keep the previous thumbnail visible while the updated
+                    # graph is rendered. Removing it here made every other
+                    # node appear to turn off during a parameter change.
+                    _queued_jobs.discard(key)
+                    entry["signature"] = signature
+                    entry["error"] = None
+                else:
+                    entry = {
+                        "signature": signature,
+                        "image": None,
+                        "error": None,
+                    }
+                    _preview_cache[key] = entry
                 _queue_job(key, material, tree, node, signature)
 
 
@@ -447,27 +489,31 @@ def _tag_node_editor_redraws():
 
 
 def _process_preview_job():
-    if not _preview_jobs:
-        return
-    key, material, tree, node_name, signature = _preview_jobs.popleft()
-    _queued_jobs.discard(key)
-    entry = _preview_cache.get(key)
-    if entry is None or entry["signature"] != signature:
-        return
+    while _preview_jobs:
+        key, material, tree, node_name, signature = _preview_jobs.popleft()
+        _queued_jobs.discard(key)
+        entry = _preview_cache.get(key)
+        if entry is None or entry["signature"] != signature:
+            continue
 
-    node = tree.nodes.get(node_name)
-    if node is None:
-        return
-    image = _render_node_preview(material, node, signature)
-    if image is None:
-        entry["error"] = True
-        return
-    old_image = entry.get("image")
-    if old_image is not image:
-        _remove_preview_image(old_image)
-    entry["image"] = image
-    entry["error"] = None
-    _tag_node_editor_redraws()
+        node = tree.nodes.get(node_name)
+        if node is None:
+            continue
+        image = _render_node_preview(material, node, signature)
+        if image is None:
+            entry["error"] = True
+        else:
+            old_image = entry.get("image")
+            if old_image is not image:
+                _remove_preview_image(old_image)
+            entry["image"] = image
+            entry["error"] = None
+        _tag_node_editor_redraws()
+
+        # Direct image thumbnails are cheap and can all update in this pass.
+        # Keep procedural previews to one render per timer tick.
+        if not _can_direct_image_preview(node):
+            break
 
 
 def _preview_timer():
