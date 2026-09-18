@@ -8,6 +8,7 @@ A collection of utility tools for CAD operations, optimized for use with Blender
 - **Place Profile**: Store a profile shape and place/orient it onto target edges, with live flip and anchor controls in the Redo Panel
 - **Mirror Along Plane**: Create mirrored copies of geometry across a plane with precise alignment
 - **Image from Clipboard**: In Object Mode, use Shift+A > Image > Image from Clipboard to add a copied image as a normal Image Empty object. In Edit Mode, use Shift+A > Textured Face from Clipboard to create an aspect-correct UV-mapped face using the copied image as its material texture.
+- **UV Image Sync**: Enable **Sync Face Image** directly in the UV Editor header to show the selected textured face's image immediately.
 - More tools coming soon...
 
 ## Installation
