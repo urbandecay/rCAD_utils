@@ -3,6 +3,7 @@
 from collections import deque
 import os
 import tempfile
+from time import monotonic
 
 import bpy
 from bpy.app.handlers import persistent
@@ -13,12 +14,14 @@ from mathutils import Vector
 PROPERTY_NAME = "rcad_node_preview_enabled"
 PREVIEW_IMAGE_PREFIX = "rCAD Node Preview "
 PREVIEW_RESOLUTION = 128
+PREVIEW_SETTLE_SECONDS = 0.35
 
 _draw_handle = None
 _preview_timer_running = False
 _preview_jobs = deque()
 _queued_jobs = set()
 _preview_cache = {}
+_tree_states = {}
 _preview_scene = None
 _preview_object = None
 _preview_shader = None
@@ -104,42 +107,46 @@ def _value_signature(value):
         return repr(value)
 
 
+def _node_signature(node):
+    """Return a lightweight revision signature for one shader node."""
+    inputs = []
+    for socket in node.inputs:
+        links = tuple(
+            (
+                link.from_node.name,
+                link.from_socket.name,
+                link.to_socket.name,
+            )
+            for link in socket.links
+        )
+        default = None
+        if not socket.is_linked and hasattr(socket, "default_value"):
+            try:
+                default = _value_signature(socket.default_value)
+            except (AttributeError, RuntimeError):
+                default = None
+        inputs.append((socket.name, links, default))
+
+    image = getattr(node, "image", None)
+    return hash(repr((
+        node.name,
+        node.bl_idname,
+        node.label,
+        node.mute,
+        _safe_pointer(image),
+        tuple(inputs),
+        _value_signature(getattr(node, "operation", None)),
+        _value_signature(getattr(node, "blend_type", None)),
+        _value_signature(getattr(node, "noise_dimensions", None)),
+    )))
+
+
 def _tree_signature(tree):
     """Return a lightweight revision signature for a shader node tree."""
-    node_data = []
-    for node in sorted(tree.nodes, key=lambda item: item.name):
-        inputs = []
-        for socket in node.inputs:
-            links = tuple(
-                (
-                    link.from_node.name,
-                    link.from_socket.name,
-                    link.to_socket.name,
-                )
-                for link in socket.links
-            )
-            default = None
-            if not socket.is_linked and hasattr(socket, "default_value"):
-                try:
-                    default = _value_signature(socket.default_value)
-                except (AttributeError, RuntimeError):
-                    default = None
-            inputs.append((socket.name, links, default))
-
-        image = getattr(node, "image", None)
-        node_data.append(
-            (
-                node.name,
-                node.bl_idname,
-                node.label,
-                node.mute,
-                _safe_pointer(image),
-                tuple(inputs),
-                _value_signature(getattr(node, "operation", None)),
-                _value_signature(getattr(node, "blend_type", None)),
-                _value_signature(getattr(node, "noise_dimensions", None)),
-            )
-        )
+    node_data = tuple(
+        (node.name, _node_signature(node))
+        for node in sorted(tree.nodes, key=lambda item: item.name)
+    )
 
     links = tuple(
         (
@@ -179,6 +186,7 @@ def _remove_preview_image(image):
 
 
 def _clear_preview_cache():
+    _tree_states.clear()
     _preview_jobs.clear()
     _queued_jobs.clear()
     for entry in tuple(_preview_cache.values()):
@@ -453,34 +461,109 @@ def _queue_job(key, material, tree, node, signature):
     _preview_jobs.append((key, material, tree, node.name, signature))
 
 
+def _queue_preview_node(material, tree, node, force=False):
+    key = _cache_key(material, tree, node)
+    signature = _node_signature(node)
+    entry = _preview_cache.get(key)
+    if entry is None:
+        entry = {
+            "signature": signature,
+            "image": None,
+            "error": None,
+        }
+        _preview_cache[key] = entry
+    elif entry["signature"] != signature:
+        _queued_jobs.discard(key)
+        entry["signature"] = signature
+        entry["error"] = None
+    elif not force and entry.get("image") is not None:
+        return
+    _queue_job(key, material, tree, node, signature)
+
+
+def _active_node(tree):
+    active = getattr(tree.nodes, "active", None)
+    if active is not None:
+        return active
+    selected = [node for node in tree.nodes if getattr(node, "select", False)]
+    return selected[-1] if selected else None
+
+
+def _downstream_node_names(tree, start_names):
+    nodes_by_name = {node.name: node for node in tree.nodes}
+    pending = list(start_names)
+    result = set(start_names)
+    while pending:
+        node = nodes_by_name.get(pending.pop())
+        if node is None:
+            continue
+        for output in node.outputs:
+            for link in output.links:
+                name = link.to_node.name
+                if name not in result:
+                    result.add(name)
+                    pending.append(name)
+    return result
+
+
 def _collect_preview_jobs():
+    now = monotonic()
     for _area, space, tree in _shader_editor_contexts():
         material = _material_for_space(space, tree)
         if material is None or material.node_tree != tree:
             continue
 
-        signature = _tree_signature(tree)
-        for node in tree.nodes:
-            if not _is_previewable_node(node):
-                continue
-            key = _cache_key(material, tree, node)
-            entry = _preview_cache.get(key)
-            if entry is None or entry["signature"] != signature:
-                if entry is not None:
-                    # Keep the previous thumbnail visible while the updated
-                    # graph is rendered. Removing it here made every other
-                    # node appear to turn off during a parameter change.
-                    _queued_jobs.discard(key)
-                    entry["signature"] = signature
-                    entry["error"] = None
-                else:
-                    entry = {
-                        "signature": signature,
-                        "image": None,
-                        "error": None,
-                    }
-                    _preview_cache[key] = entry
-                _queue_job(key, material, tree, node, signature)
+        tree_key = _safe_pointer(tree)
+        state = _tree_states.setdefault(
+            tree_key,
+            {
+                "node_signatures": {},
+                "pending_changed": set(),
+                "last_change": 0.0,
+            },
+        )
+        current_signatures = {
+            node.name: _node_signature(node)
+            for node in tree.nodes
+        }
+
+        if not state["node_signatures"]:
+            state["node_signatures"] = current_signatures
+            for node in tree.nodes:
+                if _is_previewable_node(node):
+                    _queue_preview_node(material, tree, node, force=True)
+            continue
+
+        changed_names = {
+            name
+            for name, signature in current_signatures.items()
+            if state["node_signatures"].get(name) != signature
+        }
+        state["node_signatures"] = current_signatures
+        if changed_names:
+            state["pending_changed"].update(changed_names)
+            state["last_change"] = now
+            active = _active_node(tree)
+            if active is not None and active.name in changed_names:
+                immediate_names = {active.name}
+            else:
+                immediate_names = changed_names
+            for node in tree.nodes:
+                if node.name in immediate_names and _is_previewable_node(node):
+                    _queue_preview_node(material, tree, node, force=True)
+
+        if (
+            state["pending_changed"]
+            and now - state["last_change"] >= PREVIEW_SETTLE_SECONDS
+        ):
+            affected_names = _downstream_node_names(
+                tree,
+                state["pending_changed"],
+            )
+            for node in tree.nodes:
+                if node.name in affected_names and _is_previewable_node(node):
+                    _queue_preview_node(material, tree, node, force=True)
+            state["pending_changed"].clear()
 
 
 def _tag_node_editor_redraws():
