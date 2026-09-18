@@ -5,7 +5,9 @@ import shutil
 import subprocess
 import tempfile
 
+import bmesh
 import bpy
+from mathutils import Vector
 
 
 _GTK_CLIPBOARD_IMAGE_SCRIPT = r'''
@@ -261,6 +263,94 @@ def _create_image_empty(context, image):
     return empty
 
 
+def _create_textured_face(context, image):
+    """Create an aspect-correct UV-mapped quad on the active Edit Mode mesh."""
+    mesh_object = context.edit_object
+    if mesh_object is None or mesh_object.type != 'MESH':
+        raise RuntimeError("Edit Mode clipboard import needs an active mesh object")
+
+    image_width, image_height = image.size
+    if image_width <= 0 or image_height <= 0:
+        raise RuntimeError("The clipboard image has no usable dimensions")
+
+    material = bpy.data.materials.new(name=f"{image.name} Material")
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    nodes.clear()
+
+    output_node = nodes.new("ShaderNodeOutputMaterial")
+    shader_node = nodes.new("ShaderNodeBsdfPrincipled")
+    image_node = nodes.new("ShaderNodeTexImage")
+    image_node.image = image
+    links.new(image_node.outputs["Color"], shader_node.inputs["Base Color"])
+    links.new(shader_node.outputs["BSDF"], output_node.inputs["Surface"])
+    if image_node.outputs.get("Alpha") and shader_node.inputs.get("Alpha"):
+        links.new(image_node.outputs["Alpha"], shader_node.inputs["Alpha"])
+
+    if hasattr(material, "surface_render_method"):
+        material.surface_render_method = 'DITHERED'
+    elif hasattr(material, "blend_method"):
+        material.blend_method = 'BLEND'
+
+    if material.name not in mesh_object.data.materials:
+        mesh_object.data.materials.append(material)
+    material_index = mesh_object.data.materials[:].index(material)
+
+    cursor = context.scene.cursor
+    world_center = cursor.location.copy()
+    cursor_rotation = cursor.rotation_euler.to_matrix()
+    world_x = cursor_rotation @ Vector((1.0, 0.0, 0.0))
+    world_y = cursor_rotation @ Vector((0.0, 1.0, 0.0))
+
+    face_width = 1.0
+    face_height = face_width * image_height / image_width
+    half_x = world_x * (face_width * 0.5)
+    half_y = world_y * (face_height * 0.5)
+    world_points = (
+        world_center - half_x - half_y,
+        world_center + half_x - half_y,
+        world_center + half_x + half_y,
+        world_center - half_x + half_y,
+    )
+    world_to_local = mesh_object.matrix_world.inverted()
+    local_points = [world_to_local @ point for point in world_points]
+
+    bmesh_data = bmesh.from_edit_mesh(mesh_object.data)
+    vertices = [bmesh_data.verts.new(point) for point in local_points]
+    try:
+        face = bmesh_data.faces.new(vertices)
+    except ValueError as exc:
+        for vertex in vertices:
+            if vertex.is_valid:
+                bmesh_data.verts.remove(vertex)
+        raise RuntimeError("Could not create the clipboard image face here") from exc
+
+    face.material_index = material_index
+    uv_layer = bmesh_data.loops.layers.uv.verify()
+    for loop, uv in zip(
+        face.loops,
+        ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)),
+    ):
+        loop[uv_layer].uv = uv
+
+    for vertex in bmesh_data.verts:
+        vertex.select_set(False)
+    for edge in bmesh_data.edges:
+        edge.select_set(False)
+    for existing_face in bmesh_data.faces:
+        existing_face.select_set(False)
+    for vertex in vertices:
+        vertex.select_set(True)
+    for edge in face.edges:
+        edge.select_set(True)
+    face.select_set(True)
+    bmesh_data.select_history.clear()
+    bmesh_data.select_history.add(face)
+    bmesh.update_edit_mesh(mesh_object.data, loop_triangles=True, destructive=True)
+    return material
+
+
 def configure_existing_clipboard_images():
     """Restore normal object behavior to images made by an older version."""
     for empty in bpy.data.objects:
@@ -282,7 +372,7 @@ def configure_existing_clipboard_images():
 
 
 class OBJECT_OT_add_clipboard_image(bpy.types.Operator):
-    """Add the bitmap currently stored in the operating system clipboard."""
+    """Add the bitmap as an Image Empty or a textured Edit Mode face."""
 
     bl_idname = "object.add_clipboard_image"
     bl_label = "Image from Clipboard"
@@ -291,7 +381,7 @@ class OBJECT_OT_add_clipboard_image(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return context.mode == 'OBJECT'
+        return context.mode in {'OBJECT', 'EDIT_MESH'}
 
     def execute(self, context):
         try:
@@ -309,13 +399,21 @@ class OBJECT_OT_add_clipboard_image(bpy.types.Operator):
         except RuntimeError as exc:
             self.report({'WARNING'}, f"Image added but could not be packed: {exc}")
 
-        empty = _create_image_empty(context, image)
-        self.report({'INFO'}, f"Added {empty.name} from the clipboard")
+        if context.mode == 'EDIT_MESH':
+            try:
+                material = _create_textured_face(context, image)
+            except RuntimeError as exc:
+                self.report({'ERROR'}, str(exc))
+                return {'CANCELLED'}
+            self.report({'INFO'}, f"Created a textured face using {material.name}")
+        else:
+            empty = _create_image_empty(context, image)
+            self.report({'INFO'}, f"Added {empty.name} from the clipboard")
         return {'FINISHED'}
 
 
 def draw_clipboard_image_menu(self, context):
-    """Add the operator to the Object Mode Shift+A menu."""
+    """Add the operator to Blender's Object Mode image submenu."""
     if context.mode != 'OBJECT':
         return
 
@@ -323,6 +421,19 @@ def draw_clipboard_image_menu(self, context):
     self.layout.operator(
         OBJECT_OT_add_clipboard_image.bl_idname,
         text=OBJECT_OT_add_clipboard_image.bl_label,
+        icon='IMAGE_DATA',
+    )
+
+
+def draw_edit_clipboard_image_menu(self, context):
+    """Add the textured-face operator to the Edit Mode Shift+A menu."""
+    if context.mode != 'EDIT_MESH':
+        return
+
+    self.layout.separator()
+    self.layout.operator(
+        OBJECT_OT_add_clipboard_image.bl_idname,
+        text="Textured Face from Clipboard",
         icon='IMAGE_DATA',
     )
 

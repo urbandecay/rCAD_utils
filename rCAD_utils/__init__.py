@@ -43,6 +43,7 @@ from .clipboard_image import (
     OBJECT_OT_add_clipboard_image,
     configure_existing_clipboard_images,
     draw_clipboard_image_menu,
+    draw_edit_clipboard_image_menu,
 )
 import importlib
 _1d_tools = importlib.import_module(".1d_tools", package=__name__)
@@ -108,6 +109,8 @@ def register():
     bpy.types.VIEW3D_MT_edit_mesh_split.append(draw_split_menu)
     image_add_menu = getattr(bpy.types, "VIEW3D_MT_image_add", bpy.types.VIEW3D_MT_add)
     image_add_menu.append(draw_clipboard_image_menu)
+    mesh_add_menu = getattr(bpy.types, "VIEW3D_MT_mesh_add", bpy.types.VIEW3D_MT_add)
+    mesh_add_menu.append(draw_edit_clipboard_image_menu)
     weld_tools.register()
     split_tools.register()
     _1d_tools.register()
@@ -140,6 +143,8 @@ def unregister():
     bpy.types.VIEW3D_MT_edit_mesh_split.remove(draw_split_menu)
     image_add_menu = getattr(bpy.types, "VIEW3D_MT_image_add", bpy.types.VIEW3D_MT_add)
     image_add_menu.remove(draw_clipboard_image_menu)
+    mesh_add_menu = getattr(bpy.types, "VIEW3D_MT_mesh_add", bpy.types.VIEW3D_MT_add)
+    mesh_add_menu.remove(draw_edit_clipboard_image_menu)
     axis_edge_highlight.unregister()
     auto_select_collection.unregister()
     section_imprint.unregister()
