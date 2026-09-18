@@ -46,6 +46,7 @@ from .clipboard_image import (
     draw_edit_clipboard_image_menu,
 )
 from . import uv_image_sync
+from . import node_preview
 import importlib
 _1d_tools = importlib.import_module(".1d_tools", package=__name__)
 from .mirror_along_plane import (
@@ -123,6 +124,7 @@ def register():
     auto_select_collection.register()
     section_imprint.register()
     uv_image_sync.register()
+    node_preview.register()
     bpy.types.Scene.profile_path_mode = BoolProperty(name="Path Mode", default=False)
     bpy.types.Scene.cool_bool_solver = bpy.props.EnumProperty(
         name="Solver",
@@ -149,6 +151,7 @@ def unregister():
     mesh_add_menu.remove(draw_edit_clipboard_image_menu)
     axis_edge_highlight.unregister()
     uv_image_sync.unregister()
+    node_preview.unregister()
     auto_select_collection.unregister()
     section_imprint.unregister()
     edge_knife_project.unregister()
