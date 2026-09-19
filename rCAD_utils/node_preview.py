@@ -135,6 +135,8 @@ def _node_signature(node):
         node.mute,
         _safe_pointer(image),
         tuple(inputs),
+        tuple((socket.identifier, socket.enabled, socket.is_linked)
+              for socket in node.outputs),
         _value_signature(getattr(node, "operation", None)),
         _value_signature(getattr(node, "blend_type", None)),
         _value_signature(getattr(node, "noise_dimensions", None)),
@@ -171,6 +173,8 @@ def _cache_key(material, tree, node):
         _safe_pointer(material),
         _safe_pointer(tree),
         _safe_pointer(node),
+        node.name,
+        node.bl_idname,
     )
 
 
@@ -283,6 +287,51 @@ def _ensure_preview_scene():
     return scene
 
 
+def _sync_preview_appearance(scene, source_scene):
+    """Use the visible material-preview environment instead of a frontal lamp."""
+    scene.display_settings.display_device = source_scene.display_settings.display_device
+    for name in ("view_transform", "look", "exposure", "gamma"):
+        setattr(scene.view_settings, name, getattr(source_scene.view_settings, name))
+    shading = None
+    screen = getattr(bpy.context, "screen", None)
+    if screen is not None:
+        for area in screen.areas:
+            if area.type == 'VIEW_3D' and area.spaces.active.shading.type == 'MATERIAL':
+                shading = area.spaces.active.shading
+                break
+    # Studio environment lighting is available even when the viewport is closed.
+    studio_name = shading.studio_light if shading is not None else "forest.exr"
+    studio = next((light for light in bpy.context.preferences.studio_lights
+                   if light.type == 'WORLD' and light.name == studio_name), None)
+    if studio is None:
+        return
+    world_tree = scene.world.node_tree
+    environment = world_tree.nodes.get("rCAD Preview Environment")
+    if environment is None:
+        environment = world_tree.nodes.new("ShaderNodeTexEnvironment")
+        environment.name = "rCAD Preview Environment"
+        coordinates = world_tree.nodes.new("ShaderNodeTexCoord")
+        mapping = world_tree.nodes.new("ShaderNodeMapping")
+        mapping.name = "rCAD Preview Rotation"
+        world_tree.links.new(coordinates.outputs["Generated"], mapping.inputs["Vector"])
+        world_tree.links.new(mapping.outputs["Vector"], environment.inputs["Vector"])
+        world_tree.links.new(environment.outputs["Color"], world_tree.nodes["Background"].inputs["Color"])
+    if environment.image is None or environment.image.filepath != studio.path:
+        previous = environment.image
+        environment.image = bpy.data.images.load(studio.path, check_existing=False)
+        if previous is not None:
+            bpy.data.images.remove(previous)
+    world_tree.nodes["rCAD Preview Rotation"].inputs["Rotation"].default_value[2] = (
+        shading.studiolight_rotate_z if shading is not None else 0.0
+    )
+    world_tree.nodes["Background"].inputs["Strength"].default_value = (
+        shading.studiolight_intensity if shading is not None else 1.0
+    )
+    for obj in scene.objects:
+        if obj.type == 'LIGHT':
+            obj.hide_render = True
+
+
 def _destroy_preview_scene():
     global _preview_scene, _preview_object
     scene = _preview_scene
@@ -293,6 +342,10 @@ def _destroy_preview_scene():
 
     objects = tuple(scene.objects)
     world = scene.world
+    if world is not None and world.node_tree is not None:
+        environment = world.node_tree.nodes.get("rCAD Preview Environment")
+        if environment is not None and environment.image is not None:
+            bpy.data.images.remove(environment.image)
     for object_data in objects:
         object_type = object_data.type
         data = object_data.data
@@ -313,11 +366,12 @@ def _destroy_preview_scene():
         bpy.data.worlds.remove(world)
 
 
-def _first_output(node, socket_type=None):
-    for socket in node.outputs:
-        if socket_type is None or socket.type == socket_type:
-            return socket
-    return None
+def _preview_output(node):
+    """Prefer an enabled connected output, then the first enabled output."""
+    outputs = [socket for socket in node.outputs
+               if socket.enabled and not getattr(socket, "is_unavailable", False)]
+    return next((socket for socket in outputs if socket.is_linked),
+                outputs[0] if outputs else None)
 
 
 def _configure_preview_material(preview_material, node_name):
@@ -327,23 +381,24 @@ def _configure_preview_material(preview_material, node_name):
     if target is None or not target.outputs:
         return False
 
+    # Select before deleting output nodes, which removes their incoming links.
+    selected_output = _preview_output(target)
+    if selected_output is None:
+        return False
+
     for node in tuple(node_tree.nodes):
         if node.type == 'OUTPUT_MATERIAL':
             node_tree.nodes.remove(node)
 
     output_node = node_tree.nodes.new("ShaderNodeOutputMaterial")
     output_node.location = (700.0, 0.0)
-    shader_output = _first_output(target, 'SHADER')
-    if shader_output is not None:
-        node_tree.links.new(shader_output, output_node.inputs["Surface"])
+    if selected_output.type == 'SHADER':
+        destination = "Volume" if selected_output.name == "Volume" else "Surface"
+        node_tree.links.new(selected_output, output_node.inputs[destination])
         return True
 
-    value_output = (
-        _first_output(target, 'RGBA')
-        or _first_output(target, 'VECTOR')
-        or _first_output(target, 'VALUE')
-    )
-    if value_output is None:
+    value_output = selected_output
+    if value_output.type not in {'RGBA', 'VECTOR', 'VALUE', 'INT', 'BOOLEAN'}:
         return False
 
     # Data-producing nodes should show their actual color/value, not a
@@ -371,10 +426,6 @@ def _direct_image_preview(node, signature):
         f"{PREVIEW_IMAGE_PREFIX}direct "
         f"{abs(hash((source.name, node.name, signature))) % 100000000}"
     )
-    old_image = bpy.data.images.get(image_name)
-    if old_image is not None:
-        bpy.data.images.remove(old_image)
-
     preview = source.copy()
     preview.name = image_name
     if preview.size[0] != width or preview.size[1] != height:
@@ -386,6 +437,9 @@ def _direct_image_preview(node, signature):
 
 def _can_direct_image_preview(node):
     if node.bl_idname != "ShaderNodeTexImage":
+        return False
+    output = _preview_output(node)
+    if output is None or output.name != "Color":
         return False
     vector_input = node.inputs.get("Vector")
     return vector_input is None or not vector_input.is_linked
@@ -409,6 +463,7 @@ def _render_node_preview(material, node, signature):
         return None
 
     scene = _ensure_preview_scene()
+    _sync_preview_appearance(scene, bpy.context.scene)
     preview_object = _preview_object
     old_materials = tuple(preview_object.data.materials)
     preview_object.data.materials.clear()
@@ -430,9 +485,6 @@ def _render_node_preview(material, node, signature):
         if not os.path.isfile(temporary_path):
             return None
         image_name = f"{PREVIEW_IMAGE_PREFIX}{abs(hash((material.name, node.name, signature))) % 100000000}"
-        image = bpy.data.images.get(image_name)
-        if image is not None:
-            bpy.data.images.remove(image)
         image = bpy.data.images.load(temporary_path, check_existing=False)
         image.name = image_name
         image.pack()
@@ -456,7 +508,10 @@ def _render_node_preview(material, node, signature):
 
 def _queue_job(key, material, tree, node, signature):
     if key in _queued_jobs:
-        return
+        # Replace superseded work instead of leaving stale jobs ahead of it.
+        remaining = [job for job in _preview_jobs if job[0] != key]
+        _preview_jobs.clear()
+        _preview_jobs.extend(remaining)
     _queued_jobs.add(key)
     _preview_jobs.append((key, material, tree, node.name, signature))
 
@@ -512,6 +567,20 @@ def _collect_preview_jobs():
         material = _material_for_space(space, tree)
         if material is None or material.node_tree != tree:
             continue
+
+        valid_keys = {
+            _cache_key(material, tree, node) for node in tree.nodes
+            if _is_previewable_node(node)
+        }
+        prefix = (_safe_pointer(material), _safe_pointer(tree))
+        for key in tuple(_preview_cache):
+            if key[:2] == prefix and key not in valid_keys:
+                _remove_preview_image(_preview_cache.pop(key).get("image"))
+                _queued_jobs.discard(key)
+        remaining = [job for job in _preview_jobs
+                     if job[0][:2] != prefix or job[0] in valid_keys]
+        _preview_jobs.clear()
+        _preview_jobs.extend(remaining)
 
         tree_key = _safe_pointer(tree)
         state = _tree_states.setdefault(
@@ -580,7 +649,7 @@ def _process_preview_job():
             continue
 
         node = tree.nodes.get(node_name)
-        if node is None:
+        if node is None or _cache_key(material, tree, node) != key:
             continue
         image = _render_node_preview(material, node, signature)
         if image is None:
@@ -617,7 +686,7 @@ def _preview_timer():
 
 def _start_preview_timer():
     global _preview_timer_running
-    if _preview_timer_running:
+    if bpy.app.timers.is_registered(_preview_timer):
         return
     _preview_timer_running = True
     try:
@@ -636,14 +705,11 @@ def _draw_image(image, bottom_left, top_right):
         from gpu_extras.batch import batch_for_shader
 
         if _image_shader is None:
-            for shader_name in ('IMAGE', '2D_IMAGE'):
-                try:
-                    _image_shader = gpu.shader.from_builtin(shader_name)
-                    break
-                except (RuntimeError, ValueError):
-                    continue
-        if _image_shader is None:
-            return
+            # GPU image textures contain linear RGB. Convert to display sRGB
+            # when drawing into the node editor; IMAGE alone makes them dark.
+            _image_shader = gpu.shader.from_builtin(
+                'IMAGE_SCENE_LINEAR_TO_REC709_SRGB'
+            )
 
         image_pointer = _safe_pointer(image)
         texture = _gpu_texture_cache.get(image_pointer)
@@ -707,15 +773,19 @@ def _draw_previews(_context=None):
         if entry is None or entry.get("image") is None:
             continue
 
-        location = node.location
+        location = node.location.copy()
+        parent = node.parent
+        while parent is not None:
+            location += parent.location
+            parent = parent.parent
         node_left, node_bottom = view2d.view_to_region(
-            location.x,
-            location.y,
+            location.x * ui_scale,
+            location.y * ui_scale,
             clip=False,
         )
         node_right, node_top = view2d.view_to_region(
-            location.x + node.width,
-            location.y + node.height,
+            (location.x + node.width) * ui_scale,
+            location.y * ui_scale,
             clip=False,
         )
         node_width = abs(node_right - node_left)
@@ -759,6 +829,12 @@ def _enabled_update(scene, _context):
 
 @persistent
 def _load_post(_dummy):
+    global _preview_scene, _preview_object, _image_shader
+    # File loading replaces all RNA data and removes nonpersistent timers.
+    # Drop old references before touching the newly loaded file.
+    _preview_scene = None
+    _preview_object = None
+    _image_shader = None
     _clear_preview_cache()
     if getattr(bpy.context.scene, PROPERTY_NAME, False):
         _start_preview_timer()
