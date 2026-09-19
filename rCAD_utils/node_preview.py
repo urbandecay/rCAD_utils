@@ -1,8 +1,6 @@
 """Python-first rendered previews for shader nodes."""
 
 from collections import deque
-import os
-import tempfile
 from time import monotonic
 
 import bpy
@@ -27,6 +25,7 @@ _preview_object = None
 _preview_shader = None
 _image_shader = None
 _gpu_texture_cache = {}
+_display_shader = None
 
 
 def _safe_pointer(datablock):
@@ -135,7 +134,8 @@ def _node_signature(node):
         node.mute,
         _safe_pointer(image),
         tuple(inputs),
-        tuple((socket.identifier, socket.enabled, socket.is_linked)
+        tuple((socket.identifier, socket.enabled, socket.is_linked,
+               _value_signature(getattr(socket, "default_value", None)))
               for socket in node.outputs),
         _value_signature(getattr(node, "operation", None)),
         _value_signature(getattr(node, "blend_type", None)),
@@ -195,8 +195,19 @@ def _clear_preview_cache():
     _queued_jobs.clear()
     for entry in tuple(_preview_cache.values()):
         _remove_preview_image(entry.get("image"))
+        _free_offscreen(entry)
     _preview_cache.clear()
     _gpu_texture_cache.clear()
+
+
+def _free_offscreen(entry):
+    entry["gpu_ready"] = False
+    offscreen = entry.pop("offscreen", None)
+    if offscreen is not None:
+        try:
+            offscreen.free()
+        except (ReferenceError, RuntimeError):
+            pass
 
 
 def _look_at(object_data, target):
@@ -444,68 +455,6 @@ def _can_direct_image_preview(node):
     vector_input = node.inputs.get("Vector")
     return vector_input is None or not vector_input.is_linked
 
-
-def _render_node_preview(material, node, signature):
-    """Render a copied material with one node connected to the output."""
-    if material is None or node is None or material.node_tree is None:
-        return None
-    if _can_direct_image_preview(node):
-        return _direct_image_preview(node, signature)
-    if material.node_tree.nodes.get(node.name) is None:
-        # Nested group previews are deliberately left for the next iteration;
-        # the top-level material path is the reliable Python baseline.
-        return None
-
-    preview_material = material.copy()
-    preview_material.name = f"rCAD Preview Material {abs(hash((material.name, node.name))) % 1000000}"
-    if not _configure_preview_material(preview_material, node.name):
-        bpy.data.materials.remove(preview_material)
-        return None
-
-    scene = _ensure_preview_scene()
-    _sync_preview_appearance(scene, bpy.context.scene)
-    preview_object = _preview_object
-    old_materials = tuple(preview_object.data.materials)
-    preview_object.data.materials.clear()
-    preview_object.data.materials.append(preview_material)
-
-    temporary_path = None
-    old_filepath = scene.render.filepath
-    try:
-        scene.render.resolution_x = PREVIEW_RESOLUTION
-        scene.render.resolution_y = PREVIEW_RESOLUTION
-        file_handle, temporary_path = tempfile.mkstemp(
-            prefix="rcad_node_preview_",
-            suffix=".png",
-        )
-        os.close(file_handle)
-        os.unlink(temporary_path)
-        scene.render.filepath = temporary_path
-        bpy.ops.render.render(scene=scene.name, write_still=True)
-        if not os.path.isfile(temporary_path):
-            return None
-        image_name = f"{PREVIEW_IMAGE_PREFIX}{abs(hash((material.name, node.name, signature))) % 100000000}"
-        image = bpy.data.images.load(temporary_path, check_existing=False)
-        image.name = image_name
-        image.pack()
-        image["rcad_node_preview"] = True
-        return image
-    except (AttributeError, RuntimeError, TypeError, ValueError) as error:
-        print(f"[rCAD Node Preview] Render failed for {node.name}: {error}")
-        return None
-    finally:
-        scene.render.filepath = old_filepath
-        if temporary_path:
-            try:
-                os.unlink(temporary_path)
-            except OSError:
-                pass
-        preview_object.data.materials.clear()
-        for old_material in old_materials:
-            preview_object.data.materials.append(old_material)
-        bpy.data.materials.remove(preview_material)
-
-
 def _queue_job(key, material, tree, node, signature):
     if key in _queued_jobs:
         # Replace superseded work instead of leaving stale jobs ahead of it.
@@ -575,7 +524,9 @@ def _collect_preview_jobs():
         prefix = (_safe_pointer(material), _safe_pointer(tree))
         for key in tuple(_preview_cache):
             if key[:2] == prefix and key not in valid_keys:
-                _remove_preview_image(_preview_cache.pop(key).get("image"))
+                removed = _preview_cache.pop(key)
+                _remove_preview_image(removed.get("image"))
+                _free_offscreen(removed)
                 _queued_jobs.discard(key)
         remaining = [job for job in _preview_jobs
                      if job[0][:2] != prefix or job[0] in valid_keys]
@@ -640,6 +591,56 @@ def _tag_node_editor_redraws():
         area.tag_redraw()
 
 
+def _draw_node_offscreen(material, node, entry):
+    """Evaluate Blender's shaders straight into a reusable GPU texture."""
+    import gpu
+
+    screen = getattr(bpy.context, "screen", None)
+    area = next((area for area in screen.areas if area.type == 'VIEW_3D'), None) if screen else None
+    if area is None:
+        raise RuntimeError("Keep a 3D Viewport open for live node previews")
+    region = next(region for region in area.regions if region.type == 'WINDOW')
+    space = area.spaces.active
+    scene = _ensure_preview_scene()
+    _sync_preview_appearance(scene, bpy.context.scene)
+    preview_material = material.copy()
+    if not _configure_preview_material(preview_material, node.name):
+        bpy.data.materials.remove(preview_material)
+        raise RuntimeError("Unsupported node output")
+    offscreen = entry.get("offscreen")
+    if offscreen is None:
+        offscreen = gpu.types.GPUOffScreen(PREVIEW_RESOLUTION, PREVIEW_RESOLUTION)
+        entry["offscreen"] = offscreen
+    shading = space.shading
+    old_settings = {name: getattr(shading, name) for name in
+                    ("type", "use_scene_world", "use_scene_lights")}
+    old_overlays = space.overlay.show_overlays
+    try:
+        _preview_object.data.materials.clear()
+        _preview_object.data.materials.append(preview_material)
+        shading.type = 'MATERIAL'
+        shading.use_scene_world = True
+        shading.use_scene_lights = True
+        space.overlay.show_overlays = False
+        with bpy.context.temp_override(scene=scene, view_layer=scene.view_layers[0],
+                                       area=area, region=region):
+            scene.view_layers[0].update()
+            depsgraph = bpy.context.evaluated_depsgraph_get()
+            camera = scene.camera
+            projection = camera.calc_matrix_camera(depsgraph, x=PREVIEW_RESOLUTION,
+                                                   y=PREVIEW_RESOLUTION)
+            offscreen.draw_view3d(scene, scene.view_layers[0], space, region,
+                                 camera.matrix_world.inverted(), projection,
+                                 do_color_management=True, draw_background=True)
+        entry["gpu_ready"] = True
+    finally:
+        for name, value in old_settings.items():
+            setattr(shading, name, value)
+        space.overlay.show_overlays = old_overlays
+        _preview_object.data.materials.clear()
+        bpy.data.materials.remove(preview_material)
+
+
 def _process_preview_job():
     while _preview_jobs:
         key, material, tree, node_name, signature = _preview_jobs.popleft()
@@ -651,10 +652,23 @@ def _process_preview_job():
         node = tree.nodes.get(node_name)
         if node is None or _cache_key(material, tree, node) != key:
             continue
-        image = _render_node_preview(material, node, signature)
+        if not _can_direct_image_preview(node):
+            try:
+                _draw_node_offscreen(material, node, entry)
+                _remove_preview_image(entry.get("image"))
+                entry["image"] = None
+                entry["error"] = None
+            except (AttributeError, RuntimeError, ReferenceError, ValueError, SystemError) as error:
+                entry["error"] = str(error)
+                print(f"[rCAD Node Preview] Live preview: {error}")
+            _tag_node_editor_redraws()
+            break
+        image = _direct_image_preview(node, signature)
         if image is None:
             entry["error"] = True
         else:
+            _free_offscreen(entry)
+            entry["gpu_ready"] = False
             old_image = entry.get("image")
             if old_image is not image:
                 _remove_preview_image(old_image)
@@ -662,10 +676,8 @@ def _process_preview_job():
             entry["error"] = None
         _tag_node_editor_redraws()
 
-        # Direct image thumbnails are cheap and can all update in this pass.
-        # Keep procedural previews to one render per timer tick.
-        if not _can_direct_image_preview(node):
-            break
+        # All direct image thumbnails can update in the same pass. GPU
+        # viewport previews above consume at most one draw per timer tick.
 
 
 def _preview_timer():
@@ -681,7 +693,7 @@ def _preview_timer():
     except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError) as error:
         print(f"[rCAD Node Preview] Update failed: {error}")
     _tag_node_editor_redraws()
-    return 0.2
+    return 0.05
 
 
 def _start_preview_timer():
@@ -736,6 +748,24 @@ def _draw_image(image, bottom_left, top_right):
         return
 
 
+def _draw_offscreen(entry, bottom_left, top_right):
+    global _display_shader
+    import gpu
+    from gpu_extras.batch import batch_for_shader
+    if _display_shader is None:
+        # draw_view3d already applied the scene's display transform.
+        _display_shader = gpu.shader.from_builtin('IMAGE')
+    x0, y0 = bottom_left
+    x1, y1 = top_right
+    batch = batch_for_shader(_display_shader, 'TRI_FAN', {
+        "pos": ((x0, y0), (x1, y0), (x1, y1), (x0, y1)),
+        "texCoord": ((0, 0), (1, 0), (1, 1), (0, 1)),
+    })
+    _display_shader.bind()
+    _display_shader.uniform_sampler("image", entry["offscreen"].texture_color)
+    batch.draw(_display_shader)
+
+
 def _draw_previews(_context=None):
     # SpaceNodeEditor.draw_handler_add invokes draw callbacks with the
     # arguments supplied at registration time. This handler is registered
@@ -770,7 +800,7 @@ def _draw_previews(_context=None):
             continue
         key = _cache_key(material, tree, node)
         entry = _preview_cache.get(key)
-        if entry is None or entry.get("image") is None:
+        if entry is None or (entry.get("image") is None and not entry.get("gpu_ready")):
             continue
 
         location = node.location.copy()
@@ -789,13 +819,13 @@ def _draw_previews(_context=None):
             clip=False,
         )
         node_width = abs(node_right - node_left)
-        node_height = abs(node_top - node_bottom)
-        preview_size = min(node_width - 8.0 * ui_scale, 150.0 * ui_scale)
-        if preview_size < 24.0:
+        pixels_per_unit = node_width / max(node.width, 1.0)
+        preview_size = min(max(node.width - 8.0, 1.0), 150.0) * pixels_per_unit
+        if preview_size < 1.0:
             continue
 
         center_x = (node_left + node_right) * 0.5
-        bottom_y = max(node_top, node_bottom) + 8.0 * ui_scale
+        bottom_y = max(node_top, node_bottom) + 8.0 * pixels_per_unit
         top_y = bottom_y + preview_size
         bottom_left = (center_x - preview_size * 0.5, bottom_y)
         top_right = (center_x + preview_size * 0.5, top_y)
@@ -803,7 +833,10 @@ def _draw_previews(_context=None):
             continue
         if top_right[1] < 0 or bottom_left[1] > region.height:
             continue
-        _draw_image(entry["image"], bottom_left, top_right)
+        if entry.get("gpu_ready"):
+            _draw_offscreen(entry, bottom_left, top_right)
+        else:
+            _draw_image(entry["image"], bottom_left, top_right)
 
 
 def _draw_node_preview_header(self, context):
@@ -829,12 +862,13 @@ def _enabled_update(scene, _context):
 
 @persistent
 def _load_post(_dummy):
-    global _preview_scene, _preview_object, _image_shader
+    global _preview_scene, _preview_object, _image_shader, _display_shader
     # File loading replaces all RNA data and removes nonpersistent timers.
     # Drop old references before touching the newly loaded file.
     _preview_scene = None
     _preview_object = None
     _image_shader = None
+    _display_shader = None
     _clear_preview_cache()
     if getattr(bpy.context.scene, PROPERTY_NAME, False):
         _start_preview_timer()
@@ -844,7 +878,7 @@ def register():
     global _draw_handle
     bpy.types.Scene.rcad_node_preview_enabled = BoolProperty(
         name="Node Preview",
-        description="Render small previews above shader nodes",
+        description="Live GPU previews above shader nodes; keep a 3D Viewport open",
         default=False,
         update=_enabled_update,
     )
@@ -858,7 +892,8 @@ def register():
         )
     if _load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_load_post)
-    if getattr(bpy.context.scene, PROPERTY_NAME, False):
+    scene = getattr(bpy.context, "scene", None)
+    if scene is not None and getattr(scene, PROPERTY_NAME, False):
         _start_preview_timer()
 
 

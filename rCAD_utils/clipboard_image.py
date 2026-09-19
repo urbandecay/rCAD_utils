@@ -44,6 +44,8 @@ _CLIPBOARD_IMAGE_TYPES = (
     ("image/webp", ".webp"),
 )
 
+_clipboard_image_configuration_timer_registered = False
+
 
 def _read_command_output(command):
     """Return binary command output, or None if the command is unavailable."""
@@ -353,7 +355,16 @@ def _create_textured_face(context, image):
 
 def configure_existing_clipboard_images():
     """Restore normal object behavior to images made by an older version."""
-    for empty in bpy.data.objects:
+    # Blender calls addon register() while startup data is still restricted.
+    # Accessing bpy.data.objects at that point raises AttributeError and makes
+    # Blender disable the whole addon. Return False so the caller can retry
+    # once normal data access is available.
+    try:
+        objects = bpy.data.objects
+    except AttributeError:
+        return False
+
+    for empty in objects:
         if empty.type != 'EMPTY':
             continue
 
@@ -369,6 +380,46 @@ def configure_existing_clipboard_images():
         empty.empty_image_depth = 'DEFAULT'
         empty.hide_select = False
         _move_to_dedicated_collection(bpy.context.scene, empty)
+    return True
+
+
+def _configure_existing_clipboard_images_timer():
+    """Retry legacy image configuration after Blender startup finishes."""
+    global _clipboard_image_configuration_timer_registered
+
+    if configure_existing_clipboard_images():
+        _clipboard_image_configuration_timer_registered = False
+        return None
+
+    return 0.1
+
+
+def schedule_existing_clipboard_image_configuration():
+    """Schedule legacy image configuration outside Blender's restricted context."""
+    global _clipboard_image_configuration_timer_registered
+
+    if _clipboard_image_configuration_timer_registered:
+        return
+
+    _clipboard_image_configuration_timer_registered = True
+    bpy.app.timers.register(
+        _configure_existing_clipboard_images_timer,
+        first_interval=0.1,
+    )
+
+
+def cancel_existing_clipboard_image_configuration():
+    """Cancel the deferred legacy image configuration when disabling the addon."""
+    global _clipboard_image_configuration_timer_registered
+
+    if not _clipboard_image_configuration_timer_registered:
+        return
+
+    try:
+        bpy.app.timers.unregister(_configure_existing_clipboard_images_timer)
+    except ValueError:
+        pass
+    _clipboard_image_configuration_timer_registered = False
 
 
 class OBJECT_OT_add_clipboard_image(bpy.types.Operator):

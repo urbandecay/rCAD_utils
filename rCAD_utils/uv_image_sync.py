@@ -436,7 +436,8 @@ def register():
         notify=_uv_editor_image_changed,
     )
     _last_face_state = None
-    if getattr(bpy.context.scene, PROPERTY_NAME, False):
+    scene = getattr(bpy.context, "scene", None)
+    if scene is not None and getattr(scene, PROPERTY_NAME, False):
         _start_uv_monitor()
 
 

@@ -41,9 +41,10 @@ from .texture_sampler import (
 )
 from .clipboard_image import (
     OBJECT_OT_add_clipboard_image,
-    configure_existing_clipboard_images,
+    cancel_existing_clipboard_image_configuration,
     draw_clipboard_image_menu,
     draw_edit_clipboard_image_menu,
+    schedule_existing_clipboard_image_configuration,
 )
 from . import uv_image_sync
 from . import node_preview
@@ -105,7 +106,7 @@ classes = [
 def register():
     eap_options.register_options()
     cap_options.register_options()
-    configure_existing_clipboard_images()
+    schedule_existing_clipboard_image_configuration()
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.VIEW3D_MT_edit_mesh_split.append(draw_split_menu)
@@ -144,6 +145,7 @@ def register():
 
 
 def unregister():
+    cancel_existing_clipboard_image_configuration()
     bpy.types.VIEW3D_MT_edit_mesh_split.remove(draw_split_menu)
     image_add_menu = getattr(bpy.types, "VIEW3D_MT_image_add", bpy.types.VIEW3D_MT_add)
     image_add_menu.remove(draw_clipboard_image_menu)
