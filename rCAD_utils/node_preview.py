@@ -7,6 +7,7 @@ import bpy
 from bpy.app.handlers import persistent
 from bpy.props import BoolProperty
 from mathutils import Vector
+from . import preview_mouse
 
 
 PROPERTY_NAME = "rcad_node_preview_enabled"
@@ -18,6 +19,7 @@ _draw_handle = None
 _preview_timer_running = False
 _preview_jobs = deque()
 _queued_jobs = set()
+_live_preview_keys = set()
 _preview_cache = {}
 _tree_states = {}
 _preview_scene = None
@@ -193,6 +195,7 @@ def _clear_preview_cache():
     _tree_states.clear()
     _preview_jobs.clear()
     _queued_jobs.clear()
+    _live_preview_keys.clear()
     for entry in tuple(_preview_cache.values()):
         _remove_preview_image(entry.get("image"))
         _free_offscreen(entry)
@@ -570,10 +573,12 @@ def _collect_preview_jobs():
                 immediate_names = changed_names
             for node in tree.nodes:
                 if node.name in immediate_names and _is_previewable_node(node):
+                    _live_preview_keys.add(_cache_key(material, tree, node))
                     _queue_preview_node(material, tree, node, force=True)
 
         if (
             state["pending_changed"]
+            and not preview_mouse.buttons_held()
             and now - state["last_change"] >= PREVIEW_SETTLE_SECONDS
         ):
             affected_names = _downstream_node_names(
@@ -642,9 +647,16 @@ def _draw_node_offscreen(material, node, entry):
 
 
 def _process_preview_job():
-    while _preview_jobs:
+    # Keep the active node responsive while a drag is held, but leave all
+    # other queued previews untouched until the button is released.
+    mouse_held = preview_mouse.buttons_held()
+    for _ in range(len(_preview_jobs)):
         key, material, tree, node_name, signature = _preview_jobs.popleft()
+        if mouse_held and key not in _live_preview_keys:
+            _preview_jobs.append((key, material, tree, node_name, signature))
+            continue
         _queued_jobs.discard(key)
+        _live_preview_keys.discard(key)
         entry = _preview_cache.get(key)
         if entry is None or entry["signature"] != signature:
             continue
@@ -678,6 +690,9 @@ def _process_preview_job():
 
         # All direct image thumbnails can update in the same pass. GPU
         # viewport previews above consume at most one draw per timer tick.
+
+    if not mouse_held:
+        _live_preview_keys.clear()
 
 
 def _preview_timer():
@@ -899,6 +914,7 @@ def register():
 
 def unregister():
     global _draw_handle, _preview_timer_running
+    preview_mouse.close()
     try:
         bpy.types.NODE_HT_header.remove(_draw_node_preview_header)
     except (AttributeError, ValueError):
