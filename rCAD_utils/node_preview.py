@@ -24,6 +24,8 @@ _preview_cache = {}
 _tree_states = {}
 _preview_scene = None
 _preview_object = None
+_preview_shader_object = None
+_preview_shader_camera = None
 _preview_shader = None
 _image_shader = None
 _gpu_texture_cache = {}
@@ -220,7 +222,8 @@ def _look_at(object_data, target):
 
 def _ensure_preview_scene():
     """Create the private scene used for Python-side thumbnail rendering."""
-    global _preview_scene, _preview_object
+    global _preview_scene, _preview_object, _preview_shader_object
+    global _preview_shader_camera
     if _preview_scene is not None and _preview_scene.name in bpy.data.scenes:
         return _preview_scene
 
@@ -270,6 +273,30 @@ def _ensure_preview_scene():
     preview_object = bpy.data.objects.new("rCAD Node Preview Plane", mesh)
     scene.collection.objects.link(preview_object)
 
+    # Shader outputs need a lit three-dimensional surface.  A flat plane can
+    # make a Principled result look like its base-color input, especially
+    # under a studio environment.  Keep the plane for data nodes and use a
+    # compact cube for shader-producing nodes.
+    cube_mesh = bpy.data.meshes.new("rCAD Node Preview Shader Mesh")
+    cube_mesh.from_pydata(
+        [(-1.0, -1.0, -1.0), (1.0, -1.0, -1.0),
+         (1.0, 1.0, -1.0), (-1.0, 1.0, -1.0),
+         (-1.0, -1.0, 1.0), (1.0, -1.0, 1.0),
+         (1.0, 1.0, 1.0), (-1.0, 1.0, 1.0)],
+        [],
+        [(0, 3, 2, 1), (4, 5, 6, 7),
+         (0, 1, 5, 4), (1, 2, 6, 5),
+         (2, 3, 7, 6), (3, 0, 4, 7)],
+    )
+    cube_mesh.update()
+    cube_uv_layer = cube_mesh.uv_layers.new(name="UVMap")
+    face_uvs = ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))
+    for polygon in cube_mesh.polygons:
+        for corner, loop_index in enumerate(polygon.loop_indices):
+            cube_uv_layer.data[loop_index].uv = face_uvs[corner]
+    shader_object = bpy.data.objects.new("rCAD Node Preview Shader", cube_mesh)
+    scene.collection.objects.link(shader_object)
+
     camera_data = bpy.data.cameras.new("rCAD Node Preview Camera")
     camera = bpy.data.objects.new("rCAD Node Preview Camera", camera_data)
     scene.collection.objects.link(camera)
@@ -278,6 +305,16 @@ def _ensure_preview_scene():
     camera.location = (0.0, 0.0, 3.7)
     _look_at(camera, (0.0, 0.0, 0.0))
     scene.camera = camera
+
+    shader_camera_data = bpy.data.cameras.new("rCAD Node Preview Shader Camera")
+    shader_camera = bpy.data.objects.new(
+        "rCAD Node Preview Shader Camera", shader_camera_data
+    )
+    scene.collection.objects.link(shader_camera)
+    shader_camera_data.type = 'ORTHO'
+    shader_camera_data.ortho_scale = 3.7
+    shader_camera.location = (3.8, -5.2, 3.2)
+    _look_at(shader_camera, (0.0, 0.0, 0.0))
 
     light_data = bpy.data.lights.new("rCAD Node Preview Key", 'AREA')
     light_data.energy = 450
@@ -298,6 +335,8 @@ def _ensure_preview_scene():
 
     _preview_scene = scene
     _preview_object = preview_object
+    _preview_shader_object = shader_object
+    _preview_shader_camera = shader_camera
     return scene
 
 
@@ -347,10 +386,13 @@ def _sync_preview_appearance(scene, source_scene):
 
 
 def _destroy_preview_scene():
-    global _preview_scene, _preview_object
+    global _preview_scene, _preview_object, _preview_shader_object
+    global _preview_shader_camera
     scene = _preview_scene
     _preview_scene = None
     _preview_object = None
+    _preview_shader_object = None
+    _preview_shader_camera = None
     if scene is None:
         return
 
@@ -386,6 +428,11 @@ def _preview_output(node):
                if socket.enabled and not getattr(socket, "is_unavailable", False)]
     return next((socket for socket in outputs if socket.is_linked),
                 outputs[0] if outputs else None)
+
+
+def _uses_shader_preview(node):
+    output = _preview_output(node)
+    return output is not None and output.type == 'SHADER'
 
 
 def _configure_preview_material(preview_material, node_name):
@@ -616,13 +663,36 @@ def _draw_node_offscreen(material, node, entry):
     if offscreen is None:
         offscreen = gpu.types.GPUOffScreen(PREVIEW_RESOLUTION, PREVIEW_RESOLUTION)
         entry["offscreen"] = offscreen
+    shader_preview = _uses_shader_preview(node)
+    preview_object = (
+        _preview_shader_object if shader_preview else _preview_object
+    )
+    preview_camera = (
+        _preview_shader_camera if shader_preview else scene.camera
+    )
+    if preview_object is None or preview_camera is None:
+        bpy.data.materials.remove(preview_material)
+        raise RuntimeError("Preview geometry is unavailable")
     shading = space.shading
     old_settings = {name: getattr(shading, name) for name in
                     ("type", "use_scene_world", "use_scene_lights")}
     old_overlays = space.overlay.show_overlays
+    old_camera = scene.camera
+    preview_objects = tuple(
+        obj for obj in (_preview_object, _preview_shader_object)
+        if obj is not None
+    )
+    old_visibility = {
+        obj: (obj.hide_render, obj.hide_viewport)
+        for obj in preview_objects
+    }
     try:
-        _preview_object.data.materials.clear()
-        _preview_object.data.materials.append(preview_material)
+        for obj in preview_objects:
+            obj.hide_render = obj is not preview_object
+            obj.hide_viewport = obj is not preview_object
+        preview_object.data.materials.clear()
+        preview_object.data.materials.append(preview_material)
+        scene.camera = preview_camera
         shading.type = 'MATERIAL'
         shading.use_scene_world = True
         shading.use_scene_lights = True
@@ -642,7 +712,11 @@ def _draw_node_offscreen(material, node, entry):
         for name, value in old_settings.items():
             setattr(shading, name, value)
         space.overlay.show_overlays = old_overlays
-        _preview_object.data.materials.clear()
+        scene.camera = old_camera
+        preview_object.data.materials.clear()
+        for obj, (hide_render, hide_viewport) in old_visibility.items():
+            obj.hide_render = hide_render
+            obj.hide_viewport = hide_viewport
         bpy.data.materials.remove(preview_material)
 
 
@@ -877,11 +951,14 @@ def _enabled_update(scene, _context):
 
 @persistent
 def _load_post(_dummy):
-    global _preview_scene, _preview_object, _image_shader, _display_shader
+    global _preview_scene, _preview_object, _preview_shader_object
+    global _preview_shader_camera, _image_shader, _display_shader
     # File loading replaces all RNA data and removes nonpersistent timers.
     # Drop old references before touching the newly loaded file.
     _preview_scene = None
     _preview_object = None
+    _preview_shader_object = None
+    _preview_shader_camera = None
     _image_shader = None
     _display_shader = None
     _clear_preview_cache()
