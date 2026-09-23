@@ -116,14 +116,17 @@ def _get_stored_rail_vertices(scene, bm):
             raise ValueError("Mesh topology changed after storing the rails. Store them again.")
         if any(frozenset((a, b)) not in edge_pairs for a, b in zip(indices, indices[1:])):
             raise ValueError("Mesh topology changed after storing the rails. Store them again.")
-        paths.append([bm.verts[index].co.copy() for index in indices])
+        paths.append([bm.verts[index] for index in indices])
     return paths
 
 
 def _prepare_path(points):
     lengths = [0.0]
     for a, b in zip(points, points[1:]):
-        lengths.append(lengths[-1] + (b - a).length)
+        segment_length = (b - a).length
+        if segment_length <= 1e-12:
+            raise ValueError("A rail cannot contain zero-length edges.")
+        lengths.append(lengths[-1] + segment_length)
     total = lengths[-1]
     if total <= 1e-10:
         raise ValueError("A stored rail has no measurable length.")
@@ -168,18 +171,18 @@ def _tangent_at(path, distance_fraction):
     return tangent.normalized()
 
 
-def _unique_stations(*paths):
-    values = [0.0, 1.0]
-    for _points, lengths, total in paths:
-        values.extend(length / total for length in lengths)
-    values.sort()
-    stations = []
-    for value in values:
-        if not stations or value - stations[-1] > 1e-8:
-            stations.append(value)
-    stations[0] = 0.0
-    stations[-1] = 1.0
-    return stations
+def _paired_stations(path_a, path_b):
+    """Pair corresponding rail vertices without creating extra sections."""
+    points_a, lengths_a, total_a = path_a
+    points_b, lengths_b, total_b = path_b
+    if len(points_a) != len(points_b):
+        raise ValueError(
+            "The two rails must have the same number of vertices so their junctions can be paired."
+        )
+    return [
+        (length_a / total_a, length_b / total_b)
+        for length_a, length_b in zip(lengths_a, lengths_b)
+    ]
 
 
 def _orient_rails_to_profile(rails, profile_start, profile_end):
@@ -192,7 +195,7 @@ def _orient_rails_to_profile(rails, profile_start, profile_end):
                 first.reverse()
             if reverse_second:
                 second.reverse()
-            cost = (first[0] - profile_start).length + (second[0] - profile_end).length
+            cost = (first[0].co - profile_start).length + (second[0].co - profile_end).length
             if best is None or cost < best[0]:
                 best = (cost, first, second)
     return best[1], best[2]
@@ -212,7 +215,7 @@ def _projected_unit(vector, axis, fallback=None):
     return (basis - axis * basis.dot(axis)).normalized()
 
 
-def _profile_positions(profile_coords, path_a, path_b, stations, scale_height=False):
+def _profile_positions(profile_coords, path_a, path_b, station_pairs, scale_height=False):
     profile_start = profile_coords[0]
     profile_end = profile_coords[-1]
     source_axis = profile_end - profile_start
@@ -221,22 +224,23 @@ def _profile_positions(profile_coords, path_a, path_b, stations, scale_height=Fa
         raise ValueError("The profile endpoints must be different vertices.")
     source_axis.normalize()
 
-    source_progress = _tangent_at(path_a, 0.0) + _tangent_at(path_b, 0.0)
+    first_a, first_b = station_pairs[0]
+    source_progress = _tangent_at(path_a, first_a) + _tangent_at(path_b, first_b)
     source_z = _projected_unit(source_progress, source_axis)
     source_y = source_z.cross(source_axis).normalized()
     source_z = source_axis.cross(source_y).normalized()
 
     output = []
     previous_z = None
-    for station in stations:
-        point_a = _point_at(path_a, station)
-        point_b = _point_at(path_b, station)
+    for station_a, station_b in station_pairs:
+        point_a = _point_at(path_a, station_a)
+        point_b = _point_at(path_b, station_b)
         span = point_b - point_a
         span_length = span.length
         if span_length <= 1e-8:
             raise ValueError("The rails meet or cross at a sweep station.")
         target_x = span / span_length
-        progress = _tangent_at(path_a, station) + _tangent_at(path_b, station)
+        progress = _tangent_at(path_a, station_a) + _tangent_at(path_b, station_b)
         fallback_z = previous_z if previous_z is not None else source_z
         target_z = _projected_unit(progress, target_x, fallback_z)
         if previous_z is not None and target_z.dot(previous_z) < 0.0:
@@ -347,19 +351,21 @@ class MESH_OT_TwoRailSweep(bpy.types.Operator):
 
             original_coords = [vert.co.copy() for vert in profile_verts]
             profile_coords = [coord.copy() for coord in original_coords]
-            path_a_points, path_b_points = _orient_rails_to_profile(
+            rail_a_verts, rail_b_verts = _orient_rails_to_profile(
                 rails,
                 profile_coords[0],
                 profile_coords[-1],
             )
+            path_a_points = [vert.co.copy() for vert in rail_a_verts]
+            path_b_points = [vert.co.copy() for vert in rail_b_verts]
             path_a = _prepare_path(path_a_points)
             path_b = _prepare_path(path_b_points)
-            stations = _unique_stations(path_a, path_b)
+            station_pairs = _paired_stations(path_a, path_b)
             positions = _profile_positions(
                 profile_coords,
                 path_a,
                 path_b,
-                stations,
+                station_pairs,
                 scale_height=scene.rcad_two_rail_sweep_scale_height,
             )
         except (ValueError, TypeError, IndexError) as exc:
@@ -392,6 +398,18 @@ class MESH_OT_TwoRailSweep(bpy.types.Operator):
                         next_layer[profile_index],
                     ))
                     new_faces.append(face)
+
+            # Pair rail vertices by chain order. Each corresponding pair is
+            # one sweep junction, even when the two vertices occur at
+            # different percentages along their respective rail lengths.
+            rail_targets = {}
+            for station_index, layer in enumerate(layers):
+                if layer[0] != rail_a_verts[station_index]:
+                    rail_targets[layer[0]] = rail_a_verts[station_index]
+                if layer[-1] != rail_b_verts[station_index]:
+                    rail_targets[layer[-1]] = rail_b_verts[station_index]
+            if rail_targets:
+                bmesh.ops.weld_verts(bm, targetmap=rail_targets)
         except Exception as exc:
             for face in reversed(new_faces):
                 if face.is_valid:
