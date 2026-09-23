@@ -9,12 +9,13 @@ bl_info = {
 }
 
 import bpy
-from bpy.props import BoolProperty
+from bpy.props import BoolProperty, PointerProperty, StringProperty
 from . import panel
 from .extrude_along_path import ui as eap_ui
 from .extrude_along_path import options_manager as eap_options
 from .carve_along_path import ui as cap_ui
 from .carve_along_path import options_manager as cap_options
+from .two_rail_sweep import MESH_OT_StoreTwoRailSweepRails, MESH_OT_TwoRailSweep
 from .place_profile import (
     OBJECT_OT_store_profile_info_edit,
     OBJECT_OT_place_profile_on_edges_edit,
@@ -65,6 +66,9 @@ classes = [
     # Carve Along Path operators
     cap_ui.OT_CarveAlongPath_Store_Path,
     cap_ui.OT_CarveAlongPath_Carve,
+    # Two Rail Sweep operators
+    MESH_OT_StoreTwoRailSweepRails,
+    MESH_OT_TwoRailSweep,
     # Place Profile operators
     OBJECT_OT_store_profile_info_edit,
     OBJECT_OT_profile_rotate_axis,
@@ -91,6 +95,7 @@ classes = [
     panel.RCAD_OT_ReloadAddon,
     panel.RCAD_PT_ExtrudeAlongPath,
     panel.RCAD_PT_CarveAlongPath,
+    panel.RCAD_PT_TwoRailSweep,
     panel.RCAD_PT_PlaceProfile,
     panel.RCAD_PT_CoolBool,
     panel.RCAD_PT_MeshTiler,
@@ -127,6 +132,20 @@ def register():
     uv_image_sync.register()
     node_preview.register()
     bpy.types.Scene.profile_path_mode = BoolProperty(name="Path Mode", default=False)
+    bpy.types.Scene.rcad_two_rail_sweep_object = PointerProperty(
+        name="Two Rail Sweep Mesh",
+        type=bpy.types.Object,
+    )
+    bpy.types.Scene.rcad_two_rail_sweep_paths = StringProperty(
+        name="Two Rail Sweep Rails",
+        default="",
+        options={'HIDDEN'},
+    )
+    bpy.types.Scene.rcad_two_rail_sweep_scale_height = BoolProperty(
+        name="Scale Height with Rail Width",
+        description="Scale the profile height in proportion to the distance between the rails",
+        default=False,
+    )
     bpy.types.Scene.cool_bool_solver = bpy.props.EnumProperty(
         name="Solver",
         items=[('FLOAT', "Fast", ""), ('EXACT', "Exact", ""), ('MANIFOLD', "Manifold", "")],
@@ -170,6 +189,12 @@ def unregister():
     VertexStorage._instance = None
     if hasattr(bpy.types.Scene, "profile_path_mode"):
         del bpy.types.Scene.profile_path_mode
+    if hasattr(bpy.types.Scene, "rcad_two_rail_sweep_object"):
+        del bpy.types.Scene.rcad_two_rail_sweep_object
+    if hasattr(bpy.types.Scene, "rcad_two_rail_sweep_paths"):
+        del bpy.types.Scene.rcad_two_rail_sweep_paths
+    if hasattr(bpy.types.Scene, "rcad_two_rail_sweep_scale_height"):
+        del bpy.types.Scene.rcad_two_rail_sweep_scale_height
     if hasattr(bpy.types.Scene, "cool_bool_solver"):
         del bpy.types.Scene.cool_bool_solver
     if hasattr(bpy.types.Scene, "rcad_separator_dissolve"):

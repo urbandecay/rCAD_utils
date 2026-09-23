@@ -138,6 +138,35 @@ class RCAD_PT_CarveAlongPath(bpy.types.Panel):
         row_carve.operator("mesh.cap_carve", text="Carve")
 
 
+class RCAD_PT_TwoRailSweep(bpy.types.Panel):
+    bl_label = "2 Rail Sweep"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "rCAD Utils"
+    bl_parent_id = "RCAD_PT_Main"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        box = layout.box()
+
+        row = box.row(align=True)
+        row.label(text="Rails:")
+        row.operator("mesh.store_two_rail_sweep_rails", text="Store")
+
+        stored_object = context.scene.rcad_two_rail_sweep_object
+        stored_paths = context.scene.rcad_two_rail_sweep_paths
+        if stored_object and stored_paths:
+            box.label(text=f"Stored on {stored_object.name}", icon='CHECKMARK')
+
+        box.prop(context.scene, "rcad_two_rail_sweep_scale_height", text="Scale Height with Rail Width")
+
+        row = box.row(align=True)
+        row.label(text="Profile:")
+        row.operator("mesh.two_rail_sweep", text="Sweep")
+        box.label(text="Rails and profile must be open edge chains.")
+
+
 class RCAD_PT_PlaceProfile(bpy.types.Panel):
     bl_label = "Place Profile"
     bl_space_type = "VIEW_3D"
