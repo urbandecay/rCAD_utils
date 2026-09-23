@@ -154,11 +154,6 @@ class RCAD_PT_TwoRailSweep(bpy.types.Panel):
         row.label(text="Rails:")
         row.operator("mesh.store_two_rail_sweep_rails", text="Store")
 
-        stored_object = context.scene.rcad_two_rail_sweep_object
-        stored_paths = context.scene.rcad_two_rail_sweep_paths
-        if stored_object and stored_paths:
-            box.label(text=f"Stored on {stored_object.name}", icon='CHECKMARK')
-
         box.prop(context.scene, "rcad_two_rail_sweep_scale_height", text="Scale Height with Rail Width")
 
         row = box.row(align=True)
