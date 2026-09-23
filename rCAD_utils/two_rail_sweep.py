@@ -3,7 +3,6 @@
 import json
 from bisect import bisect_right
 from collections import defaultdict
-from itertools import permutations, product
 
 import bpy
 import bmesh
@@ -186,19 +185,27 @@ def _paired_stations(path_a, path_b):
 
 
 def _orient_rails_to_profile(rails, profile_start, profile_end):
+    first = list(rails[0])
+    second = list(rails[1])
+    if len(first) != len(second):
+        raise ValueError(
+            "The two rails must have the same number of vertices so their junctions can be paired."
+        )
+
+    # Match the direction of the two chains before looking for the profile.
+    # The profile may be anywhere along the rails, not just at their starts.
+    forward_cost = sum((a.co - b.co).length for a, b in zip(first, second))
+    reverse_cost = sum((a.co - b.co).length for a, b in zip(first, reversed(second)))
+    if reverse_cost < forward_cost:
+        second.reverse()
+
     best = None
-    for rail_order in permutations(range(2)):
-        for reverse_first, reverse_second in product((False, True), repeat=2):
-            first = list(rails[rail_order[0]])
-            second = list(rails[rail_order[1]])
-            if reverse_first:
-                first.reverse()
-            if reverse_second:
-                second.reverse()
-            cost = (first[0].co - profile_start).length + (second[0].co - profile_end).length
+    for rail_a, rail_b in ((first, second), (second, first)):
+        for index, (a, b) in enumerate(zip(rail_a, rail_b)):
+            cost = (a.co - profile_start).length + (b.co - profile_end).length
             if best is None or cost < best[0]:
-                best = (cost, first, second)
-    return best[1], best[2]
+                best = (cost, rail_a, rail_b, index)
+    return best[1], best[2], best[3]
 
 
 def _projected_unit(vector, axis, fallback=None):
@@ -215,7 +222,7 @@ def _projected_unit(vector, axis, fallback=None):
     return (basis - axis * basis.dot(axis)).normalized()
 
 
-def _profile_positions(profile_coords, path_a, path_b, station_pairs, scale_height=False):
+def _profile_positions(profile_coords, path_a, path_b, station_pairs, anchor_index, scale_height=False):
     profile_start = profile_coords[0]
     profile_end = profile_coords[-1]
     source_axis = profile_end - profile_start
@@ -224,15 +231,16 @@ def _profile_positions(profile_coords, path_a, path_b, station_pairs, scale_heig
         raise ValueError("The profile endpoints must be different vertices.")
     source_axis.normalize()
 
-    first_a, first_b = station_pairs[0]
-    source_progress = _tangent_at(path_a, first_a) + _tangent_at(path_b, first_b)
+    anchor_a, anchor_b = station_pairs[anchor_index]
+    source_progress = _tangent_at(path_a, anchor_a) + _tangent_at(path_b, anchor_b)
     source_z = _projected_unit(source_progress, source_axis)
     source_y = source_z.cross(source_axis).normalized()
     source_z = source_axis.cross(source_y).normalized()
 
-    output = []
-    previous_z = None
-    for station_a, station_b in station_pairs:
+    output = [None] * len(station_pairs)
+
+    def build_layer(index, previous_z):
+        station_a, station_b = station_pairs[index]
         point_a = _point_at(path_a, station_a)
         point_b = _point_at(path_b, station_b)
         span = point_b - point_a
@@ -247,8 +255,6 @@ def _profile_positions(profile_coords, path_a, path_b, station_pairs, scale_heig
             target_z.negate()
         target_y = target_z.cross(target_x).normalized()
         target_z = target_x.cross(target_y).normalized()
-        previous_z = target_z
-
         width_scale = span_length / profile_width
         layer = []
         for coordinate in profile_coords:
@@ -257,7 +263,16 @@ def _profile_positions(profile_coords, path_a, path_b, station_pairs, scale_heig
             y = relative.dot(source_y) * (width_scale if scale_height else 1.0)
             z = relative.dot(source_z)
             layer.append(point_a + target_x * x + target_y * y + target_z * z)
-        output.append(layer)
+        output[index] = layer
+        return target_z
+
+    anchor_z = build_layer(anchor_index, None)
+    previous_z = anchor_z
+    for index in range(anchor_index + 1, len(station_pairs)):
+        previous_z = build_layer(index, previous_z)
+    previous_z = anchor_z
+    for index in range(anchor_index - 1, -1, -1):
+        previous_z = build_layer(index, previous_z)
     return output
 
 
@@ -351,7 +366,7 @@ class MESH_OT_TwoRailSweep(bpy.types.Operator):
 
             original_coords = [vert.co.copy() for vert in profile_verts]
             profile_coords = [coord.copy() for coord in original_coords]
-            rail_a_verts, rail_b_verts = _orient_rails_to_profile(
+            rail_a_verts, rail_b_verts, anchor_index = _orient_rails_to_profile(
                 rails,
                 profile_coords[0],
                 profile_coords[-1],
@@ -366,6 +381,7 @@ class MESH_OT_TwoRailSweep(bpy.types.Operator):
                 path_a,
                 path_b,
                 station_pairs,
+                anchor_index,
                 scale_height=scene.rcad_two_rail_sweep_scale_height,
             )
         except (ValueError, TypeError, IndexError) as exc:
@@ -375,11 +391,14 @@ class MESH_OT_TwoRailSweep(bpy.types.Operator):
         new_verts = []
         new_faces = []
         try:
-            for vert, coordinate in zip(profile_verts, positions[0]):
+            for vert, coordinate in zip(profile_verts, positions[anchor_index]):
                 vert.co = coordinate
 
-            layers = [profile_verts]
-            for layer_positions in positions[1:]:
+            layers = []
+            for index, layer_positions in enumerate(positions):
+                if index == anchor_index:
+                    layers.append(profile_verts)
+                    continue
                 layer = []
                 for coordinate in layer_positions:
                     vert = bm.verts.new(coordinate)
